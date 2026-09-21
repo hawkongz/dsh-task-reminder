@@ -54,7 +54,7 @@ window.__ModuleLoader__.load({
 		/** 样式标签标识，便于排障与幂等挂载。 */
 		const STYLE_TAG_ID = 'dsh-task-reminder/reminder.css';
 		/** 版本号，随排障钩子暴露。 */
-		const PLUGIN_VERSION = '1.2.2';
+		const PLUGIN_VERSION = '1.2.3';
 
 		/** 提示卡停留时长（毫秒），到点自动收起。 */
 		const TOAST_TTL_MS = 8000;
@@ -151,6 +151,8 @@ window.__ModuleLoader__.load({
 
 		/** 系统通知的 tag：同一会话的重复通知在系统层替换，不堆一摞。 */
 		const NOTIFICATION_TAG = 'dsh-task-reminder';
+		/** 「已经替用户申请过通知权限」的记账键（localStorage）：只问一次。 */
+		const PERMISSION_ASKED_KEY = 'dsh.task-reminder.permission-asked';
 
 		const zh = {
 			'nav': '任务提醒',
@@ -159,7 +161,7 @@ window.__ModuleLoader__.load({
 			'toast.open': '查看',
 			'toast.close': '关闭提醒',
 			'settings.notify.title': '系统通知',
-			'settings.notify.description': '任务完成时发送一条系统通知（操作系统右下角弹出，应用退到后台也能看到）；点击通知回到该会话。默认开启，首次开启会向浏览器申请通知权限',
+			'settings.notify.description': '任务完成时发送一条系统通知（操作系统右下角弹出，应用退到后台也能看到）；点击通知回到该会话。默认开启，首次装载时代码会替您申请一次浏览器通知权限',
 			'notify.unsupported': '当前浏览器不支持系统通知，这一项不会生效（应用内卡片与提示音不受影响）。',
 			'notify.denied': '浏览器已拒绝本站点的通知权限，请到地址栏的站点权限里改为「允许」后再试。',
 			'notify.pending': '已发出权限申请：在弹出的浏览器对话框里选择「允许」后即可收到系统通知。',
@@ -195,7 +197,7 @@ window.__ModuleLoader__.load({
 			'toast.open': 'Open',
 			'toast.close': 'Dismiss reminder',
 			'settings.notify.title': 'System notification',
-			'settings.notify.description': 'Send a system notification when a task finishes (an OS toast you can see while the app is in the background); clicking it returns to that session. On by default; turning it on asks the browser for notification permission',
+			'settings.notify.description': 'Send a system notification when a task finishes (an OS toast you can see while the app is in the background); clicking it returns to that session. On by default; the browser asks for notification permission once on the first load',
 			'notify.unsupported': 'This browser does not support system notifications, so this option has no effect (the in-app card and the chime are unaffected).',
 			'notify.denied': 'The browser has denied notification permission for this site; allow it in the site permissions of the address bar and try again.',
 			'notify.pending': 'Permission requested: choose Allow in the browser prompt and system notifications start working.',
@@ -948,9 +950,13 @@ window.__ModuleLoader__.load({
 			 * @param next - 目标值。
 			 * @returns 申请权限的 Promise（无需申请时返回 undefined）。
 			 */
-			// 在途权限申请的序号：每次写回开关都使它失效，
-			// 避免用户在申请还没回来时又拨过关，过期结果把新状态覆盖掉。
+			// 在途权限申请的序号：每次写回开关、每次自动申请都使它失效，
+			// 避免申请结果在用户又拨过关之后才回来，把新状态覆盖成过期值。
 			let notifyRequestSeq = 0;
+			const applyPermissionResult = (seq, result) => {
+				if (seq !== notifyRequestSeq) return; // 过期结果丢弃
+				permissionStore.set(typeof result === 'string' ? result : notifier.permission());
+			};
 			const setNotify = (next) => {
 				const on = next === true;
 				notifyStore.set(on);
@@ -964,10 +970,7 @@ window.__ModuleLoader__.load({
 					permissionStore.set(current);
 					return undefined;
 				}
-				return notifier.request().then((result) => {
-					if (seq !== notifyRequestSeq) return; // 过期结果丢弃
-					permissionStore.set(typeof result === 'string' ? result : notifier.permission());
-				});
+				return notifier.request().then((result) => applyPermissionResult(seq, result));
 			};
 			/**
 			 * 写回音效下标（坏值归一化到默认档），并立即按新音效与当前音量发声 ——
@@ -1135,6 +1138,24 @@ window.__ModuleLoader__.load({
 					window.removeEventListener('blur', sync);
 				};
 			}, 'dsh-task-reminder: window focus');
+			// 系统通知默认开着：首次装载时替用户申请一次通知权限。浏览器的
+			// Notification API 没有绕过权限的办法（其它插件不需要这一步，是因为
+			// 它们根本不发 OS 通知、只在页面内画东西）。只问一次并记账，不每帧都弹；
+			// 之后权限被重置回 default 时，设置页的「申请通知权限」按钮还能再问。
+			ctx.effect(() => {
+				try {
+					const storage = typeof window !== 'undefined' ? window.localStorage : undefined;
+					if (!storage || typeof storage.getItem !== 'function') return;
+					if (storage.getItem(PERMISSION_ASKED_KEY) === '1') return;
+					if (notifyStore.getSnapshot() !== true) return;
+					if (!notifier.supported || notifier.permission() !== 'default') return;
+					storage.setItem(PERMISSION_ASKED_KEY, '1');
+					const seq = (notifyRequestSeq += 1);
+					void notifier.request().then((result) => applyPermissionResult(seq, result));
+				} catch {
+					// 存储不可用（隐私模式等）就安静退场，设置页的申请按钮仍然可用。
+				}
+			}, 'dsh-task-reminder: notification permission prompt');
 			ctx.effect(() => mountStyles(), 'dsh-task-reminder: styles');
 			ctx.effect(() => () => {
 				for (const off of timers.values()) off();

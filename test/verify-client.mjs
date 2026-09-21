@@ -192,8 +192,14 @@ class FakeAudioContext {
 	}
 }
 
+/** localStorage 桩：记账「已经申请过通知权限」。 */
+const localStorageBacking = {};
 const windowStub = {
 	__ModuleLoader__: { load: (loaded) => { definition = loaded; } },
+	localStorage: {
+		getItem: (key) => (Object.prototype.hasOwnProperty.call(localStorageBacking, key) ? localStorageBacking[key] : null),
+		setItem: (key, value) => { localStorageBacking[key] = String(value); },
+	},
 	Notification: FakeNotification,
 	AudioContext: FakeAudioContext,
 	focus: () => { notificationLog.focused += 1; },
@@ -490,6 +496,11 @@ check('排障状态覆盖六个配置与通知权限', (() => {
 	return ['notify', 'sound', 'soundChoice', 'volume', 'width', 'height', 'notificationPermission', 'notificationSupported'].every((key) => key in state) && !('popup' in state);
 })());
 check('做种后 s1 记为 running、s2/s3 记为空闲', JSON.stringify(windowStub.__dshTaskReminder.state().running) === JSON.stringify([['s1', true], ['s2', false], ['s3', false]]), JSON.stringify(windowStub.__dshTaskReminder.state().running));
+
+// 通知权限自动申请：首次装载 + 通知默认开着 + 权限未定 → 替用户申请一次并记账。
+check('首次装载即替用户申请一次通知权限', notificationLog.requested === 1, String(notificationLog.requested));
+check('申请记录落进 localStorage（之后不再自动问）', windowStub.localStorage.getItem('dsh.task-reminder.permission-asked') === '1', windowStub.localStorage.getItem('dsh.task-reminder.permission-asked'));
+check('自动申请不改动通知开关本身', face.notifyStore.getSnapshot() === true);
 
 // ---------------------------------------------------------------------------
 // 完成事件驱动：边沿、面板判定、常驻卡片、堆叠与回收

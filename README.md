@@ -55,8 +55,11 @@ to the page as a client plugin.
 * **System notifications, on by default:** Web Notification API, so the
   reminder is an OS toast you can see while the app is in the background.
   Clicking it brings the window forward and opens the session. The browser
-  permission is requested from the settings switch (a user gesture), and a
-  denied or unsupported Notification API degrades to a clear hint on the
+  asks for notification permission once on the first load — the Notification
+  API has no permission-free path, which is why in-page-only plugins never
+  show such a prompt. If the permission was reset afterwards, a **Request
+  notification permission** button under the System notification row re-asks.
+  A denied or unsupported Notification API degrades to a clear hint on the
   settings page instead of failing silently.
 * **Dedicated settings page:** `Settings → Task reminder` (no more rows in
   `Settings → General`), with one-click restore defaults.
@@ -115,8 +118,10 @@ dsh --profile web --dump-config | Select-String task-reminder
 ```
 
 > **Done.** Open `Settings → Task reminder`: if the page is there, the plugin
-> is live. Run a task in any session, switch to another application, and wait
-> for the reminder.
+> is live. On the first load the browser shows a one-time
+> notification-permission prompt — choose **Allow** and the system
+> notification is set. Run a task in any session, switch to another
+> application, and wait for the reminder.
 
 ## 📦 Installation
 
@@ -232,11 +237,11 @@ paths plus the in-page permission-request button, and disposal.
   then hard-refresh (`Ctrl + F5`).
 * **No system notification appears.** Check `__dshTaskReminder.state()`:
   `notificationSupported` must be `true` and `notificationPermission` must be
-  `granted`. While the permission is still `default` (never asked), the
-  settings page shows a **Request notification permission** button — click it
-  once and choose Allow. If the permission is `denied`, allow notifications
-  for the site in the browser's address-bar site settings, then click the
-  button again.
+  `granted`. If the permission is still `default` (never answered), the
+  settings page shows a **Request notification permission** button under the
+  System notification row — click it once and choose Allow. If the permission
+  is `denied` (you once chose Block), allow notifications for the site in the
+  browser's address-bar site settings, then click the button again.
 * **The chime is silent.** The volume may be `0`, or the browser's autoplay
   policy blocked the AudioContext before your first interaction. Interact with
   the page once (any click), then it plays.
