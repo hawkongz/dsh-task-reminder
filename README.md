@@ -49,8 +49,6 @@ to the page as a client plugin.
   arpeggio, and soft triangle — generated live with Web Audio, so no audio
   files are shipped. Picking an effect plays it immediately at the current
   volume; there is no separate preview button.
-* **Volume scale shifted up by 20:** the displayed value `80` plays as loud as
-  `100` used to, and `0` is still silent.
 * **System notifications, on by default:** Web Notification API, so the
   reminder is an OS toast you can see while the app is in the background.
   Clicking it brings the window forward and opens the session. The browser
