@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全问题
+    url: https://github.com/hawkongz/dsh-task-reminder/security/advisories/new
+    about: 安全漏洞请通过私人漏洞报告提交，不要创建公开 Issue
+  - name: 使用问题
+    url: https://github.com/hawkongz/dsh-task-reminder/discussions
+    about: 使用疑问与经验交流请到 Discussions

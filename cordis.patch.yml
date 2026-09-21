@@ -1,0 +1,19 @@
+# ============================================================================
+# dsh-task-reminder 的 bundle patch —— 把「对话任务完成提醒」挂进 profile 登记表
+# ============================================================================
+#
+#   - insert：往配置树里添加一条新的插件行（entry）
+#   - id：行标识，patch 覆盖时按它定位
+#   - name：模块名，解析到本包入口 index.js（宿主半侧）
+#   - 因为 package.json 声明了 dsh.bundle.patch 与 dsh.client，
+#     DSH 会同时把这个包扫描为浏览器插件，把 ./client 半侧发给页面。
+#
+#   这一行就是「重启后还在」的凭据：install_bundle 成功后它必须出现在
+#   ~/.dsh/profiles/<profile>/package.json 的 dsh.profile.bundles 里，
+#   并用 `dsh --profile <profile> --dump-config` 能看到 task-reminder 行。
+#
+# ============================================================================
+
+- insert:
+    - id: task-reminder
+      name: 'dsh-task-reminder'
