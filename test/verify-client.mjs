@@ -139,7 +139,7 @@ class FakeNotification {
 		notificationLog.closed += 1;
 	}
 }
-FakeNotification.permission = 'granted';
+FakeNotification.permission = 'default';
 FakeNotification.requestPermission = () => {
 	notificationLog.requested += 1;
 	return Promise.resolve(FakeNotification.permission);
@@ -546,20 +546,22 @@ check('默认 80 音量（整档 +20 → master 1.0）排两声、峰值 0.4375/
 	&& closeTo(audioLog.oscillators[0].freq, 987.77) && closeTo(audioLog.oscillators[1].freq, 1318.51)
 	&& closeTo(audioLog.gains[0].peak, 0.4375) && closeTo(audioLog.gains[1].peak, 0.3625)
 	&& audioLog.oscillators.every((oscillator) => oscillator.type === 'sine'), JSON.stringify(audioLog.gains.map((gain) => gain.peak)));
-check('系统通知默认开启：完成即发通知', notificationLog.created.length === 1, String(notificationLog.created.length));
-check('通知标题/正文/标记', notificationLog.created[0]?.title === '对话任务已完成' && notificationLog.created[0]?.options?.body === '旧任务' && notificationLog.created[0]?.options?.tag === NOTIFICATION_TAG, JSON.stringify(notificationLog.created[0]));
+check('系统通知默认开启但浏览器权限未授：先不发通知', notificationLog.created.length === 0, String(notificationLog.created.length));
 
 // 清场：手动关掉卡片。
 overlayFace().dismiss(toastsNow()[0].id);
 check('dismiss 移除卡片并销毁它的定时器', toastsNow().length === 0 && timerEntries[0].disposed === true);
 
-// 正看着对话窗口（activePanelId === null）：保持安静。
+// 正看着对话窗口（activePanelId === null）：卡与通知保持安静，但提示音照响。
 reportPanel(null);
 const cardsBeforeWatching = toastsNow().length;
 const notificationsBeforeWatching = notificationLog.created.length;
+resetAudioLog();
 statusListener('s2', true);
 statusListener('s2', false);
-check('在对话窗口时任务完成不打扰', toastsNow().length === cardsBeforeWatching, JSON.stringify(toastsNow()));
+check('在对话窗口时不弹卡', toastsNow().length === cardsBeforeWatching, JSON.stringify(toastsNow()));
+check('在对话窗口时提示音照响（不管人在不在）', audioLog.oscillators.length === 2 && audioLog.gains.length === 2, String(audioLog.oscillators.length));
+check('看着对话时的完成另记进 soundWhileWatching', windowStub.__dshTaskReminder.state().stats.soundWhileWatching === 1, String(windowStub.__dshTaskReminder.state().stats.soundWhileWatching));
 check('在对话窗口时也不发通知', notificationLog.created.length === notificationsBeforeWatching);
 check('对话窗口内的完成记进 skippedInConversation', windowStub.__dshTaskReminder.state().stats.skippedInConversation === 1, String(windowStub.__dshTaskReminder.state().stats.skippedInConversation));
 
@@ -584,9 +586,11 @@ overlayFace().dismiss(toastsNow()[0].id);
 // 回到可见且有焦点的对话窗口：重新静默。
 setFocus({ hidden: false, focused: true });
 check('回到有焦点的对话窗口时 away 归位', windowStub.__dshTaskReminder.state().away === false);
+resetAudioLog();
 statusListener('s2', true);
 statusListener('s2', false);
-check('回到对话窗口且窗口有焦点时不打扰', toastsNow().length === 0, JSON.stringify(toastsNow()));
+check('回到对话窗口且窗口有焦点时不弹卡', toastsNow().length === 0, JSON.stringify(toastsNow()));
+check('回到对话窗口后提示音仍然照响', audioLog.oscillators.length === 2 && closeTo(audioLog.gains[0].peak, 0.4375), String(audioLog.oscillators.length));
 
 // 停在其它面板：弹卡。
 reportPanel('settings');
@@ -794,9 +798,11 @@ console.log('系统通知');
 FakeNotification.permission = 'granted';
 resetNotificationLog();
 const notificationsBeforeGrant = windowStub.__dshTaskReminder.state().stats.notifications;
+const cardsBeforeGrant = toastsNow().length;
 statusListener('s2', true);
 statusListener('s2', false);
 check('开启后任务完成发一条系统通知', notificationLog.created.length === 1, String(notificationLog.created.length));
+check('通知能发出去时不重复弹卡', toastsNow().length === cardsBeforeGrant, JSON.stringify(toastsNow()));
 check('通知标题/正文/标记', notificationLog.created[0]?.title === '对话任务已完成' && notificationLog.created[0]?.options?.body === '另一个会话' && notificationLog.created[0]?.options?.tag === NOTIFICATION_TAG, JSON.stringify(notificationLog.created[0]));
 check('通知记进 stats.notifications', windowStub.__dshTaskReminder.state().stats.notifications === notificationsBeforeGrant + 1, String(windowStub.__dshTaskReminder.state().stats.notifications));
 notificationLog.created[0].onclick();
@@ -833,6 +839,7 @@ check('授权后权限状态跟进', face.permissionStore.getSnapshot() === 'gra
 statusListener('s2', true);
 statusListener('s2', false);
 check('授权后任务完成恢复发通知', notificationLog.created.length === 1, String(notificationLog.created.length));
+check('授权后同样只发通知、不弹卡', toastsNow().length === 0, JSON.stringify(toastsNow()));
 for (const toast of toastsNow()) overlayFace().dismiss(toast.id);
 sectionNodes = renderSection();
 check('授权后不再显示拒绝提示', !sectionNodes.some((node) => typeof node.children?.[0] === 'string' && node.children[0].includes('已拒绝')));
@@ -854,6 +861,50 @@ check('不支持时 show 安静返回 null', notifierUnsupported.show('标题', 
 check('不支持时 request 安静 resolve unsupported', await notifierUnsupported.request() === 'unsupported');
 windowStub.Notification = savedNotification;
 check('支持时 supported 为真且权限现读', createNotifier().supported === true && createNotifier().permission() === FakeNotification.permission);
+
+// ⑥ 权限被用户在站点设置里重置回「询问」：设置页给出「申请通知权限」按钮，
+//    点它即发起申请，不必先把开关拨关再拨开。
+FakeNotification.permission = 'default';
+FakeNotification.requestPermission = () => {
+	notificationLog.requested += 1;
+	FakeNotification.permission = 'granted';
+	return Promise.resolve('granted');
+};
+await face.setNotify(true);
+await tick();
+FakeNotification.permission = 'default';
+face.permissionStore.set('default');
+resetNotificationLog();
+sectionNodes = renderSection();
+const permissionButton = sectionNodes.find((node) => node.type === 'button' && node.children?.[0] === '申请通知权限');
+check('权限待定且通知开着时，设置页给出「申请通知权限」按钮', permissionButton !== undefined, JSON.stringify(sectionNodes.filter((node) => node.type === 'button').map((node) => node.children?.[0])));
+permissionButton.props.onClick();
+check('点「申请通知权限」即申请一次', notificationLog.requested === 1, String(notificationLog.requested));
+await tick();
+check('授权后权限状态跟进到 granted', face.permissionStore.getSnapshot() === 'granted', face.permissionStore.getSnapshot());
+
+// ⑦ 通知能发时只发通知、不弹卡：一次完成只出一种提醒。
+resetNotificationLog();
+statusListener('s2', true);
+statusListener('s2', false);
+check('通知授予后任务完成只发系统通知、不再弹卡', notificationLog.created.length === 1 && toastsNow().length === 0, JSON.stringify([notificationLog.created.length, toastsNow().length]));
+for (const toast of toastsNow()) overlayFace().dismiss(toast.id);
+
+// ⑧ 竞态回归：申请还没回来时用户又拨了关，过期的申请结果不得覆盖新状态。
+FakeNotification.permission = 'default';
+let resolveHung;
+FakeNotification.requestPermission = () => {
+	notificationLog.requested += 1;
+	return new Promise((resolve) => { resolveHung = resolve; });
+};
+const hungRequest = face.setNotify(true);
+FakeNotification.permission = 'denied';
+await face.setNotify(false);
+resolveHung('default');
+await hungRequest;
+check('过期申请结果不覆盖新状态（申请竞态回归）', face.permissionStore.getSnapshot() === 'denied', face.permissionStore.getSnapshot());
+await face.setNotify(true);
+check('竞态后开关写回仍正常', face.notifyStore.getSnapshot() === true && face.permissionStore.getSnapshot() === 'denied', face.permissionStore.getSnapshot());
 
 // ---------------------------------------------------------------------------
 // 提示音路径：音效切换、音量整档 +20、静音；回收时关掉 AudioContext

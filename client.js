@@ -2,8 +2,8 @@
  * dsh-task-reminder —— 浏览器半侧（DSH Web）。
  *
  * 目标：对话任务（Agent 回合）结束时，如果用户当前不在对话窗口，就提醒 ——
- *   1. 右下角弹出一张提醒卡（点「查看」回到该会话，常驻通道）；
- *   2. 播放一声提示音（四种合成音效可选，音量可调；切换音效即时发声试听）；
+ *   1. 系统通知发不出时，右下角兜底弹出一张提醒卡（点「查看」回到该会话）；
+ *   2. 播放一声提示音（每次完成都响，不管在不在对话窗口；四种合成音效可选，音量可调；切换音效即时发声试听）；
  *   3. 发送一条系统通知（Web Notification，OS 级 toast，退到后台也看得到，
  *      默认开启，首次开启时借用户手势申请权限）。
  * 提醒方式、音效、音量、卡片宽高全部在「设置 → 任务提醒」独立页里配置，
@@ -54,7 +54,7 @@ window.__ModuleLoader__.load({
 		/** 样式标签标识，便于排障与幂等挂载。 */
 		const STYLE_TAG_ID = 'dsh-task-reminder/reminder.css';
 		/** 版本号，随排障钩子暴露。 */
-		const PLUGIN_VERSION = '1.2.1';
+		const PLUGIN_VERSION = '1.2.2';
 
 		/** 提示卡停留时长（毫秒），到点自动收起。 */
 		const TOAST_TTL_MS = 8000;
@@ -154,7 +154,7 @@ window.__ModuleLoader__.load({
 
 		const zh = {
 			'nav': '任务提醒',
-			'intro': '对话任务（Agent 回合）结束时，如果人不在对话窗口前，就按这里的设置提醒：右下角弹出提醒卡片（常驻，点「查看」回到该会话）、播放提示音、并发送一条系统通知。切换音效会立即按当前音量发声；所有设置写入浏览器本地存储，重启后仍在，「恢复默认」一键回到出厂值。',
+			'intro': '对话任务（Agent 回合）结束时，如果人不在对话窗口前，就按这里的设置提醒：系统通知发不出时右下角兜底弹出提醒卡片（点「查看」回到该会话）、播放提示音（不管在不在对话窗口，每次完成都响）、并发送一条系统通知。切换音效会立即按当前音量发声；所有设置写入浏览器本地存储，重启后仍在，「恢复默认」一键回到出厂值。',
 			'toast.title': '对话任务已完成',
 			'toast.open': '查看',
 			'toast.close': '关闭提醒',
@@ -163,8 +163,9 @@ window.__ModuleLoader__.load({
 			'notify.unsupported': '当前浏览器不支持系统通知，这一项不会生效（应用内卡片与提示音不受影响）。',
 			'notify.denied': '浏览器已拒绝本站点的通知权限，请到地址栏的站点权限里改为「允许」后再试。',
 			'notify.pending': '已发出权限申请：在弹出的浏览器对话框里选择「允许」后即可收到系统通知。',
+			'notify.request': '申请通知权限',
 			'settings.sound.title': '完成提示音',
-			'settings.sound.description': '不在对话窗口时，对话任务完成后播放提示音',
+			'settings.sound.description': '对话任务完成后播放提示音（不管是否正在对话窗口）',
 			'sound.choice.title': '提示音音效',
 			'sound.choice.description': '四种合成音效，用 Web Audio 现场生成，不加载任何音频文件；点选即按当前音量发声',
 			'sound.choice.two-tone': '两声（经典）',
@@ -189,7 +190,7 @@ window.__ModuleLoader__.load({
 		};
 		const en = {
 			'nav': 'Task reminder',
-			'intro': 'When a conversation task (agent turn) finishes while you are away from the conversation window, this page decides how you are reminded: a bottom-right reminder card (always on, click Open to jump back), a chime, and a system notification. Picking a chime effect plays it right away at the current volume; all settings are stored in browser local storage and survive restarts, and Restore defaults puts everything back in one click.',
+			'intro': 'When a conversation task (agent turn) finishes while you are away from the conversation window, this page decides how you are reminded: a bottom-right reminder card as the fallback when the system notification cannot be delivered (click Open to jump back), a chime on every completion, and a system notification. Picking a chime effect plays it right away at the current volume; all settings are stored in browser local storage and survive restarts, and Restore defaults puts everything back in one click.',
 			'toast.title': 'Task complete',
 			'toast.open': 'Open',
 			'toast.close': 'Dismiss reminder',
@@ -198,8 +199,9 @@ window.__ModuleLoader__.load({
 			'notify.unsupported': 'This browser does not support system notifications, so this option has no effect (the in-app card and the chime are unaffected).',
 			'notify.denied': 'The browser has denied notification permission for this site; allow it in the site permissions of the address bar and try again.',
 			'notify.pending': 'Permission requested: choose Allow in the browser prompt and system notifications start working.',
+			'notify.request': 'Request notification permission',
 			'settings.sound.title': 'Completion sound',
-			'settings.sound.description': 'When you are away from the conversation window, play a chime once a conversation task finishes',
+			'settings.sound.description': 'Play a chime once a conversation task finishes, whether or not you are in the conversation window',
 			'sound.choice.title': 'Chime effect',
 			'sound.choice.description': 'Four synthesized chimes generated live with Web Audio; no audio files are loaded. Picking one plays it at the current volume',
 			'sound.choice.two-tone': 'Two-tone (classic)',
@@ -879,11 +881,24 @@ window.__ModuleLoader__.load({
 			];
 			// 通知权限提示：不支持 / 被拒绝 / 等待用户在选择框里点「允许」。
 			let notifyHint = null;
+			let showPermissionButton = false;
 			if (props.notifySupported !== true) notifyHint = t('notify.unsupported');
 			else if (permission === 'denied') notifyHint = t('notify.denied');
-			else if (permission === 'default' && notify === true) notifyHint = t('notify.pending');
+			else if (permission === 'default' && notify === true) {
+				// 通知默认开着，但浏览器权限还没问过：给一个一键申请的入口。
+				notifyHint = t('notify.pending');
+				showPermissionButton = true;
+			}
 			if (notifyHint !== null) {
 				children.push(React.createElement('p', { style: NOTICE_STYLE, key: 'notify-hint' }, notifyHint));
+			}
+			if (showPermissionButton) {
+				children.push(React.createElement('div', { style: { padding: '0 0 16px' }, key: 'notify-request' },
+					React.createElement(TextButton, {
+						disabled: false,
+						label: t('notify.request'),
+						onClick: () => props.setNotify(true),
+					})));
 			}
 			return React.createElement('div', { style: SECTION_STYLE }, children);
 		}
@@ -917,6 +932,7 @@ window.__ModuleLoader__.load({
 				listTicks: 0,
 				completed: 0,
 				skippedInConversation: 0,
+				soundWhileWatching: 0,
 				notifications: 0,
 				lastEvent: null,
 				lastCompletion: null,
@@ -932,9 +948,13 @@ window.__ModuleLoader__.load({
 			 * @param next - 目标值。
 			 * @returns 申请权限的 Promise（无需申请时返回 undefined）。
 			 */
+			// 在途权限申请的序号：每次写回开关都使它失效，
+			// 避免用户在申请还没回来时又拨过关，过期结果把新状态覆盖掉。
+			let notifyRequestSeq = 0;
 			const setNotify = (next) => {
 				const on = next === true;
 				notifyStore.set(on);
+				const seq = (notifyRequestSeq += 1);
 				if (!on || !notifier.supported) {
 					if (notifier.supported) permissionStore.set(notifier.permission());
 					return undefined;
@@ -945,6 +965,7 @@ window.__ModuleLoader__.load({
 					return undefined;
 				}
 				return notifier.request().then((result) => {
+					if (seq !== notifyRequestSeq) return; // 过期结果丢弃
 					permissionStore.set(typeof result === 'string' ? result : notifier.permission());
 				});
 			};
@@ -1039,8 +1060,8 @@ window.__ModuleLoader__.load({
 			};
 
 			/**
-			 * 一轮对话任务结束：用户正看着对话窗口时保持安静；否则弹卡（常驻）、
-			 * 并按开关放音 / 发系统通知。
+			 * 一轮对话任务结束：提示音不管人在不在都响；卡片与系统通知只在
+			 * 用户不在对话窗口时出场。
 			 * @param sessionId - 完成任务的会话。
 			 * @param source - 触发来源（event / list），仅用于排障。
 			 */
@@ -1051,20 +1072,22 @@ window.__ModuleLoader__.load({
 				// 才算用户真的在看着这场对话 —— 其余一切（切到其它面板、切走标签页、
 				// 窗口失焦人在别的应用里）都算非对话窗口，该提醒。
 				const watching = view.panelHook && view.activePanelId === null && view.away !== true;
+				// 提示音是「任务完成了」这个信号本身：不管人在不在对话窗口都响。
+				if (soundStore.getSnapshot() === true) {
+					chime.play(soundChoiceStore.getSnapshot(), volumeStore.getSnapshot());
+					if (watching) stats.soundWhileWatching += 1;
+				}
 				if (watching) {
+					// 正在看对话时卡片与通知保持安静，只留提示音。
 					stats.skippedInConversation += 1;
 					return;
 				}
-				// 提醒卡是常驻通道：不设开关，任务完成就弹（同屏上限 3 张，8 秒自收）。
-				push(sessionId);
-				if (soundStore.getSnapshot() === true) {
-					chime.play(soundChoiceStore.getSnapshot(), volumeStore.getSnapshot());
-				}
-				// 通知要以「真的发得出去」为准：开了开关但权限被拒，不算一条通道。
+				// 通知要以「真的发得出去」为准：开了开关但权限没给，不算一条通道。
 				const notifyGranted = notifier.supported && notifier.permission() === 'granted';
-				if (notifyStore.getSnapshot() === true && notifyGranted) {
-					notify(sessionId, titleOf(ctx, sessionId));
-				}
+				const notifyWanted = notifyStore.getSnapshot() === true && notifyGranted;
+				// 提醒卡是兜底通道：系统通知能发出去时不弹卡，一次完成只出一种提醒。
+				if (!notifyWanted) push(sessionId);
+				if (notifyWanted) notify(sessionId, titleOf(ctx, sessionId));
 			};
 
 			// 用启动时的会话列表给 running 状态做种：页面加载前就在跑的任务，

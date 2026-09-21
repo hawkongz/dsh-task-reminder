@@ -30,10 +30,11 @@ idle. This plugin turns that moment into a real reminder, without leaving the
 browser surface you already use.
 
 When a conversation task finishes while you are **not** looking at the
-conversation window, the plugin can remind you three ways: an always-on
-reminder card in the bottom-right corner, a synthesized chime, and a system
-notification that survives even when the browser is in the background.
-Everything is configured on its own settings page and persists across restarts.
+conversation window, the plugin can remind you three ways: a bottom-right reminder card as
+the fallback when the system notification cannot be delivered, a synthesized
+chime, and a system notification that survives even when the browser is in the
+background. Everything is configured on its own settings page and persists
+across restarts.
 
 The whole plugin lives on the browser side. The host half (`index.js`) is an
 empty `apply() {}`, and there are no runtime dependencies — the host ships it
@@ -41,10 +42,12 @@ to the page as a client plugin.
 
 ## ✨ Features
 
-* **Always-on reminder card:** a bottom-right card (8 px from the corner) shows
-  the session name and jumps straight back to it. Width (240–640 px) and height
-  (0–400 px, `0` = automatic) are adjustable, with a live sample card on the
-  settings page.
+* **Reminder card as the fallback:** when the system notification cannot be
+  delivered (permission not granted, or the browser lacks the Notification
+  API), a bottom-right card (8 px from the corner) shows the session name and
+  jumps straight back to it. Width (240–640 px) and height (0–400 px,
+  `0` = automatic) are adjustable, with a live sample card on the settings
+  page.
 * **Four synthesized chimes:** two-tone (classic), rising three-tone, rising
   arpeggio, and soft triangle — generated live with Web Audio, so no audio
   files are shipped. Picking an effect plays it immediately at the current
@@ -57,10 +60,12 @@ to the page as a client plugin.
   settings page instead of failing silently.
 * **Dedicated settings page:** `Settings → Task reminder` (no more rows in
   `Settings → General`), with one-click restore defaults.
-* **Presence-aware silence:** the reminder stays quiet only while the main
-  area shows the conversation window, the tab is visible, and the window has
-  focus. Switching panels, switching tabs, or focusing another application all
-  count as away — the reminder fires.
+* **Presence-aware silence for the card and the notification:** the reminder
+  stays quiet only while the main area shows the conversation window, the tab
+  is visible, and the window has focus. Switching panels, switching tabs, or
+  focusing another application all count as away — the card and the system
+  notification fire. The chime ignores presence and sounds on every task
+  completion.
 * **Dual-channel completion detection with deduplication:** the host-forwarded
   `api-session/status` event and the official session list's own `running` bit
   share one edge table, so one completion never fires twice.
@@ -209,9 +214,11 @@ node test/verify-client.mjs
 
 Runs the browser half under stubbed services (no browser needed) and asserts
 the module identity, the wiring, the edge detection, both deduplication
-channels, presence-aware silence, the six settings' defaults / read / write /
-restore, the oscillator parameters for every effect and volume, the card and
-preview styles, all three notification permission paths, and disposal.
+channels, presence-aware silence for the card and the notification, the chime
+sounding on every completion regardless of presence, the six settings'
+defaults / read / write / restore, the oscillator parameters for every effect
+and volume, the card and preview styles, all three notification permission
+paths plus the in-page permission-request button, and disposal.
 
 ## 🔧 Troubleshooting
 
@@ -225,8 +232,11 @@ preview styles, all three notification permission paths, and disposal.
   then hard-refresh (`Ctrl + F5`).
 * **No system notification appears.** Check `__dshTaskReminder.state()`:
   `notificationSupported` must be `true` and `notificationPermission` must be
-  `granted`. If the permission is `denied`, allow notifications for the site
-  in the browser's address-bar site settings and toggle the switch again.
+  `granted`. While the permission is still `default` (never asked), the
+  settings page shows a **Request notification permission** button — click it
+  once and choose Allow. If the permission is `denied`, allow notifications
+  for the site in the browser's address-bar site settings, then click the
+  button again.
 * **The chime is silent.** The volume may be `0`, or the browser's autoplay
   policy blocked the AudioContext before your first interaction. Interact with
   the page once (any click), then it plays.
