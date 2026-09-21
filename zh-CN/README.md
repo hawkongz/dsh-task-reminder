@@ -59,47 +59,40 @@ Agent 回合在 DeepSeek Harness 里跑着，你却切到别的窗口看别的�
 ## 🚀 快速开始
 
 > **前置条件：** 跑着 `web` profile 的 DeepSeek Harness（`dsh web`）、
-> Node.js 20 或更高（`npm` 与自检要用），以及一个能硬刷新的浏览器。
+> `PATH` 上有 pnpm（`dsh plugin` 命令会把参数转给它），以及一个能硬刷新的
+> 浏览器。
 
 **第一步 — 打开终端**
 
 * macOS / Linux：打开终端（Terminal）。
 * Windows：`Win + R`，输入 `powershell`，回车。
 
-**第二步 — 把包装进 profile**
+**第二步 — 一条命令完成安装与登记**
 
-插件按模块名解析，所以要装进 profile 目录本身：
+`dsh plugin` 把包装进 profile 目录，并顺手把它追加进 profile 的
+`dsh.profile.bundles`——不需要单独登记：
 
 ```powershell
-# Windows（PowerShell）
-cd "$env:USERPROFILE\.dsh\profiles\web"
-npm install "github:hawkongz/dsh-task-reminder"
+# Windows（PowerShell）——在任意目录执行都行
+dsh plugin --profile web add github:hawkongz/dsh-task-reminder
 ```
 
 ```bash
 # macOS / Linux
-cd ~/.dsh/profiles/web
-npm install "github:hawkongz/dsh-task-reminder"
+dsh plugin --profile web add github:hawkongz/dsh-task-reminder
 ```
 
 想装指定版本而不是默认分支，就带上标签：
-`npm install "github:hawkongz/dsh-task-reminder#v1.2.1"`。
+`dsh plugin --profile web add github:hawkongz/dsh-task-reminder#v1.2.1`。
+等这个包发布到 npm registry 之后， bare 包名同样可用：
+`dsh plugin --profile web add dsh-task-reminder`。
 
-**第三步 — 登记 bundle 行**
-
-在 Harness 会话里调用 `plugin_manager` 工具，`action: install_bundle`，
-`target` 填 `<profile>\node_modules\dsh-task-reminder`（也就是刚装好的包）。
-也可以手动把 `"dsh-task-reminder"` 加进 `<profile>\package.json` 的
-`dsh.profile.bundles` 数组——加载器会自动应用 bundle 自带的
-`cordis.patch.yml`，插入 `task-reminder` 行。
-
-**第四步 — 重启并验证**
+**第三步 — 重启并验证**
 
 重启宿主（`dsh web`），再硬刷新浏览器（`Ctrl + F5`）。改过 `client.js` 之后
 浏览器不会热读，所以每次更新这两步都省不掉。验证登记结果：
 
 ```powershell
-node -e "console.log(require(process.env.USERPROFILE + '/.dsh/profiles/web/package.json').dsh.profile.bundles)"
 dsh --profile web --dump-config | Select-String task-reminder
 ```
 
@@ -111,15 +104,21 @@ dsh --profile web --dump-config | Select-String task-reminder
 ### 前置条件
 
 * 跑着 `web` profile 的 DeepSeek Harness（`dsh web`）。
-* Node.js 20 或更高。
+* `PATH` 上有 pnpm——`dsh plugin` 会把参数原样转给 profile 目录里的 pnpm。
+* Node.js 20 或更高（自检要用）。
 * 支持 Web Audio、最好也支持 Notification API 的浏览器。
 
-### 用 npm 安装
+### 用 dsh plugin 安装
 
 ```powershell
-cd "$env:USERPROFILE\.dsh\profiles\web"
-npm install "github:hawkongz/dsh-task-reminder"
+dsh plugin --profile web add github:hawkongz/dsh-task-reminder
 ```
+
+一条命令同时做两件事：把包装进 profile，以及把 `dsh-task-reminder` 追加进
+profile 的 `dsh.profile.bundles`；随后加载器应用 bundle 自带的
+`cordis.patch.yml`，插入 `task-reminder` 行。本包不带任何构建脚本，pnpm 不会
+拦住安装（那类需要在 profile 的 `pnpm-workspace.yaml` 里加 `allowBuilds`
+的情况只发生在带 prepare 脚本的 git 托管包上）。
 
 包里带着插件需要的全部文件：`index.js`（宿主半侧）、`client.js`（浏览器半侧）、
 `cordis.patch.yml`（bundle 行），以及 `test/` 下的自检脚本。
@@ -127,25 +126,27 @@ npm install "github:hawkongz/dsh-task-reminder"
 ### 卸载
 
 ```powershell
-cd "$env:USERPROFILE\.dsh\profiles\web"
-npm uninstall dsh-task-reminder
+dsh plugin --profile web remove dsh-task-reminder
 ```
 
-然后用 `plugin_manager` 工具停用这一行（`action: set_bundle`，
-`target: dsh-task-reminder`，`enabled: false`），或者把 `"dsh-task-reminder"`
-从 `dsh.profile.bundles` 里删掉，并重启 `dsh web`。
+`remove` 一并卸包并整理 bundle 清单。然后重启 `dsh web`，让这一行从组合配置里
+消失。
 
 ### 本地开发安装
 
-要改代码而不是用发布包，就把 profile 指到你的工作副本：
+要改代码而不是用发布包，就把 checkout 链进 profile（`plugin_manager` 工具的
+`install_bundle` 内部做的就是这件事）：
 
 ```powershell
-cd "$env:USERPROFILE\.dsh\profiles\web"
-npm install "C:\path\to\dsh-task-reminder"
+# Windows（PowerShell）——在放着 checkout 的目录执行
+dsh plugin --profile web add link:.\dsh-task-reminder
+
+# 或者用绝对路径，在任意目录执行
+dsh plugin --profile web add link:C:\Users\20105\OneDrive\Desktop\ds\dsh-task-reminder
 ```
 
 记住重启规则：改 `client.js` → 跑 `node test/verify-client.mjs` → 重启
-`dsh web` → 硬刷新浏览器。
+`dsh web` → 硬刷新浏览器——宿主不会热读改过的 `client.js`。
 
 ## 📖 使用方法
 
@@ -195,7 +196,8 @@ node test/verify-client.mjs
 
 * **设置页不见了。** 插件在 `dsh.client.inject` 里声明了
   `@deepseek-ai/dsh-client-ui-settings`；确认安装完整后重启 `dsh web` 并硬刷新。
-  还是没有，就用 `plugin_manager` 工具重新登记一次 bundle。
+  还是没有，就把安装命令原样再跑一遍：
+  `dsh plugin --profile web add github:hawkongz/dsh-task-reminder`。
 * **改了代码没生效。** 宿主只在进程启动时读客户端产物，浏览器又会缓存旧 bundle。
   重启 `dsh web`，再硬刷新（`Ctrl + F5`）。
 * **系统通知不弹。** 看 `__dshTaskReminder.state()`：`notificationSupported`

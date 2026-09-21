@@ -31,6 +31,13 @@ cd dsh-task-reminder
 node test/verify-client.mjs
 ```
 
+把本地 checkout 装进 profile 开发（`link:` 让 profile 指向工作副本，改完即生效）：
+
+```powershell
+# 在放着 checkout 的目录执行
+dsh plugin --profile web add link:.\dsh-task-reminder
+```
+
 改完 `client.js` 后的生效流程（宿主不热读客户端产物）：
 
 ```bash

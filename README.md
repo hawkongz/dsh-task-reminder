@@ -70,51 +70,42 @@ to the page as a client plugin.
 ## 🚀 Quick Start
 
 > **What you need:** DeepSeek Harness running with the `web` profile
-> (`dsh web`), Node.js 20 or newer (for `npm` and the self-check), and a
-> browser you can hard-refresh.
+> (`dsh web`), pnpm on your `PATH` (the `dsh plugin` command forwards to it),
+> and a browser you can hard-refresh.
 
 **Step 1 — Open a terminal**
 
 * macOS / Linux: open Terminal.
 * Windows: `Win + R`, type `powershell`, press Enter.
 
-**Step 2 — Install the package into your profile**
+**Step 2 — Install and register with one command**
 
-The plugin resolves by module name, so install it into the profile directory
-itself:
+`dsh plugin` installs the package into the profile directory and appends the
+bundle to the profile's `dsh.profile.bundles` in a single step — no manual
+registration:
 
 ```powershell
-# Windows (PowerShell)
-cd "$env:USERPROFILE\.dsh\profiles\web"
-npm install "github:hawkongz/dsh-task-reminder"
+# Windows (PowerShell) — run it from any directory
+dsh plugin --profile web add github:hawkongz/dsh-task-reminder
 ```
 
 ```bash
 # macOS / Linux
-cd ~/.dsh/profiles/web
-npm install "github:hawkongz/dsh-task-reminder"
+dsh plugin --profile web add github:hawkongz/dsh-task-reminder
 ```
 
-To install a specific release instead of the default branch, append the tag:
-`npm install "github:hawkongz/dsh-task-reminder#v1.2.1"`.
+To pin a release instead of the default branch, append the tag:
+`dsh plugin --profile web add github:hawkongz/dsh-task-reminder#v1.2.1`.
+Once the package is published to the npm registry, the bare name works the
+same way: `dsh plugin --profile web add dsh-task-reminder`.
 
-**Step 3 — Register the bundle row**
-
-In a Harness session, call the `plugin_manager` tool with
-`action: install_bundle` and
-`target: <profile>\node_modules\dsh-task-reminder` (the package you just
-installed). Alternatively, add `"dsh-task-reminder"` to the
-`dsh.profile.bundles` array in `<profile>\package.json` by hand — the loader
-applies the bundle's `cordis.patch.yml` and inserts the `task-reminder` row.
-
-**Step 4 — Restart and verify**
+**Step 3 — Restart and verify**
 
 Restart the host (`dsh web`), then hard-refresh the browser (`Ctrl + F5`).
 The browser does not hot-read a changed `client.js`, so both steps are
 required after every update. Verify the registration:
 
 ```powershell
-node -e "console.log(require(process.env.USERPROFILE + '/.dsh/profiles/web/package.json').dsh.profile.bundles)"
 dsh --profile web --dump-config | Select-String task-reminder
 ```
 
@@ -127,15 +118,22 @@ dsh --profile web --dump-config | Select-String task-reminder
 ### Prerequisites
 
 * DeepSeek Harness (`dsh web`) with a `web` profile.
-* Node.js 20 or newer.
+* pnpm on your `PATH` — `dsh plugin` forwards its arguments to pnpm inside the
+  profile directory.
+* Node.js 20 or newer (for the self-check).
 * A browser that supports Web Audio and (optionally) the Notification API.
 
-### Install with npm
+### Install with dsh plugin
 
 ```powershell
-cd "$env:USERPROFILE\.dsh\profiles\web"
-npm install "github:hawkongz/dsh-task-reminder"
+dsh plugin --profile web add github:hawkongz/dsh-task-reminder
 ```
+
+This installs the package into the profile and appends `dsh-task-reminder` to
+the profile's `dsh.profile.bundles`; the loader then applies the bundle's
+`cordis.patch.yml` and inserts the `task-reminder` row. The package ships no
+build scripts, so pnpm never blocks the install (unlike git-hosted packages
+that need an `allowBuilds` entry in the profile's `pnpm-workspace.yaml`).
 
 The package contains everything the plugin needs: `index.js` (host half),
 `client.js` (browser half), `cordis.patch.yml` (the bundle row), and the
@@ -144,26 +142,29 @@ self-check under `test/`.
 ### Uninstall
 
 ```powershell
-cd "$env:USERPROFILE\.dsh\profiles\web"
-npm uninstall dsh-task-reminder
+dsh plugin --profile web remove dsh-task-reminder
 ```
 
-Then disable the row with the `plugin_manager` tool
-(`action: set_bundle`, `target: dsh-task-reminder`, `enabled: false`), or
-remove `"dsh-task-reminder"` from `dsh.profile.bundles`, and restart `dsh web`.
+The `remove` drops the package and reconciles the bundle list in one step.
+Then restart `dsh web` so the row leaves the composed config.
 
 ### Local development install
 
-To work on a checkout instead of the published package, point the profile at
-your working copy:
+To iterate on a checkout instead of the published package, link it into the
+profile (this is what the `plugin_manager` tool's `install_bundle` action
+creates internally):
 
 ```powershell
-cd "$env:USERPROFILE\.dsh\profiles\web"
-npm install "C:\path\to\dsh-task-reminder"
+# Windows (PowerShell) — from the directory that contains the checkout
+dsh plugin --profile web add link:.\dsh-task-reminder
+
+# or with an absolute path, from anywhere
+dsh plugin --profile web add link:C:\Users\20105\OneDrive\Desktop\ds\dsh-task-reminder
 ```
 
 Remember the restart rule: edit `client.js`, run `node test/verify-client.mjs`,
-restart `dsh web`, hard-refresh the browser.
+restart `dsh web`, hard-refresh the browser — the host does not hot-read a
+changed `client.js`.
 
 ## 📖 Usage
 
@@ -217,7 +218,8 @@ preview styles, all three notification permission paths, and disposal.
 * **The settings page is missing.** The plugin declares
   `@deepseek-ai/dsh-client-ui-settings` in `dsh.client.inject`; make sure the
   installation completed, then restart `dsh web` and hard-refresh. If the page
-  still does not appear, re-register the bundle with the `plugin_manager` tool.
+  still does not appear, re-run
+  `dsh plugin --profile web add github:hawkongz/dsh-task-reminder`.
 * **Code changes have no effect.** The host reads client plugins only at
   process start and the browser caches the old bundle. Restart `dsh web`,
   then hard-refresh (`Ctrl + F5`).
