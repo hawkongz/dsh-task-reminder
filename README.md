@@ -59,8 +59,19 @@ to the page as a client plugin.
   and **error stop** (`api-session/error` — any failed turn: a gateway HTTP
   error such as 400 / 401 / 429 / 500 / 502, a provider outage, or a
   transport failure). One stop is
-  reported once, error first: the completion toast waits out a short 500 ms
-  merge window and stands down when an error for the same stop arrives.
+  reported once, error first: when a stop arrives, the plugin classifies it
+  from the session's durable log (the `turn/end` reason) — a completed turn
+  (or one that hit its output ceiling) reports completion, a failed turn
+  reports the error with the gateway's own message and never a completion
+  toast, and a cancelled turn reports nothing. The classification read also
+  takes the last `turn/start`: while the newest turn is still open (that
+  `turn/end` belongs to the previous turn), the plugin retries until it
+  lands — pressing Stop is never misreported as a completion. The chime and
+  the toast go out together in the same pass. If classification is
+  unavailable, the completion toast goes out at once and a same-stop error
+  arriving within 5 s retracts it — error first, one reminder per stop. A
+  repeated edge while classification is in flight (a stale list replay) is
+  held back by the in-flight guard and the completion→completion dedupe.
   Two timing modes — **Always** (every stop) or **Only when unfocused**
   (tab switched away or window unfocused) — pick one on the settings page. The
   browser asks for notification permission once on the first load — the
@@ -76,9 +87,14 @@ to the page as a client plugin.
   whatever the toast timing mode.
 * **Dedicated settings page:** `Settings → Task reminder` (no more rows in
   `Settings → General`), with one-click restore defaults.
-* **Dual-channel completion detection with deduplication:** the host-forwarded
-  `api-session/status` event and the official session list's own `running` bit
-  share one edge table, so one completion never fires twice.
+* **Three-channel completion detection with deduplication:** the host-forwarded
+  `api-session/status` event, the official session list's own `running` bit, and
+  the `running` bit inside the `uiSession.sessionStatus` snapshot (the same
+  source as the sidebar's running light — the reliable path when a forked
+  session's list projection is stale) share one edge table, so one completion
+  never fires twice; a repeated edge while classification is in flight is
+  additionally held back by the in-flight guard and the completion→completion
+  dedupe.
 * **All values persist in browser local storage** and survive restarts, so the
   host half needs no settings namespace.
 
@@ -208,8 +224,8 @@ In the browser DevTools console:
 
 ```js
 // Window focus state, the five settings, toast timing, notification
-// permission, per-session running records, channel counters and the last
-// stop of each kind
+// permission, per-session running records, channel counters, duplicate
+// suppressions, recent stops and the last stop of each kind
 __dshTaskReminder.state()
 
 // Send a task-complete toast right away and play the chime (does not wait for a task)
@@ -226,9 +242,11 @@ node test/verify-client.mjs
 ```
 
 Runs the browser half under stubbed services (no browser needed) and asserts
-the module identity, the wiring, the edge detection, both deduplication
-channels, the two toast timing modes, the three stop reasons (completion,
-pending question, error) with the error-first merge for one stop, the chime
+the module identity, the wiring, the edge detection, the three deduplication
+channels with repeated-edge suppression, the two toast timing modes, the
+three stop reasons (completion, pending question, error) with the turn/end
+classification (including the unclosed-turn retry that keeps a cancel from
+being misreported) and late-error retraction for one stop, the chime
 sounding on every stop regardless of window state, the five settings'
 defaults / read / write / restore, the oscillator parameters for every effect
 and volume, all notification permission paths plus the in-page

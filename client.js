@@ -15,18 +15,33 @@
  *
  * 七条实现要点：
  *
- * 1. 「任务完成」的信号有两条通道，共用一张 running 边沿表，天然去重：
+ * 1. 「任务完成」的信号有三条通道，共用一张 running 边沿表，天然去重：
  *    通道一：宿主转发事件 `api-session/status`（`API_REMOTE_FORWARDED_EVENTS`
  *    白名单内），浏览器侧 `ctx.remote.$on(name, listener)` 订阅；
- *    通道二：官方会话列表自身的 running 位（`ctx.sessions.list`，与 sidebar
- *    运行指示灯同源）。转发事件万一没递到本插件，通道二仍能收到完成。
+ *    通道二：官方会话列表自身的 running 位（`ctx.sessions.list`）；
+ *    通道三：`ctx.uiSession.sessionStatus` 快照里每个会话的 running 位（与
+ *    sidebar 运行指示灯同源；fork 出来的子会话列表投影不可靠——陈旧 /
+ *    不翻，这条路是最可靠的一路）。转发事件万一没递到本插件，另外两条
+ *    路仍能收到完成。
  * 2. 「等你回答」读 `ctx.uiSession.sessionStatus`（根级只读快照：
  *    sessionId → { running, pendingInteraction, completionUnread }）：
  *    pendingInteraction 从无到有就是 Agent 阻塞在等用户（ask_user_question /
- *    plan-review）。只读订阅，绝不参与 user-questions/request 应答链。
+ *    plan-review）。同一个快照的 running 位同时是完成检测的第三通道
+ *    （见要点 1）。只读订阅，绝不参与 user-questions/request 应答链。
  * 3. 「出错停止」接宿主转发事件 `api-session/error`(sessionId, message)。
- *    错误与可能随后（或先行）到达的 status 边沿可能是同一次停止的两次播报，
- *    用合并窗口去重（错误优先，完成弹窗延后一个窗口再决定发不发）。
+ *    一次停止只报一次、报对一次：停止边沿（running→非 running）到达时读
+ *    会话持久日志最后一条 `turn/end` 的 reason 分类——completed /
+ *    max-tokens 报完成，error 报错误（正文取 reason.error.message，即
+ *    网关原文）且不出现完成弹窗，aborted / blocked / interrupted 不报
+ *    （取消、询问已报、崩溃孤儿回合）。读的同时取最后一条 `turn/start`：
+ *    最新回合还没闭合（start 比 end 新）说明手里是上一个回合的 turn/end，
+ *    当次读不到、重试等它落盘——否则点停止会误报「完成」。分类读不到才
+ *    退回完成弹窗，此时 5 秒内后到的 api-session/error 撤回完成弹窗只留
+ *    错误（错误优先，不重复响音）；后到的同类报告也按窗口去重。同一次
+ *    停止的重复边沿（分类在途时列表陈旧回放）由在途守卫与完成→完成
+ *    去重双兜底，只报一次。
+ *    询问（pendingInteraction 出现边沿）单独弹「等待你的回答」；回答后
+ *    紧随的那次完成不报（一次交互一次提醒）。
  * 4. 「窗口是否在前台」只看两个信号：标签页可见（document.hidden === false）
  *    且窗口有焦点（document.hasFocus()）。切走标签页、窗口失焦（人在别的
  *    应用里）都算非前台；拿不到这两个信号时按「在前台」处理（宁可少弹，
@@ -62,7 +77,7 @@ window.__ModuleLoader__.load({
 		/** 本地化命名空间（同时是设置页文案的键空间）。 */
 		const NS = 'task-reminder';
 		/** 版本号，随排障钩子暴露。 */
-		const PLUGIN_VERSION = '1.4.1';
+		const PLUGIN_VERSION = '1.4.2';
 
 		/** 五个可配置项的本地持久化键（createSnapshotStore 的 persist.name）。 */
 		const NOTIFY_PERSIST_KEY = 'dsh.task-reminder.notify';
@@ -158,7 +173,7 @@ window.__ModuleLoader__.load({
 
 		const zh = {
 			'nav': '任务提醒',
-			'intro': '对话任务（Agent 回合）停止时发送 Windows 系统弹窗（Web Notification，操作系统右下角原生通知，浏览器退到后台也看得到；点击弹窗回到该会话），并播放提示音。三种停止都会提醒：任务完成、Agent 抛出问题等你回答（ask_user_question 挂起）、出错停止（如 400 的红色错误）；同一次停止只报一次（错误优先）。弹窗时机二选一：「任何情况都弹」不管窗口是否在前台；「仅非前台窗口」在切走标签页或浏览器窗口失焦（人在别的应用）时才弹。首次装载时代码会替您申请一次浏览器通知权限（按 Origin 生效，授权一次本站点全部通用，已授权则不会再问）；所有设置写入浏览器本地存储，重启后仍在，「恢复默认」一键回到出厂值。',
+			'intro': '对话任务（Agent 回合）停止时发送 Windows 系统弹窗（Web Notification，操作系统右下角原生通知，浏览器退到后台也看得到；点击弹窗回到该会话），并播放提示音。三种停止都会提醒：任务完成、Agent 抛出问题等你回答（ask_user_question 挂起）、出错停止（任何让回合失败的错误：网关 HTTP 错误如 400 / 401 / 429 / 500 / 502、服务商故障、连接失败）；同一次停止只报一次（错误优先）。弹窗时机二选一：「任何情况都弹」不管窗口是否在前台；「仅非前台窗口」在切走标签页或浏览器窗口失焦（人在别的应用）时才弹。首次装载时代码会替您申请一次浏览器通知权限（按 Origin 生效，授权一次本站点全部通用，已授权则不会再问）；所有设置写入浏览器本地存储，重启后仍在，「恢复默认」一键回到出厂值。',
 			'settings.notify.title': '系统弹窗',
 			'toast.completed.title': '对话任务已完成',
 			'toast.question.title': '等待你的回答',
@@ -175,7 +190,7 @@ window.__ModuleLoader__.load({
 			'settings.sound.title': '完成提示音',
 			'settings.sound.description': '对话任务完成后播放提示音（不管是否正在对话窗口）',
 			'sound.choice.title': '提示音音效',
-			'sound.choice.description': '四种合成音效，用 Web Audio 现场生成，不加载任何音频文件；点选即按当前音量发声',
+			'sound.choice.description': '四种合成音效，用 Web Audio 现场生成，不加载任何音频文件；点选即按当前音量发声。浏览器重启后第一次播放有 3-5 秒延迟（音频设备冷启动），之后立即出声',
 			'sound.choice.two-tone': '两声（经典）',
 			'sound.choice.three-tone': '三声上扬',
 			'sound.choice.arpeggio': '上升琶音',
@@ -191,7 +206,7 @@ window.__ModuleLoader__.load({
 		};
 		const en = {
 			'nav': 'Task reminder',
-			'intro': 'When a conversation task (agent turn) stops, a Windows system toast goes out (Web Notification, the native notification in the bottom-right corner of your OS, visible while the browser is in the background; click it to return to that session) and a chime plays. Three stop reasons are covered: task complete, the agent is waiting for your answer (ask_user_question pending), and an error stop (a red error such as 400) — one stop is reported once, with the error taking precedence. The toast timing has two modes: Always, no matter whether the browser window is in the foreground, or Only when unfocused, which fires when you switch the tab away or the browser window loses focus (you are in another app). On the first load the code asks for browser notification permission once (per origin, shared by every plugin on this site; never asked again once granted); all settings are stored in browser local storage and survive restarts, and Restore defaults puts everything back in one click.',
+			'intro': 'When a conversation task (agent turn) stops, a Windows system toast goes out (Web Notification, the native notification in the bottom-right corner of your OS, visible while the browser is in the background; click it to return to that session) and a chime plays. Three stop reasons are covered: task complete, the agent is waiting for your answer (ask_user_question pending), and an error stop (any failed turn — a gateway HTTP error such as 400 / 401 / 429 / 500 / 502, a provider outage, or a connection failure) — one stop is reported once, with the error taking precedence. The toast timing has two modes: Always, no matter whether the browser window is in the foreground, or Only when unfocused, which fires when you switch the tab away or the browser window loses focus (you are in another app). On the first load the code asks for browser notification permission once (per origin, shared by every plugin on this site; never asked again once granted); all settings are stored in browser local storage and survive restarts, and Restore defaults puts everything back in one click.',
 			'settings.notify.title': 'System toast',
 			'toast.completed.title': 'Task complete',
 			'toast.question.title': 'Waiting for your answer',
@@ -208,7 +223,7 @@ window.__ModuleLoader__.load({
 			'settings.sound.title': 'Completion sound',
 			'settings.sound.description': 'Play a chime once a conversation task finishes, whether or not you are in the conversation window',
 			'sound.choice.title': 'Chime effect',
-			'sound.choice.description': 'Four synthesized chimes generated live with Web Audio; no audio files are loaded. Picking one plays it at the current volume',
+			'sound.choice.description': 'Four synthesized chimes generated live with Web Audio; no audio files are loaded. Picking one plays it at the current volume. The first play after a browser restart can take 3-5 s (audio-device cold start); afterwards it is immediate',
 			'sound.choice.two-tone': 'Two-tone (classic)',
 			'sound.choice.three-tone': 'Rising three-tone',
 			'sound.choice.arpeggio': 'Rising arpeggio',
@@ -805,14 +820,27 @@ window.__ModuleLoader__.load({
 			const permissionStore = createSnapshotStore(notifier.permission());
 			// 每个会话最近一次听到的 running 状态，用来识别「running → 非 running」的边沿。
 			const runningSessions = new Map();
-			// 同一会话「停止」的三种原因合并：error 与 status 边沿可能是同一次
-			// 停止的两次播报（到达顺序不定），用合并窗口去重，错误优先。
-			const STOP_MERGE_MS = 500;
-			const recentErrors = new Map(); // sessionId → 最近一次错误时刻
-			const pendingCompletions = new Map(); // sessionId → 待定完成弹窗的取消函数
+			// 一次停止只报一次、报对一次：停止边沿到达时读会话持久日志最后一条
+			// turn/end 的 reason 分类（completed / max-tokens → 完成，error →
+			// 错误且不出现完成弹窗，aborted / blocked / interrupted → 不报）。
+			// 分类读不到时退回完成弹窗，用对账窗口兜底：5 秒内后到的
+			// api-session/error 撤回完成弹窗只留错误、不重响提示音。
+			const REPORT_GRACE_MS = 5000;
+			// 分类时限放宽到 700ms、重试加到 3 次：turn/end 落盘不在回合边界
+			// 同步 flush，取消（aborted）的 turn/end 常要再等一两拍才读得到。
+			const CLASSIFY_TIMEOUT_MS = 700;
+			const CLASSIFY_RETRIES = 3;
+			const CLASSIFY_RETRY_MS = 120;
+			const recentReports = new Map(); // sessionId → { kind, notification, at, cancel }
+			// 一次性 grace：询问回答后紧随的那次完成不报（一次交互一次提醒）。
+			const questionGrace = new Set(); // sessionId
+			// 同一次停止的分类在途标记（token）：分类是异步的（RPC 读持久日志），
+			// 窗口期内列表陈旧回放把边沿表冲回 true 再翻 false 会产生第二次边沿，
+			// 此时直接忽略——同一次停止只走一次分类。
+			const completing = new Map(); // sessionId → token
 			// 有待答交互（ask_user_question / plan-review）的会话集合，按出现边沿提醒。
 			const pendingQuestions = new Set();
-			// 排障计数：事件/列表两条通道各收到多少、三种停止各报了多少。
+			// 排障计数：三条通道各收到多少、三种停止各报了多少、重复抑制多少。
 			const stats = {
 				events: 0,
 				listTicks: 0,
@@ -822,6 +850,8 @@ window.__ModuleLoader__.load({
 				skippedFocused: 0,
 				sounds: 0,
 				notifications: 0,
+				stopDuplicates: 0,
+				recentStops: [], // 最近 6 条 { kind, sessionId, at }
 				lastEvent: null,
 				lastCompletion: null,
 				lastQuestion: null,
@@ -905,6 +935,7 @@ window.__ModuleLoader__.load({
 					}
 				});
 				if (notification !== null) stats.notifications += 1;
+				return notification;
 			};
 
 			/** 按当前开关排一次提示音，并记进排障计数。 */
@@ -932,8 +963,8 @@ window.__ModuleLoader__.load({
 
 			/**
 			 * 记录一次 running 观测，判断「是不是刚跑完」。
-			 * 两条检测通道（转发事件 + 官方会话列表）共用这张表：谁先看到边沿谁触发，
-			 * 后到的那方看到的已是非边沿，天然去重。
+			 * 三条检测通道（转发事件 + 官方会话列表 + sessionStatus 快照）共用
+			 * 这张表：谁先看到边沿谁触发，后到的那方看到的已是非边沿，天然去重。
 			 * @param sessionId - 会话 id。
 			 * @param running - 是否正在运行。
 			 * @returns 是否刚刚从 running 掉回非 running。
@@ -945,34 +976,164 @@ window.__ModuleLoader__.load({
 			};
 
 			/**
-			 * 合并窗口到点：真正决定发不发「完成」弹窗。窗口内刚报过错的会话
-			 * 只算错误，一次停止只出一种提醒（错误与 status 边沿无序到达
-			 * 也能正确合并）。
+			 * 读会话持久日志最后一条 turn/end 的原因。turn/end 落盘不在回合
+			 * 边界同步 flush，RPC 读存储会强制 flush；读不到就重试几次，
+			 * 仍读不到返回 null（调用方走兜底）。
+			 * 同时取最后一条 `turn/start`：最新回合还没闭合（start 比 end 新）时，
+			 * 最后一条 turn/end 属于上一个回合（停止场景常是上一个回合的
+			 * completed）——此时当次读不到，交给重试等本次回合的 turn/end 落盘，
+			 * 避免把取消误报成「完成」。
 			 * @param sessionId - 会话 id。
-			 * @param source - 触发来源（event / list），仅用于排障。
+			 * @returns turn/end 的 reason，或 null。
 			 */
-			const flushCompletion = (sessionId, source) => {
-				pendingCompletions.delete(sessionId);
-				const lastError = recentErrors.get(sessionId);
-				if (lastError !== undefined && Date.now() - lastError < STOP_MERGE_MS) return; // 已按错误报过
+			const readTurnEndReason = async (sessionId) => {
+				for (let attempt = 0; ; attempt += 1) {
+					let reason = null;
+					try {
+						reason = await ctx.sessions.using(sessionId, { source: 'task-reminder' }, async (reference) => {
+							const binding = await reference.ready;
+							const entries = binding.eventSource.getSnapshot().entries ?? [];
+							let lastEnd = null; // 最后一条 turn/end
+							let lastStart = null; // 最后一条 turn/start
+							for (let i = entries.length - 1; i >= 0; i -= 1) {
+								const entry = entries[i];
+								if (entry?.type !== 'event') continue;
+								if (lastEnd === null && entry.event?.type === 'turn/end') lastEnd = entry.event;
+								if (lastStart === null && entry.event?.type === 'turn/start') lastStart = entry.event;
+								if (lastEnd !== null && lastStart !== null) break;
+							}
+							if (lastEnd === null) return null;
+							// 最新回合还没闭合：最后一条 turn/end 是上一个回合的，当次读不到。
+							const endTurn = lastEnd.data?.turn;
+							const startTurn = lastStart?.data?.turn;
+							if (typeof endTurn === 'number' && typeof startTurn === 'number' && endTurn < startTurn) return null;
+							return lastEnd.data?.reason ?? null;
+						});
+					} catch {
+						// retain / open 失败（会话不在册、Host 侧拒绝等）：当次读不到。
+					}
+					if (reason !== null && reason !== undefined) return reason;
+					if (attempt >= CLASSIFY_RETRIES) return null;
+					await new Promise((resolve) => { setTimeout(resolve, CLASSIFY_RETRY_MS); });
+				}
+			};
+
+			/** 错误弹窗正文：网关原文优先，空则退回会话名。 */
+			const errorBody = (sessionId, message) => (typeof message === 'string' && message !== '' ? message : titleOf(ctx, sessionId));
+
+			/**
+			 * 记一笔近期报告（对账窗口内有效）：后到的冲突事件据此撤回完成
+			 * 弹窗或跳过重复报告，到点自动遗忘。
+			 * @param sessionId - 会话 id。
+			 * @param kind - 'completion' | 'error'。
+			 * @param notification - 实际发出的通知（被开关挡下时为 null）。
+			 */
+			const trackReport = (sessionId, kind, notification) => {
+				const entry = { kind, notification, at: Date.now(), cancel: null };
+				recentReports.set(sessionId, entry);
+				// 排障轨迹：最近几条停止报告（复现双弹时看 sessionId 是否相同）。
+				stats.recentStops.push({ kind, sessionId, at: entry.at });
+				if (stats.recentStops.length > 6) stats.recentStops.shift();
+				// 遗忘定时器不进 ctx.timer：它只是账本清理，卸载时随 map 一起丢弃；
+				// 到点时若条目已换人（新报告）或已不在册，就不删。
+				const handle = setTimeout(() => {
+					if (recentReports.get(sessionId) === entry) recentReports.delete(sessionId);
+				}, REPORT_GRACE_MS);
+				entry.cancel = () => { clearTimeout(handle); };
+			};
+
+			/** 对账窗口内的近期报告；没有或已过期返回 undefined。 */
+			const freshReport = (sessionId) => {
+				const entry = recentReports.get(sessionId);
+				if (entry === undefined || Date.now() - entry.at >= REPORT_GRACE_MS) return undefined;
+				return entry;
+			};
+
+			/** 报一次完成：提示音 + 弹窗（均受各自开关门控），记入对账窗口。 */
+			const reportCompletion = (sessionId, source) => {
+				const prior = freshReport(sessionId);
+				if (prior?.kind === 'error') return; // 本停止已按错误报过
+				if (prior?.kind === 'completion') {
+					// 同一次停止的重复边沿（通道重复触发 / 列表陈旧回放）：只报一次。
+					stats.stopDuplicates += 1;
+					return;
+				}
 				stats.completed += 1;
 				stats.lastCompletion = { sessionId, source, at: Date.now() };
+				chimeNow();
 				if (!shouldNotify()) return;
-				notify(t('toast.completed.title'), titleOf(ctx, sessionId), sessionId);
+				trackReport(sessionId, 'completion', notify(t('toast.completed.title'), titleOf(ctx, sessionId), sessionId));
 			};
 
 			/**
-			 * 一轮对话任务结束（running → 非 running）：完成弹窗延迟一个合并
-			 * 窗口再发，给可能随后到达的 error 事件让位。提示音是「停止」这个
-			 * 信号本身，立即响，不延迟。
+			 * 报一次错误：先去重（本停止已报过错误则跳过），再按兜底网处理
+			 * （完成弹窗刚发过 → 撤回它只留错误，提示音已响过不重响），
+			 * 最后提示音 + 弹窗，记入对账窗口。
 			 * @param sessionId - 会话 id。
-			 * @param source - 触发来源（event / list），仅用于排障。
+			 * @param message - 错误正文（网关原文）。
+			 */
+			const reportError = (sessionId, message) => {
+				if (freshReport(sessionId)?.kind === 'error') return; // 本停止已按错误报过
+				const prior = freshReport(sessionId);
+				if (prior?.kind === 'completion') {
+					// 兜底网：错误后到——撤回完成弹窗只留错误；音已响过，不重响。
+					if (!shouldNotify()) return; // 保留完成弹窗作为唯一提醒
+					if (prior.notification !== null) prior.notification.close();
+					stats.errors += 1;
+					stats.lastError = { sessionId, message, at: Date.now() };
+					trackReport(sessionId, 'error', notify(t('toast.error.title'), errorBody(sessionId, message), sessionId));
+					return;
+				}
+				stats.errors += 1;
+				stats.lastError = { sessionId, message, at: Date.now() };
+				chimeNow();
+				if (!shouldNotify()) return;
+				trackReport(sessionId, 'error', notify(t('toast.error.title'), errorBody(sessionId, message), sessionId));
+			};
+
+			/**
+			 * 一轮对话任务结束（running → 非 running）：读会话持久日志最后一条
+			 * turn/end 的 reason 决定报什么——完成 / 错误 / 不报（取消、询问
+			 * 已报、崩溃孤儿回合）。读不到原因（兜底时限内）按完成报，由
+			 * reportError 的对账网接手晚到的错误。询问待答期间与询问回答后
+			 * 紧随的那次完成不报（一次交互一次提醒）。
+			 * 分类是异步的：在途期间（completing 里有本会话的 token）到达的重复
+			 * 边沿直接忽略——同一次停止只走一次分类、只报一次。
+			 * @param sessionId - 会话 id。
+			 * @param source - 触发来源（event / list / status），仅用于排障。
 			 */
 			const complete = (sessionId, source) => {
-				const cancel = pendingCompletions.get(sessionId);
-				if (cancel !== undefined) cancel();
-				chimeNow();
-				pendingCompletions.set(sessionId, ctx.timer.timeout(() => flushCompletion(sessionId, source), STOP_MERGE_MS));
+				if (pendingQuestions.has(sessionId)) return; // 询问待答：那次停止由询问弹窗负责
+				if (completing.has(sessionId)) return; // 同一次停止的分类已在途（重复边沿）
+				const grace = questionGrace.delete(sessionId);
+				let settled = false;
+				const token = {};
+				completing.set(sessionId, token);
+				const fallbackCancel = ctx.timer.timeout(() => {
+					if (settled) return;
+					settled = true;
+					if (completing.get(sessionId) === token) completing.delete(sessionId);
+					reportCompletion(sessionId, source); // 兜底：读不到原因就按完成报
+				}, CLASSIFY_TIMEOUT_MS);
+				void (async () => {
+					try {
+						const reason = await readTurnEndReason(sessionId);
+						if (settled) return;
+						settled = true;
+						fallbackCancel();
+						if (reason?.kind === 'error') {
+							const failure = reason.error;
+							reportError(sessionId, typeof failure?.message === 'string' ? failure.message : '');
+							return;
+						}
+						// aborted（取消）/ blocked（询问已报）/ interrupted（崩溃孤儿）：不报。
+						if (reason?.kind === 'aborted' || reason?.kind === 'blocked' || reason?.kind === 'interrupted') return;
+						// completed / max-tokens / 读不到：按完成报（grace 期内不报）。
+						if (!grace) reportCompletion(sessionId, source);
+					} finally {
+						if (completing.get(sessionId) === token) completing.delete(sessionId);
+					}
+				})();
 			};
 
 			// 用启动时的会话列表给 running 状态做种：页面加载前就在跑的任务，
@@ -985,11 +1146,19 @@ window.__ModuleLoader__.load({
 
 			// 通道一：宿主转发事件 api-session/status(sessionId, running) —— running
 			// 掉回非 running 就是一轮对话任务结束。running = true 时作废该会话的
-			// 错误合并窗口（新任务开始，旧的错误不再参与合并）。
+			// grace、对账票据与在途分类标记（新任务开始，旧停止的对账到此为止）。
 			ctx.effect(() => ctx.remote.$on('api-session/status', (sessionId, running) => {
 				stats.events += 1;
 				stats.lastEvent = { sessionId, running: running === true, at: Date.now(), source: 'event' };
-				if (running === true) recentErrors.delete(sessionId);
+				if (running === true) {
+					questionGrace.delete(sessionId);
+					completing.delete(sessionId); // 新任务开始：在途分类守卫作废
+					const prior = recentReports.get(sessionId);
+					if (prior !== undefined) {
+						if (prior.cancel !== null) prior.cancel();
+						recentReports.delete(sessionId);
+					}
+				}
 				if (noteRunning(sessionId, running === true)) complete(sessionId, 'event');
 			}), 'dsh-task-reminder: session status event');
 
@@ -1006,37 +1175,33 @@ window.__ModuleLoader__.load({
 			}), 'dsh-task-reminder: session status list');
 
 			// 出错停止：宿主转发事件 api-session/error(sessionId, message) ——
-			// 如 400 这类让对话停下来的红色错误。错误优先于合并窗口内还没发出去
-			// 的完成弹窗（取消它），一次停止只出一种提醒。
+			// 任何让回合失败的错误（网关 HTTP 错误、服务商故障、连接失败等）。
+			// 去重与「撤回完成弹窗」的对账都在 reportError 里：一次停止只报
+			// 一次、错误优先。
 			ctx.effect(() => ctx.remote.$on('api-session/error', (sessionId, message) => {
-				stats.errors += 1;
-				stats.lastError = { sessionId, message, at: Date.now() };
-				recentErrors.set(sessionId, Date.now());
-				const cancel = pendingCompletions.get(sessionId);
-				if (cancel !== undefined) {
-					cancel();
-					pendingCompletions.delete(sessionId);
-				}
-				chimeNow();
-				if (!shouldNotify()) return;
-				const body = typeof message === 'string' && message !== '' ? message : titleOf(ctx, sessionId);
-				notify(t('toast.error.title'), body, sessionId);
+				reportError(sessionId, message);
 			}), 'dsh-task-reminder: session error event');
-
-			// 等你回答：uiSession.sessionStatus 的 pendingInteraction 出现边沿
-			// （ask_user_question / plan-review 挂起，Agent 阻塞在等用户操作）。
+			// 等你回答 + 第三完成通道：uiSession.sessionStatus 快照 ——
+			// pendingInteraction 出现边沿就是 Agent 阻塞在等用户操作（ask_user_question /
+			// plan-review）；每个 entry 的 running 位同时是完成检测的第三来源（与
+			// sidebar 运行指示灯同源，fork 会话的列表投影不可靠时这条路仍可靠）。
 			// 只读观测这个根级快照，绝不订阅 user-questions/request —— 那是
 			// waterfall 应答链，旁观者插进去会干扰官方问答 UI 应答。
 			ctx.effect(() => ctx.uiSession.sessionStatus.subscribe(() => {
 				const snapshot = ctx.uiSession.sessionStatus.getSnapshot();
 				for (const [sessionId, status] of snapshot) {
+					// running 位也计入边沿表（三条通道共用一张表，天然去重）。
+					if (noteRunning(sessionId, status?.running === true)) complete(sessionId, 'status');
 					const pending = status?.pendingInteraction;
 					if (pending === undefined || pending === null) {
-						pendingQuestions.delete(sessionId);
+						// 这一轮挂起消散（用户已回答 / 交互关闭）：紧随的那次完成
+						// 不报——一次交互一次提醒。
+						if (pendingQuestions.delete(sessionId)) questionGrace.add(sessionId);
 						continue;
 					}
 					if (pendingQuestions.has(sessionId)) continue; // 已提醒过这一轮
 					pendingQuestions.add(sessionId);
+					questionGrace.delete(sessionId); // 新一轮挂起：旧的 grace 作废
 					stats.questions += 1;
 					stats.lastQuestion = { sessionId, kind: pending.kind, at: Date.now() };
 					chimeNow();
@@ -1114,11 +1279,15 @@ window.__ModuleLoader__.load({
 			ctx.effect(() => () => {
 				chime.dispose();
 			}, 'dsh-task-reminder: chime');
-			// 回收待定的完成弹窗定时器（卸载时不再有延迟回调落地）。
+			// 回收对账票据与它们的遗忘定时器、grace 标记（卸载时不再有延迟回调落地）。
 			ctx.effect(() => () => {
-				for (const cancel of pendingCompletions.values()) cancel();
-				pendingCompletions.clear();
-			}, 'dsh-task-reminder: deferred completions');
+				for (const entry of recentReports.values()) {
+					if (entry.cancel !== null) entry.cancel();
+				}
+				recentReports.clear();
+				questionGrace.clear();
+				completing.clear();
+			}, 'dsh-task-reminder: report reconciliation');
 
 			// 独立设置页：设置面板左侧导航里的「任务提醒」（order 避开 chat-locator 41）。
 			ctx.slots.inject('settings.section', () => ctx.slots.register({
