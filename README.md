@@ -117,20 +117,30 @@ registration:
 
 ```powershell
 # Windows (PowerShell) — run it from any directory
-dsh plugin --profile web add github:hawkongz/dsh-task-reminder
+dsh plugin --profile web add @hawkongz/dsh-task-reminder
 ```
 
 ```bash
 # macOS / Linux
-dsh plugin --profile web add github:hawkongz/dsh-task-reminder
+dsh plugin --profile web add @hawkongz/dsh-task-reminder
 ```
 
-To pin a release instead of the default branch, append the tag:
-`dsh plugin --profile web add github:hawkongz/dsh-task-reminder#v1.4.1`.
-Once the package is on the npm registry, the scoped name works the same way:
-`dsh plugin --profile web add @hawkongz/dsh-task-reminder`. (The unscoped
-name `dsh-task-reminder` is permanently unavailable: npm rejects it as too
-similar to the existing package `dsh-taskreminder`.)
+This installs the published package from the npm registry — the same way every
+other DSH plugin is installed. (The unscoped name
+`dsh-task-reminder` is permanently unavailable: npm rejects it as too similar
+to the existing package `dsh-taskreminder`, so the scoped name is the only
+registry form.)
+
+To install from the GitHub repository instead — the default branch, or a
+pinned release tag — use the `github:` spec:
+
+```powershell
+# default branch
+dsh plugin --profile web add github:hawkongz/dsh-task-reminder
+
+# pin a release instead of the default branch: append the tag
+dsh plugin --profile web add github:hawkongz/dsh-task-reminder#<tag>
+```
 
 **Step 3 — Restart and verify**
 
@@ -161,12 +171,14 @@ dsh --profile web --dump-config | Select-String task-reminder
 ### Install with dsh plugin
 
 ```powershell
-dsh plugin --profile web add github:hawkongz/dsh-task-reminder
+dsh plugin --profile web add @hawkongz/dsh-task-reminder
 ```
 
-This installs the package into the profile and appends `dsh-task-reminder` to
-the profile's `dsh.profile.bundles`; the loader then applies the bundle's
-`cordis.patch.yml` and inserts the `task-reminder` row. The package ships no
+This installs the package into the profile and appends
+`@hawkongz/dsh-task-reminder` to the profile's `dsh.profile.bundles` (the row
+itself carries the id `task-reminder`); the loader then applies the bundle's
+`cordis.patch.yml` and inserts the `task-reminder` row. To install from
+GitHub instead, use `github:hawkongz/dsh-task-reminder[#<tag>]`. The package ships no
 build scripts, so pnpm never blocks the install (unlike git-hosted packages
 that need an `allowBuilds` entry in the profile's `pnpm-workspace.yaml`).
 
@@ -259,7 +271,7 @@ gesture, and disposal.
   `@deepseek-ai/dsh-client-ui-settings` in `dsh.client.inject`; make sure the
   installation completed, then restart `dsh web` and hard-refresh. If the page
   still does not appear, re-run
-  `dsh plugin --profile web add github:hawkongz/dsh-task-reminder`.
+  `dsh plugin --profile web add @hawkongz/dsh-task-reminder`.
 * **Code changes have no effect.** The host reads client plugins only at
   process start and the browser caches the old bundle. Restart `dsh web`,
   then hard-refresh (`Ctrl + F5`).

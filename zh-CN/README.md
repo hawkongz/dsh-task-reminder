@@ -86,20 +86,26 @@ Agent 回合在 DeepSeek Harness 里跑着，你却切到别的窗口看别的�
 
 ```powershell
 # Windows（PowerShell）——在任意目录执行都行
-dsh plugin --profile web add github:hawkongz/dsh-task-reminder
+dsh plugin --profile web add @hawkongz/dsh-task-reminder
 ```
 
 ```bash
 # macOS / Linux
-dsh plugin --profile web add github:hawkongz/dsh-task-reminder
+dsh plugin --profile web add @hawkongz/dsh-task-reminder
 ```
 
-想装指定版本而不是默认分支，就带上标签：
-`dsh plugin --profile web add github:hawkongz/dsh-task-reminder#v1.4.1`。
-等这个包发布到 npm registry 之后，带 scope 的包名同样可用：
-`dsh plugin --profile web add @hawkongz/dsh-task-reminder`。（裸名
-`dsh-task-reminder` 已确定拿不到：npm 判定它与现存包 `dsh-taskreminder`
-过于相似，永久拒发。）
+装的是 npm registry 上的已发布包——和其他 DSH 插件的装法完全一样。（裸名 `dsh-task-reminder` 已确定拿不到：npm 判定它与现存包
+`dsh-taskreminder` 过于相似、永久拒发，所以 registry 形式只能带 scope。）
+
+想改从 GitHub 仓库装（默认分支，或钉某个发布标签），用 `github:` 形式：
+
+```powershell
+# 默认分支
+dsh plugin --profile web add github:hawkongz/dsh-task-reminder
+
+# 想装指定版本而不是默认分支，就带上标签
+dsh plugin --profile web add github:hawkongz/dsh-task-reminder#<tag>
+```
 
 **第三步 — 重启并验证**
 
@@ -126,11 +132,12 @@ dsh --profile web --dump-config | Select-String task-reminder
 ### 用 dsh plugin 安装
 
 ```powershell
-dsh plugin --profile web add github:hawkongz/dsh-task-reminder
+dsh plugin --profile web add @hawkongz/dsh-task-reminder
 ```
 
-一条命令同时做两件事：把包装进 profile，以及把 `dsh-task-reminder` 追加进
-profile 的 `dsh.profile.bundles`；随后加载器应用 bundle 自带的
+一条命令同时做两件事：把包装进 profile，以及把
+`@hawkongz/dsh-task-reminder` 追加进 profile 的 `dsh.profile.bundles`（行
+本身的 id 是 `task-reminder`）；随后加载器应用 bundle 自带的
 `cordis.patch.yml`，插入 `task-reminder` 行。本包不带任何构建脚本，pnpm 不会
 拦住安装（那类需要在 profile 的 `pnpm-workspace.yaml` 里加 `allowBuilds`
 的情况只发生在带 prepare 脚本的 git 托管包上）。
@@ -213,7 +220,7 @@ node test/verify-client.mjs
 * **设置页不见了。** 插件在 `dsh.client.inject` 里声明了
   `@deepseek-ai/dsh-client-ui-settings`；确认安装完整后重启 `dsh web` 并硬刷新。
   还是没有，就把安装命令原样再跑一遍：
-  `dsh plugin --profile web add github:hawkongz/dsh-task-reminder`。
+  `dsh plugin --profile web add @hawkongz/dsh-task-reminder`。
 * **改了代码没生效。** 宿主只在进程启动时读客户端产物，浏览器又会缓存旧 bundle。
   重启 `dsh web`，再硬刷新（`Ctrl + F5`）。
 * **系统弹窗不弹。** 按顺序查链路：

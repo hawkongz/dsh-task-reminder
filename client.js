@@ -77,7 +77,7 @@ window.__ModuleLoader__.load({
 		/** 本地化命名空间（同时是设置页文案的键空间）。 */
 		const NS = 'task-reminder';
 		/** 版本号，随排障钩子暴露。 */
-		const PLUGIN_VERSION = '1.4.2';
+		const PLUGIN_VERSION = '1.4.3';
 
 		/** 五个可配置项的本地持久化键（createSnapshotStore 的 persist.name）。 */
 		const NOTIFY_PERSIST_KEY = 'dsh.task-reminder.notify';
