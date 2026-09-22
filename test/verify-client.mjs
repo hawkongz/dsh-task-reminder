@@ -262,7 +262,7 @@ const closeTo = (actual, expected, epsilon = 1e-3) => typeof actual === 'number'
 // ---------------------------------------------------------------------------
 
 console.log('模块与文案');
-check('浏览器半侧模块 id 是 dsh-task-reminder', definition.id === 'dsh-task-reminder', definition.id);
+check('浏览器半侧模块 id 与包名一致（@hawkongz/dsh-task-reminder）', definition.id === '@hawkongz/dsh-task-reminder', definition.id);
 check('插件形状正确（name / inject / apply）', plugin.name === 'dsh-task-reminder' && typeof plugin.apply === 'function'
 	&& JSON.stringify(plugin.inject) === JSON.stringify(['slots', 'locale', 'sessions', 'remote', 'uiSession', 'uiWorkspace', 'timer']), JSON.stringify(plugin.inject));
 check('inject 覆盖 remote / sessions / uiSession / uiWorkspace / timer', ['remote', 'sessions', 'uiSession', 'uiWorkspace', 'timer'].every((name) => plugin.inject.includes(name)));

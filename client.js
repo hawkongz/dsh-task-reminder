@@ -53,7 +53,7 @@
  * @module dsh-task-reminder/client
  */
 window.__ModuleLoader__.load({
-	id: 'dsh-task-reminder',
+	id: '@hawkongz/dsh-task-reminder',
 	factory(require) {
 		const React = require('react');
 		const { createSnapshotStore } = require('@deepseek-ai/dsh-client-store');
