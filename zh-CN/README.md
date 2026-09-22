@@ -92,9 +92,11 @@ dsh plugin --profile web add github:hawkongz/dsh-task-reminder
 ```
 
 想装指定版本而不是默认分支，就带上标签：
-`dsh plugin --profile web add github:hawkongz/dsh-task-reminder#v1.3.0`。
-等这个包发布到 npm registry 之后， bare 包名同样可用：
-`dsh plugin --profile web add dsh-task-reminder`。
+`dsh plugin --profile web add github:hawkongz/dsh-task-reminder#v1.4.1`。
+等这个包发布到 npm registry 之后，带 scope 的包名同样可用：
+`dsh plugin --profile web add @hawkongz/dsh-task-reminder`。（裸名
+`dsh-task-reminder` 已确定拿不到：npm 判定它与现存包 `dsh-taskreminder`
+过于相似，永久拒发。）
 
 **第三步 — 重启并验证**
 
@@ -136,7 +138,7 @@ profile 的 `dsh.profile.bundles`；随后加载器应用 bundle 自带的
 ### 卸载
 
 ```powershell
-dsh plugin --profile web remove dsh-task-reminder
+dsh plugin --profile web remove @hawkongz/dsh-task-reminder
 ```
 
 `remove` 一并卸包并整理 bundle 清单。然后重启 `dsh web`，让这一行从组合配置里

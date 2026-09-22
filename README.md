@@ -106,9 +106,11 @@ dsh plugin --profile web add github:hawkongz/dsh-task-reminder
 ```
 
 To pin a release instead of the default branch, append the tag:
-`dsh plugin --profile web add github:hawkongz/dsh-task-reminder#v1.3.0`.
-Once the package is published to the npm registry, the bare name works the
-same way: `dsh plugin --profile web add dsh-task-reminder`.
+`dsh plugin --profile web add github:hawkongz/dsh-task-reminder#v1.4.1`.
+Once the package is on the npm registry, the scoped name works the same way:
+`dsh plugin --profile web add @hawkongz/dsh-task-reminder`. (The unscoped
+name `dsh-task-reminder` is permanently unavailable: npm rejects it as too
+similar to the existing package `dsh-taskreminder`.)
 
 **Step 3 — Restart and verify**
 
@@ -155,7 +157,7 @@ self-check under `test/`.
 ### Uninstall
 
 ```powershell
-dsh plugin --profile web remove dsh-task-reminder
+dsh plugin --profile web remove @hawkongz/dsh-task-reminder
 ```
 
 The `remove` drops the package and reconciles the bundle list in one step.
