@@ -807,7 +807,7 @@ window.__ModuleLoader__.load({
 			const runningSessions = new Map();
 			// 同一会话「停止」的三种原因合并：error 与 status 边沿可能是同一次
 			// 停止的两次播报（到达顺序不定），用合并窗口去重，错误优先。
-			const STOP_MERGE_MS = 3000;
+			const STOP_MERGE_MS = 500;
 			const recentErrors = new Map(); // sessionId → 最近一次错误时刻
 			const pendingCompletions = new Map(); // sessionId → 待定完成弹窗的取消函数
 			// 有待答交互（ask_user_question / plan-review）的会话集合，按出现边沿提醒。

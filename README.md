@@ -34,8 +34,10 @@ toast** (Web Notification — the native notification in the bottom-right corner
 of your OS, visible while the browser is in the background; click it to return
 to that session) and plays a synthesized chime. Three stop reasons are
 covered: **task complete**, **the agent is waiting for your answer**
-(`ask_user_question` pending), and **an error stop** (a red error such as
-400) — one stop is reported once, with the error taking precedence. The toast
+(`ask_user_question` pending), and **an error stop** (any failed turn — a
+gateway HTTP error such as 400 / 401 / 429 / 500 / 502, a provider outage, or
+a connection failure) — one stop is reported once, with the error taking
+precedence. The toast
 timing has two modes: **Always** (every completion, no matter whether the
 browser window is in the foreground) or **Only when unfocused** (when you
 switch the tab away or the browser window loses focus). There is no in-app
@@ -54,9 +56,11 @@ to the page as a client plugin.
   covered: **task complete**, **waiting for your answer** (the agent blocked
   in `ask_user_question` / plan review — detected by reading the read-only
   `uiSession.sessionStatus` snapshot, never by joining the question waterfall),
-  and **error stop** (`api-session/error`, e.g. a red 400). One stop is
-  reported once, error first: the completion toast waits out a short merge
-  window and stands down when an error for the same stop arrives.
+  and **error stop** (`api-session/error` — any failed turn: a gateway HTTP
+  error such as 400 / 401 / 429 / 500 / 502, a provider outage, or a
+  transport failure). One stop is
+  reported once, error first: the completion toast waits out a short 500 ms
+  merge window and stands down when an error for the same stop arrives.
   Two timing modes — **Always** (every stop) or **Only when unfocused**
   (tab switched away or window unfocused) — pick one on the settings page. The
   browser asks for notification permission once on the first load — the
