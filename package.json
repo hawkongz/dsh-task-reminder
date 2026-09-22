@@ -39,6 +39,9 @@
     "client.js",
     "cordis.patch.yml",
     "README.md",
+    "zh-CN/README.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
     "LICENSE",
     "test"
   ],
