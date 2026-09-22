@@ -2,14 +2,15 @@
  * dsh-task-reminder 浏览器半侧的 Node 自检。
  *
  * 为什么需要它：这个插件的关键行为都不在渲染里，而在 apply 的接线与
- * 「running → 非 running」边沿判据上 —— 事件订阅、做种、非对话窗口判定、
- * 六个配置的默认值/读写/恢复默认、切换音效即时发声、音量整档 +20 的换算、
- * 卡宽卡高写进卡片内联样式、系统通知的权限路径，以及卡片堆叠上限与定时器回收。
- * 页面里没有浏览器控制能力时，这些也必须被真机（Node）跑过，而不是只靠肉眼审阅。
+ * 「running → 非 running」边沿判据上 —— 事件订阅、做种、弹窗时机两种模式
+ * （任何情况都弹 / 仅非前台窗口）、五个配置的默认值/读写/恢复默认、切换音效
+ * 即时发声、音量整档 +20 的换算、系统弹窗的权限路径与点击回会话、挂起
+ * AudioContext 的手势拉活，以及回调与监听的回收。页面里没有浏览器控制能力
+ * 时，这些也必须被真机（Node）跑过，而不是只靠肉眼审阅。
  *
  * 做法：给 client.js 一个极简的 `window.__ModuleLoader__` 桩以取得工厂，
  * 再用桩服务（locale / slots / sessions / remote / uiWorkspace / timer）跑
- * apply，直接驱动完成事件、调用设置页与浮层组件。断言失败时以非零码退出。
+ * apply，直接驱动完成事件、调用设置页组件。断言失败时以非零码退出。
  *
  * 用法：node test/verify-client.mjs
  */
@@ -79,9 +80,6 @@ const requireStub = (spec) => {
 // 桩：window / document
 // ---------------------------------------------------------------------------
 
-/** 样式标签落在 createdNodes 里，dispose 时置 removed。 */
-const createdNodes = [];
-
 /** 窗口焦点 / 标签页可见性状态，与 document/window 事件桩联动。 */
 const focusState = { hidden: false, focused: true };
 const domListeners = { document: new Map(), window: new Map() };
@@ -98,6 +96,10 @@ const fireDom = (type) => {
 		for (const fn of [...(domListeners[target].get(type) ?? [])]) fn();
 	}
 };
+/** 只派发 window 上的某类事件（如 pointerdown / keydown）。 */
+const fireWindow = (type) => {
+	for (const fn of [...(domListeners.window.get(type) ?? [])]) fn();
+};
 /** 改焦点/可见性状态并派发事件（插件的 sync 每次事件都重算）。 */
 const setFocus = ({ hidden, focused }) => {
 	focusState.hidden = hidden === true;
@@ -108,7 +110,7 @@ const setFocus = ({ hidden, focused }) => {
 };
 
 const documentStub = {
-	head: { appendChild: (node) => createdNodes.push(node) },
+	head: { appendChild: () => {} },
 	createElement: (tag) => ({
 		tag,
 		dataset: {},
@@ -146,10 +148,11 @@ FakeNotification.requestPermission = () => {
 };
 
 /** Web Audio 录音桩：记录振荡器与增益节点，验证「提示音真的排了音、参数正确」。 */
-const audioLog = { contexts: 0, oscillators: [], gains: [], resumed: 0, closed: 0 };
+const audioLog = { contexts: 0, instances: [], oscillators: [], gains: [], resumed: 0, closed: 0 };
 class FakeAudioContext {
 	constructor() {
 		audioLog.contexts += 1;
+		audioLog.instances.push(this);
 		this.currentTime = 0;
 		this.state = 'running';
 		this.destination = {};
@@ -215,15 +218,12 @@ if (definition === undefined) throw new Error('verify-client: client.js did not 
 const plugin = definition.factory(requireStub);
 const { diagnostics } = plugin;
 const {
-	CSS,
-	CSS_TEXT,
 	DEFAULTS,
-	DEFAULT_SOUND_CHOICE,
-	HEIGHT_MAX,
-	HEIGHT_MIN,
-	HEIGHT_PERSIST_KEY,
-	HEIGHT_STEP,
-	MAX_TOASTS,
+	DEFAULT_NOTIFY_MODE,
+	NOTIFY_MODE_ALWAYS,
+	NOTIFY_MODE_PERSIST_KEY,
+	NOTIFY_MODE_UNFOCUSED,
+	NOTIFY_MODES,
 	NOTIFY_PERSIST_KEY,
 	NOTIFICATION_TAG,
 	NS,
@@ -231,23 +231,16 @@ const {
 	SOUND_CHOICES,
 	SOUND_CHOICE_PERSIST_KEY,
 	SOUND_PERSIST_KEY,
-	STACK_INSET_PX,
-	STYLE_TAG_ID,
-	TOAST_TTL_MS,
 	VOLUME_BOOST,
 	VOLUME_MAX,
 	VOLUME_MIN,
 	VOLUME_PERSIST_KEY,
 	VOLUME_STEP,
-	WIDTH_MAX,
-	WIDTH_MIN,
-	WIDTH_PERSIST_KEY,
-	WIDTH_STEP,
 	clampVolume,
-	clampSize,
 	createChime,
 	createNotifier,
 	en,
+	resolveNotifyMode,
 	resolveSoundChoice,
 	titleOf,
 	zh,
@@ -265,48 +258,44 @@ const check = (name, ok, detail) => {
 const closeTo = (actual, expected, epsilon = 1e-3) => typeof actual === 'number' && Math.abs(actual - expected) <= epsilon;
 
 // ---------------------------------------------------------------------------
-// 静态面：模块身份、文案、样式、音效表、归一化函数
+// 静态面：模块身份、文案、音效表、归一化函数
 // ---------------------------------------------------------------------------
 
 console.log('模块与文案');
 check('浏览器半侧模块 id 是 dsh-task-reminder', definition.id === 'dsh-task-reminder', definition.id);
 check('插件形状正确（name / inject / apply）', plugin.name === 'dsh-task-reminder' && typeof plugin.apply === 'function'
-	&& JSON.stringify(plugin.inject) === JSON.stringify(['slots', 'locale', 'sessions', 'remote', 'uiWorkspace', 'timer']), JSON.stringify(plugin.inject));
-check('inject 覆盖 remote / sessions / uiWorkspace / timer', ['remote', 'sessions', 'uiWorkspace', 'timer'].every((name) => plugin.inject.includes(name)));
+	&& JSON.stringify(plugin.inject) === JSON.stringify(['slots', 'locale', 'sessions', 'remote', 'uiSession', 'uiWorkspace', 'timer']), JSON.stringify(plugin.inject));
+check('inject 覆盖 remote / sessions / uiSession / uiWorkspace / timer', ['remote', 'sessions', 'uiSession', 'uiWorkspace', 'timer'].every((name) => plugin.inject.includes(name)));
 
 const zhKeys = Object.keys(zh).sort();
 const enKeys = Object.keys(en).sort();
 check('中英文案键集合一致', JSON.stringify(zhKeys) === JSON.stringify(enKeys), JSON.stringify({ zhKeys, enKeys }));
 check('全部文案非空', zhKeys.every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
-check('「完成提醒弹窗」开关文案已移除，且没有任何「试听」按钮文案', !('settings.popup.title' in zh) && !('settings.popup.description' in zh)
-	&& !('preview' in zh) && !Object.keys(zh).some((key) => zh[key] === '试听'), JSON.stringify(Object.keys(zh).filter((key) => key.startsWith('preview'))));
+check('应用内卡片相关文案已全部移除（卡片通道删除）', !('toast.title' in zh) && !('toast.open' in zh) && !('toast.close' in zh)
+	&& !zhKeys.some((key) => key.startsWith('width.') || key.startsWith('height.') || key.startsWith('preview.')), JSON.stringify(zhKeys));
+check('三种停止各有弹窗标题文案', ['toast.completed.title', 'toast.question.title', 'toast.error.title'].every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
+check('没有「试听」按钮文案（切换音效即发声）', !Object.keys(zh).some((key) => zh[key] === '试听'));
 check('设置页有导航标题与导语', typeof zh['nav'] === 'string' && zh['nav'] !== '' && typeof zh['intro'] === 'string' && zh['intro'] !== '');
-check('提醒卡有标题 / 查看 / 关闭三条文案', ['toast.title', 'toast.open', 'toast.close'].every((key) => typeof zh[key] === 'string' && zh[key] !== ''));
-check('通知/提示音两个开关各有标题与说明', ['settings.notify.title', 'settings.notify.description', 'settings.sound.title', 'settings.sound.description'].every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
-check('音效/音量/宽高/恢复默认各有文案', ['sound.choice.title', 'sound.choice.description', 'volume.title', 'volume.description', 'width.title', 'width.description', 'height.title', 'height.description', 'reset.title', 'reset.description', 'reset.descriptionDefault'].every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
+check('弹窗/提示音两个开关各有标题与说明', ['settings.notify.title', 'settings.notify.description', 'settings.sound.title', 'settings.sound.description'].every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
+check('弹窗时机有两种文案', ['notify.mode.title', 'notify.mode.description', 'notify.mode.always', 'notify.mode.unfocused'].every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
+check('弹窗时机文案注明两种语义', zh['notify.mode.always'] === '任何情况都弹' && zh['notify.mode.unfocused'] === '仅非前台窗口'
+	&& en['notify.mode.always'] === 'Always' && en['notify.mode.unfocused'] === 'Only when unfocused');
+check('音效/音量/恢复默认各有文案', ['sound.choice.title', 'sound.choice.description', 'volume.title', 'volume.description', 'reset.title', 'reset.description', 'reset.descriptionDefault'].every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
 check('四种音效各有名字文案', SOUND_CHOICES.every((choice) => typeof zh[choice.nameKey] === 'string' && zh[choice.nameKey] !== '' && typeof en[choice.nameKey] === 'string' && en[choice.nameKey] !== ''));
 check('通知权限有三条提示文案', ['notify.unsupported', 'notify.denied', 'notify.pending'].every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
 check('步进器有增减无障碍标签', typeof zh['decrease'] === 'string' && typeof zh['increase'] === 'string' && typeof en['decrease'] === 'string' && typeof en['increase'] === 'string');
-
-const braces = (text) => (text.match(/\{/g) ?? []).length === (text.match(/\}/g) ?? []).length;
-check('样式花括号配平', braces(CSS_TEXT));
-check('样式不含 undefined/NaN', !CSS_TEXT.includes('undefined') && !CSS_TEXT.includes('NaN'), CSS_TEXT);
-check(`弹窗贴在右下角 ${STACK_INSET_PX}px`, CSS_TEXT.includes(`right:${STACK_INSET_PX}px`) && CSS_TEXT.includes(`bottom:${STACK_INSET_PX}px`) && CSS_TEXT.includes('position:fixed') && STACK_INSET_PX === 8);
-check('弹窗默认宽度放大到 420px', CSS_TEXT.includes('width:min(420px,calc(100vw - 16px))'), CSS_TEXT);
-check('卡片默认宽度与 DEFAULTS.width 一致', CSS_TEXT.includes(`width:min(${DEFAULTS.width}px`));
-check('样式只走主题 token（不写死颜色，深浅色自动跟随）', CSS_TEXT.includes('var(--dsw-alias-bg-overlay)') && CSS_TEXT.includes('var(--dsw-alias-label-secondary)') && CSS_TEXT.includes('var(--dsw-alias-state-success-primary)'));
-check('字号/内边距随卡宽一起放大', CSS_TEXT.includes('font-size:14px') && CSS_TEXT.includes('padding:12px 14px') && CSS_TEXT.includes('width:24px;height:24px'));
-check('提醒卡同屏上限 ≥ 1', Number.isInteger(MAX_TOASTS) && MAX_TOASTS >= 1, String(MAX_TOASTS));
-check('提醒卡停留时长为正', TOAST_TTL_MS > 0, String(TOAST_TTL_MS));
-
-const persistKeys = [NOTIFY_PERSIST_KEY, SOUND_PERSIST_KEY, SOUND_CHOICE_PERSIST_KEY, VOLUME_PERSIST_KEY, WIDTH_PERSIST_KEY, HEIGHT_PERSIST_KEY];
-check('六个配置各有独立持久化键', new Set(persistKeys).size === 6 && persistKeys.every((key) => key.startsWith('dsh.task-reminder.')), persistKeys.join(' / '));
-check('弹窗开关的持久化键已移除', !persistKeys.includes('dsh.task-reminder.popup'));
-check('音效选择落在 dsh.task-reminder.sound-choice', SOUND_CHOICE_PERSIST_KEY === 'dsh.task-reminder.sound-choice');
-check('音量/宽高持久化键符合约定', VOLUME_PERSIST_KEY === 'dsh.task-reminder.volume' && WIDTH_PERSIST_KEY === 'dsh.task-reminder.width' && HEIGHT_PERSIST_KEY === 'dsh.task-reminder.height');
+check('导语说明唯一视觉通道是 Windows 系统弹窗', zh['intro'].includes('Windows 系统弹窗') && !zh['intro'].includes('卡片'), zh['intro'].slice(0, 40));
 check('系统通知 tag 固定', typeof NOTIFICATION_TAG === 'string' && NOTIFICATION_TAG === 'dsh-task-reminder');
 
-console.log('音效表、音量换算与归一化');
+console.log('弹窗时机、音效表、音量换算与归一化');
+check('两种弹窗时机（任何情况都弹 / 仅非前台窗口）', NOTIFY_MODES.length === 2
+	&& NOTIFY_MODES[0].id === 'always' && NOTIFY_MODES[1].id === 'unfocused'
+	&& NOTIFY_MODE_ALWAYS === 'always' && NOTIFY_MODE_UNFOCUSED === 'unfocused', JSON.stringify(NOTIFY_MODES));
+check('默认时机是「任何情况都弹」', DEFAULT_NOTIFY_MODE === 'always' && DEFAULTS.notifyMode === 'always', String(DEFAULTS.notifyMode));
+check('弹窗时机持久化键符合约定', NOTIFY_MODE_PERSIST_KEY === 'dsh.task-reminder.notify-mode');
+check('resolveNotifyMode 接受合法值', resolveNotifyMode('always') === 'always' && resolveNotifyMode('unfocused') === 'unfocused');
+check('resolveNotifyMode 坏值退回默认时机', resolveNotifyMode('nonsense') === 'always' && resolveNotifyMode(undefined) === 'always' && resolveNotifyMode(null) === 'always' && resolveNotifyMode(42) === 'always');
+
 check('四种音效', Array.isArray(SOUND_CHOICES) && SOUND_CHOICES.length === 4, String(SOUND_CHOICES.length));
 check('音效 id 互不重复', new Set(SOUND_CHOICES.map((choice) => choice.id)).size === SOUND_CHOICES.length, SOUND_CHOICES.map((choice) => choice.id).join());
 check('每种音效至少两个音、参数都为正', SOUND_CHOICES.every((choice) => choice.notes.length >= 2
@@ -316,25 +305,20 @@ check('四种音效的节奏/频率表两两不同（听得出区别）', (() =>
 	const shapes = SOUND_CHOICES.map((choice) => choice.notes.map((noteSpec) => `${noteSpec.frequency}@${noteSpec.at}`).join(','));
 	return new Set(shapes).size === SOUND_CHOICES.length;
 })());
-check('默认值符合验收（通知/声音开、第一种音效、音量 80、宽 420、高自动）', DEFAULTS.notify === true && DEFAULTS.sound === true && DEFAULTS.soundChoice === 0 && DEFAULTS.volume === 80 && DEFAULTS.width === 420 && DEFAULTS.height === 0, JSON.stringify(DEFAULTS));
-check('DEFAULT_SOUND_CHOICE 指向第一种', DEFAULT_SOUND_CHOICE === 0 && SOUND_CHOICES[DEFAULT_SOUND_CHOICE]?.id === 'two-tone');
+check('默认值符合验收（弹窗开且任何情况都弹 / 声音开 / 第一种音效 / 音量 80）', DEFAULTS.notify === true && DEFAULTS.notifyMode === 'always' && DEFAULTS.sound === true && DEFAULTS.soundChoice === 0 && DEFAULTS.volume === 80, JSON.stringify(DEFAULTS));
 check('音量整档上调 20（VOLUME_BOOST=20）', VOLUME_BOOST === 20, String(VOLUME_BOOST));
 check('显示 80 = 原 100 的响度（master 1.0，峰值 0.4375/0.3625）', closeTo(SOUND_CHOICES[0].notes[0].peak * (DEFAULTS.volume + VOLUME_BOOST) / 100, 0.4375) && closeTo(SOUND_CHOICES[0].notes[1].peak * (DEFAULTS.volume + VOLUME_BOOST) / 100, 0.3625), JSON.stringify(SOUND_CHOICES[0].notes));
 check('显示 100 = 原 120 的响度（上限不削波，峰值仍 < 1）', SOUND_CHOICES.every((choice) => choice.notes.every((noteSpec) => noteSpec.peak * (VOLUME_MAX + VOLUME_BOOST) / 100 < 1)));
 check('音量说明只保留增益与插值，不带上调解释（按用户要求去掉）', zh['volume.description'] === '提示音的整体增益，当前 {value}%；0 为静音'
 	&& en['volume.description'] === 'Overall gain of the chime, currently {value}%; 0 mutes it'
 	&& !zh['volume.description'].includes('整档') && !en['volume.description'].includes('shifted up by 20'), JSON.stringify({ zh: zh['volume.description'], en: en['volume.description'] }));
-check('提醒卡预览区有标题/说明/示例会话文案', ['preview.title', 'preview.description', 'preview.sampleSession'].every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
 
 check('resolveSoundChoice 接受合法下标（含 0）', [0, 1, 2, 3].every((index) => resolveSoundChoice(index) === index));
-check('resolveSoundChoice 夹住越界与坏值', resolveSoundChoice(9) === 3 && resolveSoundChoice(-2) === 0 && resolveSoundChoice(Number.NaN) === DEFAULT_SOUND_CHOICE && resolveSoundChoice('x') === DEFAULT_SOUND_CHOICE && resolveSoundChoice(null) === DEFAULT_SOUND_CHOICE);
+check('resolveSoundChoice 夹住越界与坏值', resolveSoundChoice(9) === 3 && resolveSoundChoice(-2) === 0 && resolveSoundChoice(Number.NaN) === 0 && resolveSoundChoice('x') === 0 && resolveSoundChoice(null) === 0);
 check('resolveSoundChoice 四舍五入到整数档', resolveSoundChoice(1.4) === 1 && resolveSoundChoice(2.6) === 3);
 check('clampVolume 夹住 0~100', clampVolume(0) === 0 && clampVolume(100) === 100 && clampVolume(140) === 100 && clampVolume(-5) === 0);
 check('clampVolume 坏值退回默认音量', clampVolume(Number.NaN) === DEFAULTS.volume && clampVolume('loud') === DEFAULTS.volume && clampVolume(null) === DEFAULTS.volume);
-check('clampSize 支持区间自定义', clampSize(200, 0, 10, 5) === 10 && clampSize(-1, 0, 10, 5) === 0 && clampSize(3, 0, 10, 5) === 3);
 check('音量区间覆盖 0~100 且步进为正', VOLUME_MIN === 0 && VOLUME_MAX === 100 && VOLUME_STEP > 0);
-check('卡宽区间包含默认 420 且上限更宽', WIDTH_MIN < DEFAULTS.width && DEFAULTS.width < WIDTH_MAX && WIDTH_STEP === 10);
-check('卡高 0 = 自动，区间上限为正', HEIGHT_MIN === 0 && DEFAULTS.height === 0 && HEIGHT_MAX > 0 && HEIGHT_STEP > 0);
 
 console.log('titleOf');
 const listSnapshot = { ids: ['s1', 's2', 's3'], byId: {
@@ -394,6 +378,34 @@ const sessionsStub = {
 	},
 };
 
+/** uiSession.sessionStatus 桩：可改的快照 + 订阅者（等你回答检测读它）。 */
+let sessionStatusMap = new Map();
+const statusSubscribers = new Set();
+const uiSessionStub = {
+	sessionStatus: {
+		getSnapshot: () => sessionStatusMap,
+		subscribe(listener) {
+			statusSubscribers.add(listener);
+			return () => statusSubscribers.delete(listener);
+		},
+	},
+};
+/** 改某个会话的 pendingInteraction 并通知订阅者（null = 已回答，条目仍在、值为空）。 */
+const setPendingInteraction = (sessionId, interaction) => {
+	const next = new Map(sessionStatusMap);
+	if (interaction === null || interaction === undefined) next.set(sessionId, { running: next.get(sessionId)?.running ?? false, pendingInteraction: undefined, completionUnread: false });
+	else next.set(sessionId, { running: true, pendingInteraction: interaction, completionUnread: false });
+	sessionStatusMap = next;
+	for (const listener of [...statusSubscribers]) listener();
+};
+/** 整个会话从快照里消失（被删除 / 归档）。 */
+const dropSessionFromStatus = (sessionId) => {
+	const next = new Map(sessionStatusMap);
+	next.delete(sessionId);
+	sessionStatusMap = next;
+	for (const listener of [...statusSubscribers]) listener();
+};
+
 const ctxStub = {
 	effect(fn, label) {
 		const disposer = fn();
@@ -416,6 +428,7 @@ const ctxStub = {
 		},
 	},
 	sessions: sessionsStub,
+	uiSession: uiSessionStub,
 	remote: {
 		$on(name, fn) {
 			const entry = { name, fn, disposed: false };
@@ -428,10 +441,10 @@ const ctxStub = {
 	uiWorkspace: { openSession: (id) => opened.push(id) },
 	timer: {
 		timeout(fn, ms) {
-			const entry = { fn, ms, disposed: false };
+			const entry = { fn, ms, cancelled: false, fired: false };
 			timerEntries.push(entry);
 			return () => {
-				entry.disposed = true;
+				entry.cancelled = true;
 			};
 		},
 	},
@@ -441,20 +454,13 @@ console.log('');
 console.log('apply（桩服务）');
 plugin.apply(ctxStub);
 
-check('注册了 task-reminder 字典（zh/en）', dictionaries.length === 1 && dictionaries[0].ns === NS && typeof dictionaries[0].dicts?.zh?.['toast.title'] === 'string' && typeof dictionaries[0].dicts?.en?.['toast.title'] === 'string');
-check('挂载了自有样式标签', createdNodes.some((node) => node.tag === 'style' && node.dataset.pluginCss === STYLE_TAG_ID));
-check('样式文本写进了标签', createdNodes.find((node) => node.dataset?.pluginCss === STYLE_TAG_ID)?.textContent === CSS_TEXT);
+check('注册了 task-reminder 字典（zh/en）', dictionaries.length === 1 && dictionaries[0].ns === NS && typeof dictionaries[0].dicts?.zh?.['settings.notify.title'] === 'string' && typeof dictionaries[0].dicts?.en?.['settings.notify.title'] === 'string');
 check('订阅了 api-session/status 完成事件', listeners.some((entry) => entry.name === 'api-session/status' && typeof entry.fn === 'function'));
+check('订阅了 api-session/error 出错事件', listeners.some((entry) => entry.name === 'api-session/error' && typeof entry.fn === 'function'));
 check('订阅了官方会话列表（第二通道）', listListeners.size === 1, String(listListeners.size));
-check('effects 全部登记（字典 / 事件 / 列表 / 焦点 / 样式 / 定时器 / 排障）', effects.length >= 7, String(effects.length));
-
-const overlay = injections.find((item) => item.name === 'shell.overlay');
-check('弹窗注册在 shell.overlay', overlay !== undefined && overlay.entry.options.id === 'task-reminder' && overlay.entry.options.order === 50 && overlay.entry.options.locale === NS, JSON.stringify(overlay?.entry.options));
-check('弹窗 inject face 带 hooks(toasts/width/height) + dismiss + openSession', typeof overlay.entry.options.inject().hooks?.toasts?.getSnapshot === 'function'
-	&& typeof overlay.entry.options.inject().hooks?.width?.getSnapshot === 'function'
-	&& typeof overlay.entry.options.inject().hooks?.height?.getSnapshot === 'function'
-	&& typeof overlay.entry.options.inject().dismiss === 'function'
-	&& typeof overlay.entry.options.inject().openSession === 'function');
+check('effects 全部登记（字典 / 事件 / 列表 / 焦点 / 拉活 / 权限 / 提示音 / 排障）', effects.length >= 8, String(effects.length));
+check('没有注册 shell.overlay 浮层（卡片通道已删除）', !injections.some((item) => item.name === 'shell.overlay'), JSON.stringify(injections.map((item) => item.name)));
+check('只注册了 settings.section 一个 slot', injections.length === 1 && injections[0].name === 'settings.section', JSON.stringify(injections.map((item) => item.name)));
 
 const generalRows = injections.filter((item) => item.name === 'settings.general.item');
 check('「设置 → 通用」里不再有两行开关（迁出）', generalRows.length === 0, String(generalRows.length));
@@ -465,51 +471,68 @@ check('设置页 order 避开 chat-locator(41)', section.entry.options.order ===
 check('设置页导航标题走本地化', section.entry.options.label() === '任务提醒', section.entry.options.label());
 const sectionFace = () => section.entry.options.inject();
 const face = sectionFace();
-check('设置页 face 带六个配置 store 与写回函数', ['notifyStore', 'soundStore', 'soundChoiceStore', 'volumeStore', 'widthStore', 'heightStore', 'permissionStore'].every((name) => typeof face[name]?.getSnapshot === 'function')
-	&& ['setNotify', 'setSound', 'setSoundChoice', 'setVolume', 'setWidth', 'setHeight'].every((name) => typeof face[name] === 'function'));
-check('设置页 face 不再带弹窗开关与试听', !('popupStore' in face) && !('setPopup' in face) && !('preview' in face));
+check('设置页 face 带五个配置 store 与写回函数', ['notifyStore', 'notifyModeStore', 'soundStore', 'soundChoiceStore', 'volumeStore', 'permissionStore'].every((name) => typeof face[name]?.getSnapshot === 'function')
+	&& ['setNotify', 'setNotifyMode', 'setSound', 'setSoundChoice', 'setVolume'].every((name) => typeof face[name] === 'function'));
+check('设置页 face 不带卡片相关（宽度/高度/预览/弹窗开关）', !('widthStore' in face) && !('heightStore' in face) && !('setWidth' in face) && !('setHeight' in face) && !('popupStore' in face) && !('preview' in face));
 check('设置页 face 带恢复默认、通知支持标志与本地化函数', typeof face.reset === 'function' && typeof face.notifySupported === 'boolean' && typeof face.t === 'function');
 check('浏览器桩支持 Notification 时 notifySupported 为真', face.notifySupported === true);
 
-check('八个 store：六个持久化 + 权限/卡片列表不持久化', persistedStores.length === 8
+check('六个 store：五个持久化 + 权限状态不持久化', persistedStores.length === 6
 	&& persistedStores[0].options?.persist?.name === NOTIFY_PERSIST_KEY
-	&& persistedStores[1].options?.persist?.name === SOUND_PERSIST_KEY
-	&& persistedStores[2].options?.persist?.name === SOUND_CHOICE_PERSIST_KEY
-	&& persistedStores[3].options?.persist?.name === VOLUME_PERSIST_KEY
-	&& persistedStores[4].options?.persist?.name === WIDTH_PERSIST_KEY
-	&& persistedStores[5].options?.persist?.name === HEIGHT_PERSIST_KEY
-	&& persistedStores[6].options === undefined
-	&& persistedStores[7].options === undefined, JSON.stringify(persistedStores.map((store) => store.options?.persist?.name)));
-check('六个配置默认值符合出厂表', face.notifyStore.getSnapshot() === DEFAULTS.notify
+	&& persistedStores[1].options?.persist?.name === NOTIFY_MODE_PERSIST_KEY
+	&& persistedStores[2].options?.persist?.name === SOUND_PERSIST_KEY
+	&& persistedStores[3].options?.persist?.name === SOUND_CHOICE_PERSIST_KEY
+	&& persistedStores[4].options?.persist?.name === VOLUME_PERSIST_KEY
+	&& persistedStores[5].options === undefined, JSON.stringify(persistedStores.map((store) => store.options?.persist?.name)));
+check('五个配置默认值符合出厂表', face.notifyStore.getSnapshot() === DEFAULTS.notify
+	&& face.notifyModeStore.getSnapshot() === DEFAULTS.notifyMode
 	&& face.soundStore.getSnapshot() === DEFAULTS.sound
 	&& face.soundChoiceStore.getSnapshot() === DEFAULTS.soundChoice
-	&& face.volumeStore.getSnapshot() === DEFAULTS.volume
-	&& face.widthStore.getSnapshot() === DEFAULTS.width
-	&& face.heightStore.getSnapshot() === DEFAULTS.height);
-check('系统通知默认开启', face.notifyStore.getSnapshot() === true);
+	&& face.volumeStore.getSnapshot() === DEFAULTS.volume);
+check('系统弹窗默认开启且时机为「任何情况都弹」', face.notifyStore.getSnapshot() === true && face.notifyModeStore.getSnapshot() === 'always');
 
 check('排障钩子暴露了状态', typeof windowStub.__dshTaskReminder?.state === 'function' && windowStub.__dshTaskReminder.version === PLUGIN_VERSION);
 check('排障钩子带当场试一次（test）', typeof windowStub.__dshTaskReminder?.test === 'function');
 check('排障钩子带只放音（sound）', typeof windowStub.__dshTaskReminder?.sound === 'function');
-check('排障状态覆盖六个配置与通知权限', (() => {
+check('排障状态覆盖五个配置、弹窗时机、通知权限与前台状态', (() => {
 	const state = windowStub.__dshTaskReminder.state();
-	return ['notify', 'sound', 'soundChoice', 'volume', 'width', 'height', 'notificationPermission', 'notificationSupported'].every((key) => key in state) && !('popup' in state);
+	return ['notify', 'notifyMode', 'sound', 'soundChoice', 'volume', 'focused', 'notificationPermission', 'notificationSupported'].every((key) => key in state) && !('toasts' in state) && !('popup' in state);
 })());
 check('做种后 s1 记为 running、s2/s3 记为空闲', JSON.stringify(windowStub.__dshTaskReminder.state().running) === JSON.stringify([['s1', true], ['s2', false], ['s3', false]]), JSON.stringify(windowStub.__dshTaskReminder.state().running));
 
-// 通知权限自动申请：首次装载 + 通知默认开着 + 权限未定 → 替用户申请一次并记账。
+/** 取一个元素的直接子元素（桩里单数组参数会产生一层嵌套，统一拍平）。 */
+const kidsOf = (node) => (Array.isArray(node.children) ? node.children : []).flat(Infinity);
+/** 整页渲染设置页并拍平成节点表。 */
+const renderSection = () => {
+	const nodes = [];
+	const walk = (node) => {
+		if (node === null || typeof node !== 'object') return;
+		nodes.push(node);
+		for (const child of (Array.isArray(node.children) ? node.children : []).flat(Infinity)) walk(child);
+	};
+	walk(section.entry.component(sectionFace()));
+	return nodes;
+};
+let sectionNodes = renderSection();
+
+// 通知权限自动申请：首次装载 + 弹窗默认开着 + 权限未定 → 替用户申请一次并记账。
 check('首次装载即替用户申请一次通知权限', notificationLog.requested === 1, String(notificationLog.requested));
 check('申请记录落进 localStorage（之后不再自动问）', windowStub.localStorage.getItem('dsh.task-reminder.permission-asked') === '1', windowStub.localStorage.getItem('dsh.task-reminder.permission-asked'));
-check('自动申请不改动通知开关本身', face.notifyStore.getSnapshot() === true);
+check('自动申请不改动弹窗开关本身', face.notifyStore.getSnapshot() === true);
+
+// 装载即创建 AudioContext：Windows 音频设备冷初始化（3-5 秒）在页面加载时
+// 提前付掉；无手势时 context 被自动播放策略挂在 suspended 不渲染，只排一条
+// 听不见的预热音。第一次用户手势负责 resume 与兜底预热。
+check('装载即创建 AudioContext（设备初始化提前付掉）', audioLog.contexts === 1, String(audioLog.contexts));
+check('装载期只排一条听不见的预热音（gain 0，无可闻提示音）', audioLog.oscillators.length === 1 && audioLog.gains.length === 1 && audioLog.gains[0].peak === null, JSON.stringify(audioLog.gains));
+fireWindow('pointerdown');
+check('第一次用户手势只做 resume/兜底，不再建 context、不再加预热音', audioLog.contexts === 1 && audioLog.oscillators.length === 1, `${audioLog.contexts} / ${audioLog.oscillators.length}`);
 
 // ---------------------------------------------------------------------------
-// 完成事件驱动：边沿、面板判定、常驻卡片、堆叠与回收
+// 完成事件驱动：边沿、两条通道、去重、两种弹窗时机
 // ---------------------------------------------------------------------------
 
 const statusListener = listeners.find((entry) => entry.name === 'api-session/status').fn;
-const overlayComponent = overlay.entry.component;
-const overlayFace = () => overlay.entry.options.inject();
-const toastsNow = () => overlayFace().hooks.toasts.getSnapshot();
 const resetAudioLog = () => {
 	audioLog.oscillators.length = 0;
 	audioLog.gains.length = 0;
@@ -520,322 +543,219 @@ const resetNotificationLog = () => {
 	notificationLog.closed = 0;
 	notificationLog.focused = 0;
 };
-/**
- * 把 inject face 换成渲染器会递进组件的 props：hooks.toasts 物化成 useToasts。
- * @returns 浮层组件的 prop 包。
- */
-const overlayComponentProps = () => {
-	const face = overlayFace();
-	return {
-		useToasts: (selector) => selector(face.hooks.toasts.getSnapshot()),
-		useWidth: (selector) => selector(face.hooks.width.getSnapshot()),
-		useHeight: (selector) => selector(face.hooks.height.getSnapshot()),
-		dismiss: face.dismiss,
-		openSession: face.openSession,
-	};
+/** 完成一次任务（走事件通道，s2 专用）。 */
+const completeOnce = () => {
+	statusListener('s2', true);
+	statusListener('s2', false);
 };
-
-/** 让浮层组件“渲染”一次，把面板状态报进去。 */
-const reportPanel = (activePanelId, withHook = true) => {
-	overlayComponent({
-		...overlayComponentProps(),
-		usePanelInfo: withHook ? (selector) => selector({ activePanelId }) : undefined,
-		t,
-	});
+/** 合并窗口到点：把未取消的定时器条目当场打到（桩里时间不走，手动推进）。 */
+const flushTimers = () => {
+	for (const entry of timerEntries) {
+		if (entry.cancelled || entry.fired) continue;
+		entry.fired = true;
+		entry.fn();
+	}
 };
 
 console.log('');
 console.log('完成事件');
 
-// 浮层尚未渲染：view.panelHook=false → 按“非对话窗口”处理，不静默失效。
-resetAudioLog();
+// 权限授予后：默认时机「任何情况都弹」—— 页面有焦点也弹。完成弹窗延迟一个
+// 合并窗口发出（给可能随后到达的 error 让位），提示音在边沿上立即响。
+FakeNotification.permission = 'granted';
 resetNotificationLog();
-statusListener('s1', false);
-check('没拿到面板钩子时不静默失效：仍弹卡', toastsNow().length === 1 && toastsNow()[0].title === '旧任务', JSON.stringify(toastsNow()));
-check('每弹一张卡都挂一个自动收起定时器（TTL 正确）', timerEntries.length === 1 && timerEntries[0].ms === TOAST_TTL_MS && timerEntries[0].disposed === false);
-check('默认 80 音量（整档 +20 → master 1.0）排两声、峰值 0.4375/0.3625', audioLog.oscillators.length === 2 && audioLog.gains.length === 2
-	&& closeTo(audioLog.oscillators[0].freq, 987.77) && closeTo(audioLog.oscillators[1].freq, 1318.51)
-	&& closeTo(audioLog.gains[0].peak, 0.4375) && closeTo(audioLog.gains[1].peak, 0.3625)
-	&& audioLog.oscillators.every((oscillator) => oscillator.type === 'sine'), JSON.stringify(audioLog.gains.map((gain) => gain.peak)));
-check('系统通知默认开启但浏览器权限未授：先不发通知', notificationLog.created.length === 0, String(notificationLog.created.length));
-
-// 清场：手动关掉卡片。
-overlayFace().dismiss(toastsNow()[0].id);
-check('dismiss 移除卡片并销毁它的定时器', toastsNow().length === 0 && timerEntries[0].disposed === true);
-
-// 正看着对话窗口（activePanelId === null）：卡与通知保持安静，但提示音照响。
-reportPanel(null);
-const cardsBeforeWatching = toastsNow().length;
-const notificationsBeforeWatching = notificationLog.created.length;
 resetAudioLog();
-statusListener('s2', true);
-statusListener('s2', false);
-check('在对话窗口时不弹卡', toastsNow().length === cardsBeforeWatching, JSON.stringify(toastsNow()));
-check('在对话窗口时提示音照响（不管人在不在）', audioLog.oscillators.length === 2 && audioLog.gains.length === 2, String(audioLog.oscillators.length));
-check('看着对话时的完成另记进 soundWhileWatching', windowStub.__dshTaskReminder.state().stats.soundWhileWatching === 1, String(windowStub.__dshTaskReminder.state().stats.soundWhileWatching));
-check('在对话窗口时也不发通知', notificationLog.created.length === notificationsBeforeWatching);
-check('对话窗口内的完成记进 skippedInConversation', windowStub.__dshTaskReminder.state().stats.skippedInConversation === 1, String(windowStub.__dshTaskReminder.state().stats.skippedInConversation));
+completeOnce();
+check('完成边沿先只响提示音（弹窗在合并窗口后发出）', notificationLog.created.length === 0 && audioLog.oscillators.length === 2, `${notificationLog.created.length} / ${audioLog.oscillators.length}`);
+flushTimers();
+check('任务完成即发一条系统弹窗（默认任何情况都弹）', notificationLog.created.length === 1, String(notificationLog.created.length));
+check('弹窗标题/正文', notificationLog.created[0]?.title === '对话任务已完成' && notificationLog.created[0]?.options?.body === '另一个会话', JSON.stringify(notificationLog.created[0]));
+check('每次弹窗独立 tag（后一条不顶掉前一条）', String(notificationLog.created[0]?.options?.tag).startsWith(`${NOTIFICATION_TAG}-`) && notificationLog.created[0].options.tag !== NOTIFICATION_TAG, String(notificationLog.created[0]?.options?.tag));
+check('弹窗记进 stats.notifications', windowStub.__dshTaskReminder.state().stats.notifications === 1, String(windowStub.__dshTaskReminder.state().stats.notifications));
+check('提示音每次完成都响（页面有焦点也响）', audioLog.oscillators.length === 2 && audioLog.gains.length === 2, String(audioLog.oscillators.length));
+check('排障状态记录完成来源为 event', windowStub.__dshTaskReminder.state().stats.lastCompletion?.source === 'event');
+notificationLog.created[0].onclick();
+check('点击弹窗：窗口回前台并打开对应会话、关闭弹窗', notificationLog.focused === 1 && opened.includes('s2') && notificationLog.closed === 1, JSON.stringify(notificationLog));
 
-// 失焦 / 切走标签页：主区还停在对话窗口，但人已经不在这个窗口前 —— 要提醒。
-// （这正是「在别的应用里等任务跑完却收不到提醒」的修复场景。）
-reportPanel(null);
+// 「仅非前台窗口」：页面有焦点 → 不弹，记 skippedFocused。
+face.setNotifyMode('unfocused');
+resetNotificationLog();
+resetAudioLog();
+completeOnce();
+flushTimers();
+check('仅非前台窗口时：页面有焦点不弹窗', notificationLog.created.length === 0, String(notificationLog.created.length));
+check('仅非前台窗口时：有焦点的完成记进 skippedFocused', windowStub.__dshTaskReminder.state().stats.skippedFocused === 1, String(windowStub.__dshTaskReminder.state().stats.skippedFocused));
+check('仅非前台窗口时：提示音照响', audioLog.oscillators.length === 2, String(audioLog.oscillators.length));
+
+// 窗口失焦（人在别的应用）：要弹。
 setFocus({ hidden: false, focused: false });
-check('排障状态跟上失焦（away）', windowStub.__dshTaskReminder.state().away === true && windowStub.__dshTaskReminder.state().inConversationWindow === true, JSON.stringify(windowStub.__dshTaskReminder.state()));
-statusListener('s2', true);
-statusListener('s2', false);
-check('窗口失焦（人在别的应用）时任务完成也提醒', toastsNow().length === 1 && toastsNow()[0].sessionId === 's2', JSON.stringify(toastsNow()));
-overlayFace().dismiss(toastsNow()[0].id);
+check('排障状态跟上失焦（focused=false）', windowStub.__dshTaskReminder.state().focused === false, JSON.stringify(windowStub.__dshTaskReminder.state().focused));
+resetNotificationLog();
+completeOnce();
+flushTimers();
+check('仅非前台窗口时：窗口失焦完成任务弹窗', notificationLog.created.length === 1, String(notificationLog.created.length));
 
-reportPanel(null);
+// 标签页被切走：要弹。
 setFocus({ hidden: true, focused: true });
-check('排障状态跟上标签页隐藏', windowStub.__dshTaskReminder.state().away === true);
-statusListener('s2', true);
-statusListener('s2', false);
-check('标签页被切走时任务完成也提醒', toastsNow().length === 1 && toastsNow()[0].sessionId === 's2', JSON.stringify(toastsNow()));
-overlayFace().dismiss(toastsNow()[0].id);
+check('排障状态跟上标签页隐藏', windowStub.__dshTaskReminder.state().focused === false);
+resetNotificationLog();
+completeOnce();
+flushTimers();
+check('仅非前台窗口时：标签页切走完成任务弹窗', notificationLog.created.length === 1, String(notificationLog.created.length));
 
-// 回到可见且有焦点的对话窗口：重新静默。
+// 回到有焦点的可见窗口：重新静默。
 setFocus({ hidden: false, focused: true });
-check('回到有焦点的对话窗口时 away 归位', windowStub.__dshTaskReminder.state().away === false);
-resetAudioLog();
-statusListener('s2', true);
-statusListener('s2', false);
-check('回到对话窗口且窗口有焦点时不弹卡', toastsNow().length === 0, JSON.stringify(toastsNow()));
-check('回到对话窗口后提示音仍然照响', audioLog.oscillators.length === 2 && closeTo(audioLog.gains[0].peak, 0.4375), String(audioLog.oscillators.length));
+check('回到有焦点的窗口时 focused 归位', windowStub.__dshTaskReminder.state().focused === true);
+resetNotificationLog();
+completeOnce();
+flushTimers();
+check('回到前台后仅非前台窗口时不再弹', notificationLog.created.length === 0, String(notificationLog.created.length));
 
-// 停在其它面板：弹卡。
-reportPanel('settings');
-statusListener('s2', true);
-statusListener('s2', false);
-check('停在非对话窗口时任务完成弹一张卡', toastsNow().length === 1 && toastsNow()[0].sessionId === 's2' && toastsNow()[0].title === '另一个会话', JSON.stringify(toastsNow()));
+// 「任何情况都弹」：任何前台状态下都弹。
+face.setNotifyMode('always');
+for (const focus of [{ hidden: false, focused: true }, { hidden: true, focused: true }, { hidden: false, focused: false }]) {
+	setFocus(focus);
+	resetNotificationLog();
+	completeOnce();
+	flushTimers();
+	check(`任何情况都弹：${JSON.stringify(focus)} 下完成也弹窗`, notificationLog.created.length === 1, String(notificationLog.created.length));
+}
+setFocus({ hidden: false, focused: true });
 
 // running→running 的重复事件、以及非 running→非 running 都不再触发。
-const before = toastsNow().length;
+const before = windowStub.__dshTaskReminder.state().stats.notifications;
 statusListener('s2', false);
 statusListener('s2', false);
-check('同一边沿不重复触发', toastsNow().length === before);
+flushTimers();
+check('同一边沿不重复触发', windowStub.__dshTaskReminder.state().stats.notifications === before);
 
 // 通道二：官方会话列表的 running 位变化独立驱动完成（s3 专用，互不干扰）。
+resetNotificationLog();
 setRunning('s3', true);
 setRunning('s3', false);
-check('列表通道独立收到完成并弹卡', toastsNow().length === before + 1 && toastsNow().at(-1).sessionId === 's3' && toastsNow().at(-1).title === '第三个会话', JSON.stringify(toastsNow().at(-1)));
-check('排障状态记录完成来源为 list', windowStub.__dshTaskReminder.state().stats.lastCompletion?.source === 'list' && windowStub.__dshTaskReminder.state().stats.completed >= 1, JSON.stringify(windowStub.__dshTaskReminder.state().stats));
-overlayFace().dismiss(toastsNow().at(-1).id);
+flushTimers();
+check('列表通道独立收到完成并发弹窗', notificationLog.created.length === 1 && notificationLog.created[0]?.options?.body === '第三个会话', JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
+check('排障状态记录完成来源为 list', windowStub.__dshTaskReminder.state().stats.lastCompletion?.source === 'list');
 
 // 两条通道同时看到同一次完成：只触发一次（共用边沿表）。
-const beforeDedup = toastsNow().length;
+resetNotificationLog();
 const completedBefore = windowStub.__dshTaskReminder.state().stats.completed;
 setRunning('s3', true);
 statusListener('s3', true);
 setRunning('s3', false);
 statusListener('s3', false);
-check('两条通道去重：同一次完成只弹一张卡', toastsNow().length === beforeDedup + 1, JSON.stringify(toastsNow()));
+flushTimers();
+check('两条通道去重：同一次完成只发一次', notificationLog.created.length === 1, String(notificationLog.created.length));
 check('去重后 completed 只加一', windowStub.__dshTaskReminder.state().stats.completed === completedBefore + 1, `${windowStub.__dshTaskReminder.state().stats.completed} vs ${completedBefore + 1}`);
-overlayFace().dismiss(toastsNow().at(-1).id);
 
-// 卡片是常驻通道：提示音与通知全关也照样弹卡。
-face.setSound(false);
-face.setNotify(false);
-const cardsBeforeAllOff = toastsNow().length;
-resetAudioLog();
+// 关掉弹窗开关：不再发送（提示音不受影响）。
 resetNotificationLog();
-statusListener('s2', true);
-statusListener('s2', false);
-check('提示音与通知全关时卡片照弹（常驻通道）', toastsNow().length === cardsBeforeAllOff + 1, JSON.stringify(toastsNow().length - cardsBeforeAllOff));
-check('提示音与通知全关时既不放音也不发通知', audioLog.oscillators.length === 0 && notificationLog.created.length === 0);
-overlayFace().dismiss(toastsNow().at(-1).id);
-
-// 重新打开提示音，验证堆叠上限与「查看」。
-face.setSound(true);
-for (let round = 0; round < MAX_TOASTS + 2; round += 1) {
-	statusListener('s2', true);
-	statusListener('s2', false);
-}
-check(`同屏最多 ${MAX_TOASTS} 张卡`, toastsNow().length === MAX_TOASTS, String(toastsNow().length));
-const evicted = timerEntries.filter((entry) => entry.disposed).length;
-check('被挤掉的卡定时器已回收', evicted >= MAX_TOASTS - 1, String(evicted));
-
-const sessionToast = toastsNow()[0];
-overlayFace().openSession(sessionToast.sessionId);
-check('「查看」回到对应会话', opened.includes('s2'), JSON.stringify(opened));
-check('「查看」后该会话的卡被收起', toastsNow().every((toast) => toast.sessionId !== 's2'), JSON.stringify(toastsNow()));
-
-// 制造一张新卡，供下面的渲染断言使用。
-statusListener('s2', true);
-statusListener('s2', false);
-check('弹卡功能持续可用', toastsNow().length === 1, JSON.stringify(toastsNow()));
-
-// ---------------------------------------------------------------------------
-// 组件渲染：浮层卡面（含宽高内联样式）与设置页
-// ---------------------------------------------------------------------------
-
-// 当场试一次：不经过完成判定与面板判定，直接弹卡 + 放音。
-for (const toast of toastsNow()) overlayFace().dismiss(toast.id);
-face.setSoundChoice(0);
-face.setVolume(80);
 resetAudioLog();
-windowStub.__dshTaskReminder.test();
-check('test() 当场弹一张卡（取列表第一个会话的名）', toastsNow().length === 1 && toastsNow()[0].sessionId === 's1' && toastsNow()[0].title === '旧任务', JSON.stringify(toastsNow()));
-check('test() 按当前音效与音量放提示音', audioLog.oscillators.length === 2 && audioLog.gains.length === 2 && closeTo(audioLog.gains[0].peak, 0.4375), `${audioLog.oscillators.length} / ${audioLog.gains.length}`);
-
-console.log('');
-console.log('组件渲染');
-
-reportPanel('settings');
-const flatten = (node, into = []) => {
-	if (node === null || typeof node !== 'object') return into;
-	into.push(node);
-	for (const child of (Array.isArray(node.children) ? node.children : []).flat(Infinity)) flatten(child, into);
-	return into;
-};
-let cards = overlayComponent({ ...overlayComponentProps(), usePanelInfo: (selector) => selector({ activePanelId: 'settings' }), t });
-let nodes = flatten(cards);
-check('有卡时浮层渲染右下角容器', nodes[0]?.props?.className === CSS.stack && nodes[0]?.props?.role === 'status', JSON.stringify(nodes[0]?.props));
-check('卡片带会话标题', nodes.some((node) => node.type === 'div' && node.children?.[0] === '旧任务'));
-const cardNode = nodes.find((node) => node.props?.className === CSS.toast);
-check('卡片默认宽 420px 且不写高度（随内容自动）', cardNode?.props?.style?.width === '420px' && cardNode?.props?.style?.maxWidth === 'calc(100vw - 16px)' && cardNode?.props?.style?.height === undefined, JSON.stringify(cardNode?.props?.style));
-const openButton = nodes.find((node) => node.type === 'button' && node.children?.[0] === '查看');
-check('卡片有「查看」按钮且绑定了 openSession', openButton !== undefined && typeof openButton.props.onClick === 'function');
-const closeButton = nodes.find((node) => node.type === 'button' && node.props?.['aria-label'] === '关闭提醒');
-check('卡片有关闭按钮且绑定了 dismiss', closeButton !== undefined && typeof closeButton.props.onClick === 'function');
-
-// 卡宽卡高可调：写进卡片内联样式。
-face.setWidth(300);
-face.setHeight(200);
-cards = overlayComponent({ ...overlayComponentProps(), usePanelInfo: (selector) => selector({ activePanelId: 'settings' }), t });
-nodes = flatten(cards);
-const sizedCard = nodes.find((node) => node.props?.className === CSS.toast);
-check('调宽调高后写进卡片内联样式', sizedCard?.props?.style?.width === '300px' && sizedCard?.props?.style?.height === '200px', JSON.stringify(sizedCard?.props?.style));
-face.setWidth(DEFAULTS.width);
-face.setHeight(DEFAULTS.height);
-
-overlayFace().dismiss(toastsNow()[0].id);
-cards = overlayComponent({ ...overlayComponentProps(), usePanelInfo: (selector) => selector({ activePanelId: 'settings' }), t });
-check('没有卡时浮层渲染 null', cards === null);
-check('浮层卸载渲染后仍持续上报面板状态', windowStub.__dshTaskReminder.state().panelHook === true && windowStub.__dshTaskReminder.state().inConversationWindow === false);
-
-// 设置页：整页渲染 + 控件 + 交互。
-// 先把通知开关恢复成默认开启，供下面的「默认态」断言使用。
+face.setNotify(false);
+completeOnce();
+flushTimers();
+check('关掉系统弹窗后不再发送', notificationLog.created.length === 0 && face.notifyStore.getSnapshot() === false, String(notificationLog.created.length));
+check('关掉弹窗后提示音照响', audioLog.oscillators.length === 2, String(audioLog.oscillators.length));
 face.setNotify(true);
-/** 取一个元素的直接子元素（桩里单数组参数会产生一层嵌套，统一拍平）。 */
-const kidsOf = (node) => (Array.isArray(node.children) ? node.children : []).flat(Infinity);
-const renderSection = () => flatten(section.entry.component(sectionFace()));
-let sectionNodes = renderSection();
-const switches = sectionNodes.filter((node) => node.type === 'Switch');
-check('设置页渲染两个开关（系统通知 / 提示音），没有弹窗开关', switches.length === 2, String(switches.length));
-check('系统通知排在第一位且默认开启', switches[0]?.props?.label === '系统通知' && switches[0]?.props?.checked === true, JSON.stringify(switches.map((node) => [node.props.label, node.props.checked])));
-check('提示音开关默认开启', switches[1]?.props?.label === '完成提示音' && switches[1]?.props?.checked === true);
-check('两个开关的 onChange 都接到了写回函数', switches.every((node) => typeof node.props.onChange === 'function'));
-check('设置页没有「试听」按钮（切换音效即发声）', !sectionNodes.some((node) => node.type === 'button' && node.children?.[0] === '试听'));
-const segmentedButtons = sectionNodes.filter((node) => node.type === 'button' && typeof node.props?.['aria-pressed'] === 'boolean');
-check('音效选择是四选一分段控件', segmentedButtons.length === 4 && segmentedButtons.filter((node) => node.props['aria-pressed'] === true).length === 1, String(segmentedButtons.length));
-check('音效分段按钮文案与顺序', JSON.stringify(segmentedButtons.map((node) => node.children?.[0])) === JSON.stringify(['两声（经典）', '三声上扬', '上升琶音', '圆润三角波']), JSON.stringify(segmentedButtons.map((node) => node.children?.[0])));
-check('默认选中第一种音效', segmentedButtons[0]?.props['aria-pressed'] === true);
-const stepperGroups = sectionNodes.filter((node) => node.type === 'div' && node.props?.role === 'group'
-	&& kidsOf(node).some((child) => child.props?.['aria-label'] === '减小'));
-check('音量/卡宽/卡高三个步进器', stepperGroups.length === 3 && JSON.stringify(stepperGroups.map((node) => node.props['aria-label'])) === JSON.stringify(['提示音音量', '提醒卡宽度', '提醒卡高度']), JSON.stringify(stepperGroups.map((node) => node.props['aria-label'])));
-const decOf = (group) => kidsOf(group).find((node) => node.props?.['aria-label'] === '减小');
-const incOf = (group) => kidsOf(group).find((node) => node.props?.['aria-label'] === '增大');
-check('每个步进器都有增减按钮', stepperGroups.every((group) => decOf(group) !== undefined && incOf(group) !== undefined));
-check('高度为 0（自动）时只让增大', decOf(stepperGroups[2]).props.disabled === true && incOf(stepperGroups[2]).props.disabled === false);
-check('音量与宽度在界内时增减都可用', decOf(stepperGroups[0]).props.disabled === false && incOf(stepperGroups[0]).props.disabled === false
-	&& decOf(stepperGroups[1]).props.disabled === false && incOf(stepperGroups[1]).props.disabled === false);
-const resetButton = sectionNodes.find((node) => node.type === 'button' && node.children?.[0] === '恢复默认');
-check('设置页有「恢复默认」按钮，默认值时置灰', resetButton !== undefined && resetButton.props.disabled === true, String(resetButton?.props?.disabled));
-check('默认值时恢复默认行显示「已是默认值」文案', sectionNodes.some((node) => node.children?.[0] === '当前各项都已经是默认值。'));
-check('音量行说明带当前值（插值）', sectionNodes.some((node) => node.children?.[0] === '提示音的整体增益，当前 80%；0 为静音'), JSON.stringify(sectionNodes.map((node) => node.children?.[0]).filter((text) => typeof text === 'string' && text.includes('增益'))));
-check('卡宽/卡高行说明带当前值（插值）', sectionNodes.some((node) => node.children?.[0] === '提醒卡宽度，当前 420px；窗口过窄时自动收缩，不会顶出可视范围')
-	&& sectionNodes.some((node) => node.children?.[0] === '提醒卡高度，当前 0px；0 表示不限制，随内容自动撑开'));
-
-// 提醒卡大小预览：默认态 / 实时跟随宽高 / 按钮不接线。
-const previewCard = sectionNodes.find((node) => node.props?.className === CSS.toast);
-check('设置页有提醒卡预览（默认宽 420px、不写高度）', previewCard !== undefined && previewCard?.props?.style?.width === '420px' && previewCard?.props?.style?.height === undefined, JSON.stringify(previewCard?.props?.style));
-check('预览区有标题与说明', sectionNodes.some((node) => node.children?.[0] === '提醒卡预览')
-	&& sectionNodes.some((node) => node.children?.[0] === '按当前宽高实时画出的样例卡；调整宽度 / 高度时这里立即生效'));
-check('预览卡带示例会话名', sectionNodes.some((node) => node.children?.[0] === '示例会话'));
-const previewButtons = sectionNodes.filter((node) => node.type === 'button' && (node.children?.[0] === '查看' || node.children?.[0] === '×'));
-check('预览卡按钮只作样子：不接线、不进 Tab 序', previewButtons.length === 2
-	&& previewButtons.every((node) => node.props.onClick === undefined && node.props.tabIndex === -1), JSON.stringify(previewButtons.map((node) => [node.children?.[0], node.props.onClick, node.props.tabIndex])));
-face.setWidth(300);
-face.setHeight(120);
-sectionNodes = renderSection();
-const previewCardSized = sectionNodes.find((node) => node.props?.className === CSS.toast);
-check('调宽调高后预览卡立即生效（300px × 120px）', previewCardSized?.props?.style?.width === '300px' && previewCardSized?.props?.style?.height === '120px', JSON.stringify(previewCardSized?.props?.style));
-face.setWidth(DEFAULTS.width);
-face.setHeight(DEFAULTS.height);
-
-// 交互：切音效即发声；步进器改音量/宽高；恢复默认。
-resetAudioLog();
-segmentedButtons[1].props.onClick(); // 三声上扬
-check('切换音效立即发声（三声上扬 3 音，按当前音量 master 1.0）', face.soundChoiceStore.getSnapshot() === 1
-	&& audioLog.oscillators.length === 3 && audioLog.gains.length === 3
-	&& closeTo(audioLog.oscillators[0].freq, 1046.5) && closeTo(audioLog.oscillators[1].freq, 1318.51) && closeTo(audioLog.oscillators[2].freq, 1567.98)
-	&& closeTo(audioLog.gains[0].peak, 0.4) && closeTo(audioLog.gains[1].peak, 0.4) && closeTo(audioLog.gains[2].peak, 0.42), JSON.stringify(audioLog.gains.map((gain) => gain.peak)));
-resetAudioLog();
-segmentedButtons[2].props.onClick(); // 上升琶音
-check('再切到上升琶音立即发声（4 音）', face.soundChoiceStore.getSnapshot() === 2 && audioLog.oscillators.length === 4, String(audioLog.oscillators.length));
-incOf(stepperGroups[0]).props.onClick();
-check('点音量「+」按步进 +5', face.volumeStore.getSnapshot() === 85, String(face.volumeStore.getSnapshot()));
-decOf(stepperGroups[1]).props.onClick();
-check('点宽度「−」按步进 −10', face.widthStore.getSnapshot() === 410, String(face.widthStore.getSnapshot()));
-incOf(stepperGroups[2]).props.onClick();
-check('点高度「+」按步进 +20（0 → 20）', face.heightStore.getSnapshot() === 20, String(face.heightStore.getSnapshot()));
-
-// 恢复默认：先弄花，再一键写回。
-face.setNotify(false);
-face.setSound(false);
-face.setSoundChoice(3);
-face.setVolume(40);
-face.setWidth(640);
-face.setHeight(400);
-sectionNodes = renderSection();
-const resetButtonAfter = sectionNodes.find((node) => node.type === 'button' && node.children?.[0] === '恢复默认');
-check('改花后「恢复默认」按钮置灰解除', resetButtonAfter?.props?.disabled === false, String(resetButtonAfter?.props?.disabled));
-check('改花后说明换成默认值清单', sectionNodes.some((node) => typeof node.children?.[0] === 'string' && node.children[0].startsWith('一键写回全部默认值')));
-resetButtonAfter.props.onClick();
-check('恢复默认写回全部六个配置（通知回开）', face.notifyStore.getSnapshot() === true && face.soundStore.getSnapshot() === true
-	&& face.soundChoiceStore.getSnapshot() === 0 && face.volumeStore.getSnapshot() === 80
-	&& face.widthStore.getSnapshot() === 420 && face.heightStore.getSnapshot() === 0,
-	JSON.stringify(windowStub.__dshTaskReminder.state()));
 
 // ---------------------------------------------------------------------------
-// 系统通知（Web Notification）：三种权限路径 + 不支持
+// 出错停止（api-session/error）与等你回答（pendingInteraction 出现边沿）
 // ---------------------------------------------------------------------------
 
 console.log('');
-console.log('系统通知');
+console.log('出错与待答');
 
-// ① 已授权：完成即发通知；点击通知 → 窗口回前台 + 打开会话 + 关闭通知。
-FakeNotification.permission = 'granted';
+const errorListener = listeners.find((entry) => entry.name === 'api-session/error')?.fn;
+check('订阅了 api-session/error 出错事件', typeof errorListener === 'function');
+check('只读订阅了 uiSession.sessionStatus（不碰 user-questions 应答链）', statusSubscribers.size === 1 && !listeners.some((entry) => entry.name === 'user-questions/request'), String(statusSubscribers.size));
+check('排障状态带 questions / errors 计数', (() => {
+	const stats = windowStub.__dshTaskReminder.state().stats;
+	return 'questions' in stats && 'errors' in stats;
+})());
+
+// ① 独立的出错（无完成边沿）：错误弹窗立即发（错误不延迟），正文是错误信息。
 resetNotificationLog();
-const notificationsBeforeGrant = windowStub.__dshTaskReminder.state().stats.notifications;
-const cardsBeforeGrant = toastsNow().length;
+resetAudioLog();
+errorListener('s2', '400 Bad Request: invalid model');
+check('出错即发错误弹窗（标题/正文）', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '任务出错已停止' && notificationLog.created[0]?.options?.body === '400 Bad Request: invalid model', JSON.stringify(notificationLog.created[0]));
+check('错误记进 stats.errors', windowStub.__dshTaskReminder.state().stats.errors === 1, String(windowStub.__dshTaskReminder.state().stats.errors));
+check('出错也响提示音', audioLog.oscillators.length === 2, String(audioLog.oscillators.length));
+
+// ② 无序之一：先完成边沿、后到错误 —— 未发的完成弹窗被取消，只报错误。
+resetNotificationLog();
+completeOnce();
+errorListener('s2', 'boom');
+flushTimers();
+check('完成边沿后到达错误：完成弹窗被取消，只报错误', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '任务出错已停止', JSON.stringify(notificationLog.created.map((item) => item.title)));
+
+// ③ 无序之二：先错误、后完成边沿（同一次停止）—— 合并窗口内完成被吞掉。
+const completedBefore3 = windowStub.__dshTaskReminder.state().stats.completed;
+resetNotificationLog();
+statusListener('s2', true);
+errorListener('s2', 'kaput');
+statusListener('s2', false);
+flushTimers();
+check('先错误后完成边沿：合并窗口内完成不重复播报', notificationLog.created.length === 1 && notificationLog.created[0]?.options?.body === 'kaput', JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
+check('合并后 completed 不增加（这次停止按错误计）', windowStub.__dshTaskReminder.state().stats.completed === completedBefore3, `${windowStub.__dshTaskReminder.state().stats.completed} vs ${completedBefore3}`);
+
+// ④ 新任务开始后错误合并窗口作废：再完成按完成报（错误 → running=true → 完成）。
+resetNotificationLog();
+errorListener('s2', 'early failure');
 statusListener('s2', true);
 statusListener('s2', false);
-check('开启后任务完成发一条系统通知', notificationLog.created.length === 1, String(notificationLog.created.length));
-check('通知能发出去时不重复弹卡', toastsNow().length === cardsBeforeGrant, JSON.stringify(toastsNow()));
-check('通知标题/正文/标记', notificationLog.created[0]?.title === '对话任务已完成' && notificationLog.created[0]?.options?.body === '另一个会话' && notificationLog.created[0]?.options?.tag === NOTIFICATION_TAG, JSON.stringify(notificationLog.created[0]));
-check('通知记进 stats.notifications', windowStub.__dshTaskReminder.state().stats.notifications === notificationsBeforeGrant + 1, String(windowStub.__dshTaskReminder.state().stats.notifications));
-notificationLog.created[0].onclick();
-check('点击通知：窗口回前台并打开对应会话、关闭通知', notificationLog.focused === 1 && opened.includes('s2') && notificationLog.closed === 1, JSON.stringify(notificationLog));
-for (const toast of toastsNow()) overlayFace().dismiss(toast.id);
+flushTimers();
+check('合并窗口被新 running 冲掉后：错误与完成各自播报', notificationLog.created.length === 2, JSON.stringify(notificationLog.created.map((item) => item.title)));
 
-// ② 权限被拒：通知通道不生效（但卡片/提示音照旧），设置页给出提示。
+// ⑤ 等你回答：pendingInteraction 出现边沿（只读 sessionStatus，不碰应答链）。
+resetNotificationLog();
+resetAudioLog();
+setPendingInteraction('s2', { sessionId: 's2', kind: 'question', key: 'question:1', questions: [{ id: 'q1', question: '要用哪个数据库？' }] });
+check('出现问题即发「等待你的回答」弹窗（正文是首个问题）', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '等待你的回答' && notificationLog.created[0]?.options?.body === '要用哪个数据库？', JSON.stringify(notificationLog.created[0]));
+check('待答记进 stats.questions', windowStub.__dshTaskReminder.state().stats.questions === 1, String(windowStub.__dshTaskReminder.state().stats.questions));
+check('待答也响提示音', audioLog.oscillators.length === 2, String(audioLog.oscillators.length));
+
+// ⑥ 同一会话的待答不重复提醒；回答后（interaction 消失）再次挂起才再提醒。
+setPendingInteraction('s2', { sessionId: 's2', kind: 'question', key: 'question:2', questions: [{ id: 'q1', question: '第二个问题？' }] });
+check('同一会话的待答不重复提醒', notificationLog.created.length === 1, String(notificationLog.created.length));
+setPendingInteraction('s2', null);
+setPendingInteraction('s2', { sessionId: 's2', kind: 'plan-review', key: 'question:3', questions: [{ id: 'q1', question: '计划可以吗？' }] });
+check('回答后再次挂起才再提醒', notificationLog.created.length === 2 && notificationLog.created[1]?.options?.body === '计划可以吗？', JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
+// 会话整个从快照里消失（被删除 / 归档）：清出待答集合，之后再挂起仍算新边沿。
+dropSessionFromStatus('s2');
+setPendingInteraction('s2', { sessionId: 's2', kind: 'question', key: 'question:9', questions: [{ id: 'q1', question: '回来后的新问题？' }] });
+check('会话从快照消失后再挂起仍提醒', notificationLog.created.length === 3 && notificationLog.created[2]?.options?.body === '回来后的新问题？', JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
+setPendingInteraction('s2', null);
+
+// ⑦ 待答也受时机门控：仅非前台窗口 + 页面有焦点 → 不弹，记 skippedFocused。
+const skippedBefore = windowStub.__dshTaskReminder.state().stats.skippedFocused;
+face.setNotifyMode('unfocused');
+resetNotificationLog();
+setPendingInteraction('s3', { sessionId: 's3', kind: 'question', key: 'question:4', questions: [{ id: 'q1', question: 's3 的问题？' }] });
+check('仅非前台窗口时：有焦点不弹待答窗', notificationLog.created.length === 0, String(notificationLog.created.length));
+check('被门控的待答记进 skippedFocused', windowStub.__dshTaskReminder.state().stats.skippedFocused === skippedBefore + 1, String(windowStub.__dshTaskReminder.state().stats.skippedFocused));
+face.setNotifyMode('always');
+setPendingInteraction('s3', null);
+
+// ---------------------------------------------------------------------------
+// 系统弹窗（Web Notification）：权限路径 + 不支持 + 竞态
+// ---------------------------------------------------------------------------
+
+console.log('');
+console.log('系统弹窗');
+
+// ① 权限被拒：不弹窗也不反复问。
 FakeNotification.permission = 'denied';
 resetNotificationLog();
 await face.setNotify(false);
 await face.setNotify(true);
-check('权限被拒时开启开关也不再问浏览器', notificationLog.requested === 0 && face.permissionStore.getSnapshot() === 'denied');
+check('权限被拒时开启开关也不再问浏览器', notificationLog.requested === 0 && face.permissionStore.getSnapshot() === 'denied', face.permissionStore.getSnapshot());
 resetAudioLog();
-statusListener('s2', true);
-statusListener('s2', false);
-check('权限被拒时不再发通知', notificationLog.created.length === 0, String(notificationLog.created.length));
-check('权限被拒时卡片与提示音照旧', toastsNow().some((toast) => toast.sessionId === 's2') && audioLog.oscillators.length === 2, JSON.stringify([toastsNow().length, audioLog.oscillators.length]));
-for (const toast of toastsNow()) overlayFace().dismiss(toast.id);
-sectionNodes = renderSection();
-check('权限被拒时设置页给出提示', sectionNodes.some((node) => node.children?.[0] === '浏览器已拒绝本站点的通知权限，请到地址栏的站点权限里改为「允许」后再试。'));
+completeOnce();
+flushTimers();
+check('权限被拒时不再发弹窗', notificationLog.created.length === 0, String(notificationLog.created.length));
+check('权限被拒时提示音照旧', audioLog.oscillators.length === 2, String(audioLog.oscillators.length));
 
-// ③ 权限待定：开启开关即申请；允许后生效。
+// ② 权限待定：开启开关即申请；允许后生效。
 FakeNotification.permission = 'default';
 resetNotificationLog();
 FakeNotification.requestPermission = () => {
@@ -847,23 +767,21 @@ await face.setNotify(true);
 await tick();
 check('权限待定时开启开关会申请一次', notificationLog.requested === 1, String(notificationLog.requested));
 check('授权后权限状态跟进', face.permissionStore.getSnapshot() === 'granted', face.permissionStore.getSnapshot());
-statusListener('s2', true);
-statusListener('s2', false);
-check('授权后任务完成恢复发通知', notificationLog.created.length === 1, String(notificationLog.created.length));
-check('授权后同样只发通知、不弹卡', toastsNow().length === 0, JSON.stringify(toastsNow()));
-for (const toast of toastsNow()) overlayFace().dismiss(toast.id);
-sectionNodes = renderSection();
-check('授权后不再显示拒绝提示', !sectionNodes.some((node) => typeof node.children?.[0] === 'string' && node.children[0].includes('已拒绝')));
+resetNotificationLog();
+completeOnce();
+flushTimers();
+check('授权后任务完成恢复发弹窗', notificationLog.created.length === 1, String(notificationLog.created.length));
 
-// ④ 关掉开关：完成不再发通知。
+// ③ 关掉开关：完成不再发。
 resetNotificationLog();
 await face.setNotify(false);
-statusListener('s2', true);
-statusListener('s2', false);
-check('关掉系统通知后不再发送', notificationLog.created.length === 0 && face.notifyStore.getSnapshot() === false);
-for (const toast of toastsNow()) overlayFace().dismiss(toast.id);
+completeOnce();
+flushTimers();
+check('关掉系统弹窗后不再发送', notificationLog.created.length === 0 && face.notifyStore.getSnapshot() === false);
+await face.setNotify(true);
+FakeNotification.permission = 'granted';
 
-// ⑤ 浏览器不支持 Notification：探测与调用全部安静失败。
+// ④ 浏览器不支持 Notification：探测与调用全部安静失败。
 const savedNotification = windowStub.Notification;
 delete windowStub.Notification;
 const notifierUnsupported = createNotifier();
@@ -873,7 +791,7 @@ check('不支持时 request 安静 resolve unsupported', await notifierUnsupport
 windowStub.Notification = savedNotification;
 check('支持时 supported 为真且权限现读', createNotifier().supported === true && createNotifier().permission() === FakeNotification.permission);
 
-// ⑥ 权限被用户在站点设置里重置回「询问」：设置页给出「申请通知权限」按钮，
+// ⑤ 权限被用户在站点设置里重置回「询问」：设置页给出「申请通知权限」按钮，
 //    点它即发起申请，不必先把开关拨关再拨开。
 FakeNotification.permission = 'default';
 FakeNotification.requestPermission = () => {
@@ -888,20 +806,13 @@ face.permissionStore.set('default');
 resetNotificationLog();
 sectionNodes = renderSection();
 const permissionButton = sectionNodes.find((node) => node.type === 'button' && node.children?.[0] === '申请通知权限');
-check('权限待定且通知开着时，设置页给出「申请通知权限」按钮', permissionButton !== undefined, JSON.stringify(sectionNodes.filter((node) => node.type === 'button').map((node) => node.children?.[0])));
+check('权限待定且弹窗开着时，设置页给出「申请通知权限」按钮', permissionButton !== undefined, JSON.stringify(sectionNodes.filter((node) => node.type === 'button').map((node) => node.children?.[0])));
 permissionButton.props.onClick();
 check('点「申请通知权限」即申请一次', notificationLog.requested === 1, String(notificationLog.requested));
 await tick();
 check('授权后权限状态跟进到 granted', face.permissionStore.getSnapshot() === 'granted', face.permissionStore.getSnapshot());
 
-// ⑦ 通知能发时只发通知、不弹卡：一次完成只出一种提醒。
-resetNotificationLog();
-statusListener('s2', true);
-statusListener('s2', false);
-check('通知授予后任务完成只发系统通知、不再弹卡', notificationLog.created.length === 1 && toastsNow().length === 0, JSON.stringify([notificationLog.created.length, toastsNow().length]));
-for (const toast of toastsNow()) overlayFace().dismiss(toast.id);
-
-// ⑧ 竞态回归：申请还没回来时用户又拨了关，过期的申请结果不得覆盖新状态。
+// ⑥ 竞态回归：申请还没回来时用户又拨了关，过期的申请结果不得覆盖新状态。
 FakeNotification.permission = 'default';
 let resolveHung;
 FakeNotification.requestPermission = () => {
@@ -916,6 +827,91 @@ await hungRequest;
 check('过期申请结果不覆盖新状态（申请竞态回归）', face.permissionStore.getSnapshot() === 'denied', face.permissionStore.getSnapshot());
 await face.setNotify(true);
 check('竞态后开关写回仍正常', face.notifyStore.getSnapshot() === true && face.permissionStore.getSnapshot() === 'denied', face.permissionStore.getSnapshot());
+FakeNotification.permission = 'granted';
+
+// ---------------------------------------------------------------------------
+// 设置页：整页渲染 + 控件 + 交互
+// ---------------------------------------------------------------------------
+
+console.log('');
+console.log('设置页');
+
+// 默认态：两个开关 + 弹窗时机（二选一，默认「任何情况都弹」）+ 音效四选一 + 音量步进 + 恢复默认。
+sectionNodes = renderSection();
+const switches = sectionNodes.filter((node) => node.type === 'Switch');
+check('设置页渲染两个开关（系统弹窗 / 提示音）', switches.length === 2, String(switches.length));
+check('系统弹窗排在第一位且默认开启', switches[0]?.props?.label === '系统弹窗' && switches[0]?.props?.checked === true, JSON.stringify(switches.map((node) => [node.props.label, node.props.checked])));
+check('提示音开关默认开启', switches[1]?.props?.label === '完成提示音' && switches[1]?.props?.checked === true);
+check('两个开关的 onChange 都接到了写回函数', switches.every((node) => typeof node.props.onChange === 'function'));
+check('设置页没有「试听」按钮（切换音效即发声）', !sectionNodes.some((node) => node.type === 'button' && node.children?.[0] === '试听'));
+
+const segmentedGroups = sectionNodes.filter((node) => node.type === 'div' && node.props?.role === 'group'
+	&& node.props?.['aria-label'] === '弹窗时机');
+const modeButtons = kidsOf(segmentedGroups[0]).filter((node) => node.type === 'button' && typeof node.props?.['aria-pressed'] === 'boolean');
+check('弹窗时机是二选一分段控件', modeButtons.length === 2, String(modeButtons.length));
+check('弹窗时机两个选项的文案与顺序', JSON.stringify(modeButtons.map((node) => node.children?.[0])) === JSON.stringify(['任何情况都弹', '仅非前台窗口']), JSON.stringify(modeButtons.map((node) => node.children?.[0])));
+check('默认选中「任何情况都弹」', modeButtons[0]?.props['aria-pressed'] === true && modeButtons[1]?.props['aria-pressed'] === false);
+modeButtons[1].props.onClick();
+check('点「仅非前台窗口」即写回配置', face.notifyModeStore.getSnapshot() === 'unfocused', face.notifyModeStore.getSnapshot());
+modeButtons[0].props.onClick();
+check('点「任何情况都弹」即写回配置', face.notifyModeStore.getSnapshot() === 'always');
+switches[0].props.onChange(false);
+check('关掉系统弹窗后时机行不再出现', !renderSection().some((node) => node.type === 'div' && node.props?.role === 'group' && node.props?.['aria-label'] === '弹窗时机'), '时机行仍存在');
+switches[0].props.onChange(true);
+sectionNodes = renderSection();
+
+const soundGroup = sectionNodes.find((node) => node.type === 'div' && node.props?.role === 'group'
+	&& node.props?.['aria-label'] === '提示音音效');
+const soundSegmentedButtons = kidsOf(soundGroup).filter((node) => node.type === 'button' && typeof node.props?.['aria-pressed'] === 'boolean');
+check('音效选择是四选一分段控件', soundSegmentedButtons.length === 4 && soundSegmentedButtons.filter((node) => node.props['aria-pressed'] === true).length === 1, String(soundSegmentedButtons.length));
+check('音效分段按钮文案与顺序', JSON.stringify(soundSegmentedButtons.map((node) => node.children?.[0])) === JSON.stringify(['两声（经典）', '三声上扬', '上升琶音', '圆润三角波']), JSON.stringify(soundSegmentedButtons.map((node) => node.children?.[0])));
+check('默认选中第一种音效', soundSegmentedButtons[0]?.props['aria-pressed'] === true);
+const stepperGroups = sectionNodes.filter((node) => node.type === 'div' && node.props?.role === 'group'
+	&& kidsOf(node).some((child) => child.props?.['aria-label'] === '减小'));
+check('音量一个步进器（卡片宽高已删除）', stepperGroups.length === 1 && JSON.stringify(stepperGroups.map((node) => node.props['aria-label'])) === JSON.stringify(['提示音音量']), JSON.stringify(stepperGroups.map((node) => node.props['aria-label'])));
+const decOf = (group) => kidsOf(group).find((node) => node.props?.['aria-label'] === '减小');
+const incOf = (group) => kidsOf(group).find((node) => node.props?.['aria-label'] === '增大');
+check('步进器有增减按钮', decOf(stepperGroups[0]) !== undefined && incOf(stepperGroups[0]) !== undefined);
+check('音量在界内时增减都可用', decOf(stepperGroups[0]).props.disabled === false && incOf(stepperGroups[0]).props.disabled === false);
+const resetButton = sectionNodes.find((node) => node.type === 'button' && node.children?.[0] === '恢复默认');
+check('设置页有「恢复默认」按钮，默认值时置灰', resetButton !== undefined && resetButton.props.disabled === true, String(resetButton?.props?.disabled));
+check('默认值时恢复默认行显示「已是默认值」文案', sectionNodes.some((node) => node.children?.[0] === '当前各项都已经是默认值。'));
+check('音量行说明带当前值（插值）', sectionNodes.some((node) => node.children?.[0] === '提示音的整体增益，当前 80%；0 为静音'), JSON.stringify(sectionNodes.map((node) => node.children?.[0]).filter((text) => typeof text === 'string' && text.includes('增益'))));
+
+// 交互：切音效即发声；步进器改音量；恢复默认。
+resetAudioLog();
+soundSegmentedButtons[1].props.onClick(); // 三声上扬
+check('切换音效立即发声（三声上扬 3 音，按当前音量 master 1.0）', face.soundChoiceStore.getSnapshot() === 1
+	&& audioLog.oscillators.length === 3 && audioLog.gains.length === 3
+	&& closeTo(audioLog.oscillators[0].freq, 1046.5) && closeTo(audioLog.oscillators[1].freq, 1318.51) && closeTo(audioLog.oscillators[2].freq, 1567.98)
+	&& closeTo(audioLog.gains[0].peak, 0.4) && closeTo(audioLog.gains[1].peak, 0.4) && closeTo(audioLog.gains[2].peak, 0.42), JSON.stringify(audioLog.gains.map((gain) => gain.peak)));
+resetAudioLog();
+soundSegmentedButtons[2].props.onClick(); // 上升琶音
+check('再切到上升琶音立即发声（4 音）', face.soundChoiceStore.getSnapshot() === 2 && audioLog.oscillators.length === 4, String(audioLog.oscillators.length));
+incOf(stepperGroups[0]).props.onClick();
+check('点音量「+」按步进 +5', face.volumeStore.getSnapshot() === 85, String(face.volumeStore.getSnapshot()));
+
+// 恢复默认：先弄花，再一键写回。
+face.setNotify(false);
+face.setNotifyMode('unfocused');
+face.setSound(false);
+face.setSoundChoice(3);
+face.setVolume(40);
+sectionNodes = renderSection();
+const resetButtonAfter = sectionNodes.find((node) => node.type === 'button' && node.children?.[0] === '恢复默认');
+check('改花后「恢复默认」按钮置灰解除', resetButtonAfter?.props?.disabled === false, String(resetButtonAfter?.props?.disabled));
+check('改花后说明换成默认值清单', sectionNodes.some((node) => typeof node.children?.[0] === 'string' && node.children[0].startsWith('一键写回全部默认值')));
+resetButtonAfter.props.onClick();
+check('恢复默认写回全部五个配置（弹窗回开、时机回任何情况都弹）', face.notifyStore.getSnapshot() === true && face.notifyModeStore.getSnapshot() === 'always' && face.soundStore.getSnapshot() === true
+	&& face.soundChoiceStore.getSnapshot() === 0 && face.volumeStore.getSnapshot() === 80,
+	JSON.stringify(windowStub.__dshTaskReminder.state()));
+
+// 权限被拒时设置页给出提示。
+FakeNotification.permission = 'denied';
+await face.setNotify(true);
+sectionNodes = renderSection();
+check('权限被拒时设置页给出提示', sectionNodes.some((node) => node.children?.[0] === '浏览器已拒绝本站点的通知权限，请到地址栏的站点权限里改为「允许」后再试。'));
+FakeNotification.permission = 'granted';
 
 // ---------------------------------------------------------------------------
 // 提示音路径：音效切换、音量整档 +20、静音；回收时关掉 AudioContext
@@ -923,6 +919,9 @@ check('竞态后开关写回仍正常', face.notifyStore.getSnapshot() === true 
 
 console.log('');
 console.log('提示音');
+
+face.setSound(true);
+face.setVolume(80);
 
 /** 完成一次任务并返回本次新排的音。 */
 const playOnce = () => {
@@ -934,8 +933,6 @@ const playOnce = () => {
 		gains: [...audioLog.gains],
 	};
 };
-
-face.setSound(true);
 
 // 第二种：三声上扬。
 face.setSoundChoice(1);
@@ -979,12 +976,61 @@ face.setVolume(80);
 // 提示音关掉：再完成也一条音都不多排。
 const oscillatorsAfterPlay = audioLog.oscillators.length;
 face.setSound(false);
-statusListener('s2', true);
-statusListener('s2', false);
+completeOnce();
 check('提示音关掉后不再排音', audioLog.oscillators.length === oscillatorsAfterPlay, String(audioLog.oscillators.length - oscillatorsAfterPlay));
 face.setSound(true);
 
 check('AudioContext 全局只建一个（首次提示音时惰性创建，之后复用）', audioLog.contexts === 1, String(audioLog.contexts));
+
+// 自动播放策略：context 被挂在 suspended 时，play 仍尝试 resume 且拒绝不外抛；
+// 用户的第一次点击 / 按键把 context 拉活，之后的完成提示音才响得出来。
+const firstCtx = audioLog.instances[0];
+check('桩里拿得到唯一 AudioContext 实例', firstCtx !== undefined && audioLog.instances.length === 1, String(audioLog.instances.length));
+firstCtx.state = 'suspended';
+firstCtx.resume = () => {
+	audioLog.resumed += 1;
+	return Promise.reject(new Error('resume blocked without a user gesture'));
+};
+const resumedBefore = audioLog.resumed;
+playOnce();
+check('context 挂起时完成提示音仍尝试 resume（被拒也不抛、不留未处理 rejection）', audioLog.resumed === resumedBefore + 1, String(audioLog.resumed - resumedBefore));
+check('挂起时排障状态记下 context 状态', windowStub.__dshTaskReminder.state().stats.lastSound?.state === 'suspended' && windowStub.__dshTaskReminder.state().stats.lastSound?.scheduled === true, JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastSound));
+firstCtx.resume = function grantedResume() {
+	audioLog.resumed += 1;
+	firstCtx.state = 'running';
+	return Promise.resolve();
+};
+fireWindow('pointerdown');
+check('用户第一次点击把挂起的 AudioContext 拉活', firstCtx.state === 'running' && audioLog.resumed === resumedBefore + 2, `${firstCtx.state} / resumed ${audioLog.resumed - resumedBefore} 次`);
+
+// 切走标签页 / 失焦期间排下的音压在挂起的时钟上：回到前台时 sync 顺手拉活，
+// 这些音立即续播，不会出现"过了很久才响"。
+firstCtx.state = 'suspended';
+firstCtx.resume = function grantedResume2() {
+	audioLog.resumed += 1;
+	firstCtx.state = 'running';
+	return Promise.resolve();
+};
+fireDom('visibilitychange');
+check('标签页恢复可见时拉活 AudioContext（挂起期间排的音立即续播）', firstCtx.state === 'running' && audioLog.resumed === resumedBefore + 3, `${firstCtx.state} / resumed ${audioLog.resumed - resumedBefore} 次`);
+
+// 排障钩子：test(kind) 三种停止都能当场触发 + 放音；sound() 只放音。
+resetNotificationLog();
+resetAudioLog();
+FakeNotification.permission = 'granted';
+windowStub.__dshTaskReminder.test();
+check('test() 当场发一条「任务完成」弹窗（取列表第一个会话的名）', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '对话任务已完成' && notificationLog.created[0]?.options?.body === '旧任务', JSON.stringify(notificationLog.created));
+check('test() 按当前音效与音量放提示音', audioLog.oscillators.length === 2 && audioLog.gains.length === 2 && closeTo(audioLog.gains[0].peak, 0.4375), `${audioLog.oscillators.length} / ${audioLog.gains.length}`);
+resetAudioLog();
+windowStub.__dshTaskReminder.test('error');
+check("test('error') 当场发一条「出错停止」弹窗（不经过判定）", notificationLog.created.length === 2 && notificationLog.created[1]?.title === '任务出错已停止' && notificationLog.created[1]?.options?.body?.includes('400'), JSON.stringify(notificationLog.created[1]));
+check("test('error') 也放提示音", audioLog.oscillators.length === 2, String(audioLog.oscillators.length));
+resetAudioLog();
+windowStub.__dshTaskReminder.test('question');
+check("test('question') 当场发一条「等待你的回答」弹窗", notificationLog.created.length === 3 && notificationLog.created[2]?.title === '等待你的回答', JSON.stringify(notificationLog.created[2]));
+resetAudioLog();
+windowStub.__dshTaskReminder.sound();
+check('sound() 只放音不发弹窗', audioLog.oscillators.length === 2 && notificationLog.created.length === 3, String(audioLog.oscillators.length));
 
 /** 再造一次干净装载：证明装载期完全不碰音频硬件。 */
 const audioLog2 = { contexts: 0, oscillators: 0, gains: 0 };
@@ -1024,10 +1070,11 @@ plugin2.apply({
 	slots: { inject: () => {}, register: (options, component) => ({ options, component }) },
 	sessions: { list: { getSnapshot: () => ({ ids: [], byId: {} }), subscribe: () => () => {} } },
 	remote: { $on: () => () => {} },
+	uiSession: { sessionStatus: { getSnapshot: () => new Map(), subscribe: () => () => {} } },
 	uiWorkspace: { openSession: () => {} },
 	timer: { timeout: () => () => {} },
 });
-check('装载期不抢建 AudioContext', audioLog2.contexts === 0 && audioLog2.oscillators === 0, JSON.stringify(audioLog2));
+check('第二次装载同样只建 context 与预热音，不排可闻提示音', audioLog2.contexts === 1 && audioLog2.oscillators === 1 && audioLog2.gains === 1, JSON.stringify(audioLog2));
 
 // ---------------------------------------------------------------------------
 // 回收：effects 逆序销毁
@@ -1036,12 +1083,12 @@ check('装载期不抢建 AudioContext', audioLog2.contexts === 0 && audioLog2.o
 console.log('');
 console.log('回收');
 for (const { disposer } of [...effects].reverse()) if (typeof disposer === 'function') disposer();
-check('样式标签被移除', createdNodes.find((node) => node.dataset?.pluginCss === STYLE_TAG_ID)?.removed === true);
 check('排障钩子被移除', windowStub.__dshTaskReminder === undefined);
 check('事件订阅被退订', listeners.every((entry) => entry.disposed === true));
 check('会话列表订阅被退订', listListeners.size === 0, String(listListeners.size));
-check('焦点/可见性监听被退订', [...domListeners.document.values()].every((set) => set.size === 0) && [...domListeners.window.values()].every((set) => set.size === 0), JSON.stringify([...domListeners.document.entries()].map(([type, set]) => [type, set.size])));
+check('焦点/可见性/手势监听被退订', [...domListeners.document.values()].every((set) => set.size === 0) && [...domListeners.window.values()].every((set) => set.size === 0), JSON.stringify([...domListeners.window.entries()].map(([type, set]) => [type, set.size])));
 check('回收时关掉了 AudioContext', audioLog.closed === 1, String(audioLog.closed));
+check('待定的完成弹窗定时器被取消', timerEntries.every((entry) => entry.cancelled || entry.fired), JSON.stringify(timerEntries.filter((entry) => !entry.cancelled && !entry.fired)));
 
 console.log('');
 if (failures.length > 0) {

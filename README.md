@@ -29,12 +29,18 @@ window — and the only signal that a task finished was the session list turning
 idle. This plugin turns that moment into a real reminder, without leaving the
 browser surface you already use.
 
-When a conversation task finishes while you are **not** looking at the
-conversation window, the plugin can remind you three ways: a bottom-right reminder card as
-the fallback when the system notification cannot be delivered, a synthesized
-chime, and a system notification that survives even when the browser is in the
-background. Everything is configured on its own settings page and persists
-across restarts.
+When a conversation task stops, the plugin sends a **Windows system
+toast** (Web Notification — the native notification in the bottom-right corner
+of your OS, visible while the browser is in the background; click it to return
+to that session) and plays a synthesized chime. Three stop reasons are
+covered: **task complete**, **the agent is waiting for your answer**
+(`ask_user_question` pending), and **an error stop** (a red error such as
+400) — one stop is reported once, with the error taking precedence. The toast
+timing has two modes: **Always** (every completion, no matter whether the
+browser window is in the foreground) or **Only when unfocused** (when you
+switch the tab away or the browser window loses focus). There is no in-app
+card: the OS toast is the only visual channel. Everything is configured on its
+own settings page and persists across restarts.
 
 The whole plugin lives on the browser side. The host half (`index.js`) is an
 empty `apply() {}`, and there are no runtime dependencies — the host ships it
@@ -42,33 +48,30 @@ to the page as a client plugin.
 
 ## ✨ Features
 
-* **Reminder card as the fallback:** when the system notification cannot be
-  delivered (permission not granted, or the browser lacks the Notification
-  API), a bottom-right card (8 px from the corner) shows the session name and
-  jumps straight back to it. Width (240–640 px) and height (0–400 px,
-  `0` = automatic) are adjustable, with a live sample card on the settings
-  page.
+* **Windows system toast as the single visual channel:** Web Notification API,
+  an OS toast you can see while the app is in the background. Clicking it
+  brings the window forward and opens the session. Three stop reasons are
+  covered: **task complete**, **waiting for your answer** (the agent blocked
+  in `ask_user_question` / plan review — detected by reading the read-only
+  `uiSession.sessionStatus` snapshot, never by joining the question waterfall),
+  and **error stop** (`api-session/error`, e.g. a red 400). One stop is
+  reported once, error first: the completion toast waits out a short merge
+  window and stands down when an error for the same stop arrives.
+  Two timing modes — **Always** (every stop) or **Only when unfocused**
+  (tab switched away or window unfocused) — pick one on the settings page. The
+  browser asks for notification permission once on the first load — the
+  Notification API has no permission-free path, which is why in-page-only
+  plugins never show such a prompt. If the permission was reset afterwards, a
+  **Request notification permission** button under the System toast row
+  re-asks. A denied or unsupported Notification API degrades to a clear hint
+  on the settings page instead of failing silently.
 * **Four synthesized chimes:** two-tone (classic), rising three-tone, rising
   arpeggio, and soft triangle — generated live with Web Audio, so no audio
   files are shipped. Picking an effect plays it immediately at the current
-  volume; there is no separate preview button.
-* **System notifications, on by default:** Web Notification API, so the
-  reminder is an OS toast you can see while the app is in the background.
-  Clicking it brings the window forward and opens the session. The browser
-  asks for notification permission once on the first load — the Notification
-  API has no permission-free path, which is why in-page-only plugins never
-  show such a prompt. If the permission was reset afterwards, a **Request
-  notification permission** button under the System notification row re-asks.
-  A denied or unsupported Notification API degrades to a clear hint on the
-  settings page instead of failing silently.
+  volume; there is no separate preview button. The chime sounds on every stop,
+  whatever the toast timing mode.
 * **Dedicated settings page:** `Settings → Task reminder` (no more rows in
   `Settings → General`), with one-click restore defaults.
-* **Presence-aware silence for the card and the notification:** the reminder
-  stays quiet only while the main area shows the conversation window, the tab
-  is visible, and the window has focus. Switching panels, switching tabs, or
-  focusing another application all count as away — the card and the system
-  notification fire. The chime ignores presence and sounds on every task
-  completion.
 * **Dual-channel completion detection with deduplication:** the host-forwarded
   `api-session/status` event and the official session list's own `running` bit
   share one edge table, so one completion never fires twice.
@@ -103,7 +106,7 @@ dsh plugin --profile web add github:hawkongz/dsh-task-reminder
 ```
 
 To pin a release instead of the default branch, append the tag:
-`dsh plugin --profile web add github:hawkongz/dsh-task-reminder#v1.2.1`.
+`dsh plugin --profile web add github:hawkongz/dsh-task-reminder#v1.3.0`.
 Once the package is published to the npm registry, the bare name works the
 same way: `dsh plugin --profile web add dsh-task-reminder`.
 
@@ -119,9 +122,9 @@ dsh --profile web --dump-config | Select-String task-reminder
 
 > **Done.** Open `Settings → Task reminder`: if the page is there, the plugin
 > is live. On the first load the browser shows a one-time
-> notification-permission prompt — choose **Allow** and the system
-> notification is set. Run a task in any session, switch to another
-> application, and wait for the reminder.
+> notification-permission prompt — choose **Allow** and the system toast is
+> set. Run a task in any session and wait for the reminder — in the default
+> **Always** mode the toast fires even while you watch the conversation.
 
 ## 📦 Installation
 
@@ -184,27 +187,26 @@ changed `client.js`.
 
 | Setting | Default | Persist key |
 | :--- | :--- | :--- |
-| System notification | On | `dsh.task-reminder.notify` |
+| System toast | On | `dsh.task-reminder.notify` |
+| Toast timing (Always / Only when unfocused) | Always | `dsh.task-reminder.notify-mode` |
 | Completion sound | On | `dsh.task-reminder.sound` |
 | Chime effect (four options) | Two-tone (classic) | `dsh.task-reminder.sound-choice` |
 | Chime volume (0–100) | 80 | `dsh.task-reminder.volume` |
-| Card width (240–640 px) | 420 | `dsh.task-reminder.width` |
-| Card height (0–400 px, 0 = automatic) | 0 | `dsh.task-reminder.height` |
 
-Below the rows sits a live card preview that follows the width and height
-settings, and a restore-defaults button that writes back: notification on,
-sound on, first effect, volume 80, width 420 px, automatic height.
+A restore-defaults button writes back: toast on (Always), sound on, first
+effect, volume 80.
 
 ### Browser console helpers
 
 In the browser DevTools console:
 
 ```js
-// Panel state, the six settings, notification permission, current cards,
-// per-session running records, channel counters and the last completion source
+// Window focus state, the five settings, toast timing, notification
+// permission, per-session running records, channel counters and the last
+// stop of each kind
 __dshTaskReminder.state()
 
-// Pop a card right away and play the chime (does not wait for a task)
+// Send a task-complete toast right away and play the chime (does not wait for a task)
 __dshTaskReminder.test()
 
 // Play the selected effect at the current volume only
@@ -219,11 +221,13 @@ node test/verify-client.mjs
 
 Runs the browser half under stubbed services (no browser needed) and asserts
 the module identity, the wiring, the edge detection, both deduplication
-channels, presence-aware silence for the card and the notification, the chime
-sounding on every completion regardless of presence, the six settings'
+channels, the two toast timing modes, the three stop reasons (completion,
+pending question, error) with the error-first merge for one stop, the chime
+sounding on every stop regardless of window state, the five settings'
 defaults / read / write / restore, the oscillator parameters for every effect
-and volume, the card and preview styles, all three notification permission
-paths plus the in-page permission-request button, and disposal.
+and volume, all notification permission paths plus the in-page
+permission-request button, the suspended-AudioContext revival on a user
+gesture, and disposal.
 
 ## 🔧 Troubleshooting
 
@@ -235,20 +239,41 @@ paths plus the in-page permission-request button, and disposal.
 * **Code changes have no effect.** The host reads client plugins only at
   process start and the browser caches the old bundle. Restart `dsh web`,
   then hard-refresh (`Ctrl + F5`).
-* **No system notification appears.** Check `__dshTaskReminder.state()`:
-  `notificationSupported` must be `true` and `notificationPermission` must be
-  `granted`. If the permission is still `default` (never answered), the
-  settings page shows a **Request notification permission** button under the
-  System notification row — click it once and choose Allow. If the permission
-  is `denied` (you once chose Block), allow notifications for the site in the
-  browser's address-bar site settings, then click the button again.
-* **The chime is silent.** The volume may be `0`, or the browser's autoplay
-  policy blocked the AudioContext before your first interaction. Interact with
-  the page once (any click), then it plays.
-* **A reminder fires while you are watching the conversation.** All three
-  conditions must hold for silence: the main area is the conversation window,
-  the tab is visible, and the window has focus. If the panel hook is missing
-  the plugin warns once in the console and treats you as away by design.
+* **No system toast appears.** Walk the chain, cheapest check first:
+  1. `__dshTaskReminder.state()` — `notificationSupported` must be `true`,
+     `notificationPermission` must be `granted`, and `stats.notifications`
+     must count up after each completion (`1` means the browser accepted the
+     toast; the loss is then on the OS side, not in the plugin).
+  2. Permission still `default`? The settings page shows a **Request
+     notification permission** button under the System toast row — click it
+     once and choose Allow. Permission `denied`? Allow notifications for the
+     site in the browser's address-bar site settings, then click the button
+     again. Permission is per origin — granting it for this app once covers
+     every plugin on it.
+  3. Browser accepted but nothing shows on screen? Windows is suppressing
+     browser toasts. Check: Settings → System → Notifications (master switch
+     **and** the per-app switch for your browser), Focus assist set to
+     **Off** ("Priority only" hides ordinary toasts), and open the
+     notification center with `Win + N` — the toast may have landed there
+     unnoticed.
+  4. Ten-second isolation test — run `new Notification('DSH test', { body: 'can
+     you see me' })` in the page console. If that toast is invisible too, the
+     suppression is on the Windows/browser side and no plugin code can fix it.
+* **The chime is silent.** The volume may be `0`, the browser tab may be muted,
+  or the autoplay policy keeps the AudioContext suspended until your first
+  interaction — click or type anywhere in the page once, then it plays.
+* **The first chime of a browser session is delayed by a few seconds.** The
+  first audio rendering inside Chrome starts the OS audio device (3-5 s on
+  some Windows machines), and the autoplay policy allows that start only from
+  a user gesture — no in-page code can start audio before one, so every
+  website shares this cost. The habit that removes it: after opening the page,
+  click anywhere in it once (the plugin resumes the context and plays a silent
+  primer on that first gesture); by the time you switch an effect or a task
+  finishes, the device is warm and the chime is immediate.
+* **A toast fires while you watch the conversation.** That is the **Always**
+  timing mode doing its job. Switch the Toast timing row to **Only when
+  unfocused** and the toast fires only when the tab is switched away or the
+  browser window loses focus.
 
 ## 📌 Topics
 

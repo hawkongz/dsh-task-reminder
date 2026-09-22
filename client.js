@@ -1,44 +1,54 @@
 /**
  * dsh-task-reminder —— 浏览器半侧（DSH Web）。
  *
- * 目标：对话任务（Agent 回合）结束时，如果用户当前不在对话窗口，就提醒 ——
- *   1. 系统通知发不出时，右下角兜底弹出一张提醒卡（点「查看」回到该会话）；
- *   2. 播放一声提示音（每次完成都响，不管在不在对话窗口；四种合成音效可选，音量可调；切换音效即时发声试听）；
- *   3. 发送一条系统通知（Web Notification，OS 级 toast，退到后台也看得到，
- *      默认开启，首次开启时借用户手势申请权限）。
- * 提醒方式、音效、音量、卡片宽高全部在「设置 → 任务提醒」独立页里配置，
- * 值落浏览器本地存储，重启后仍在；「恢复默认」一键写回出厂值。
+ * 目标：对话任务（Agent 回合）停止时发送 Windows 系统弹窗，并播放提示音 ——
+ *   1. 系统弹窗走 Web Notification API（操作系统右下角原生通知，浏览器退到
+ *      后台也看得到；点击回到该会话）。三种停止原因都提醒：任务完成、
+ *      Agent 抛出问题等你回答（ask_user_question 挂起）、出错停止（如 400
+ *      的红色错误）；同一次停止的错误与完成只报一次；
+ *   2. 播放一声提示音（三种停止都响，不管在不在对话窗口；四种合成音效可选，
+ *      音量可调；切换音效即时发声试听）。
+ * 弹窗时机二选一：「任何情况都弹」任务一停止就弹；「仅非前台窗口」在切走
+ * 标签页或浏览器窗口失焦（人在别的应用）时才弹。没有应用内卡片：弹窗是唯一
+ * 视觉通道。提醒方式、音效、音量全部在「设置 → 任务提醒」独立页里配置，值落
+ * 浏览器本地存储，重启后仍在；「恢复默认」一键写回出厂值。
  *
- * 六条实现要点：
+ * 七条实现要点：
  *
  * 1. 「任务完成」的信号有两条通道，共用一张 running 边沿表，天然去重：
  *    通道一：宿主转发事件 `api-session/status`（`API_REMOTE_FORWARDED_EVENTS`
  *    白名单内），浏览器侧 `ctx.remote.$on(name, listener)` 订阅；
  *    通道二：官方会话列表自身的 running 位（`ctx.sessions.list`，与 sidebar
  *    运行指示灯同源）。转发事件万一没递到本插件，通道二仍能收到完成。
- * 2. 「是否在对话窗口」有两个信号，同时满足才算用户在看着这场对话：
- *    主区 activePanelId 为 null（对话窗口，借标准钩子 usePanelInfo 读）
- *    且 标签页可见（document.hidden === false）且窗口有焦点
- *    （document.hasFocus()）。切到其它面板、切走标签页、窗口失焦（人在别的
- *    应用里）都算非对话窗口；拿不到面板钩子时不静默失效：按「非对话窗口」
- *    处理并 console.warn 一次。
- * 3. 弹窗挂 `shell.overlay`（框架级浮层，不占用任何栏内空间），贴在右下角
- *    （8px），样式走主题 token，深浅色自动跟随；宽高由用户配置写进卡片内联
- *    样式。卡片是常驻通道（没有独立开关）；置顶到最前端由系统通知完成。
- *    提示音用 Web Audio 现场合成，不引入任何音频文件：四种音效
- *    （两声 / 三声上扬 / 上升琶音 / 圆润三角波）各有频率与节奏表，峰值按
- *    100% 音量给出，再乘上「用户音量 + 20」折算出的 master 增益后写进包络
- *    —— 整档比刻度上调 20，显示 80 就是原 100 的响度。
- * 4. 系统通知走标准 Web Notification API（普通浏览器与桌面壳都支持）：
- *    默认开启；开启时若浏览器权限还是 default，借用户打开开关这个手势
- *    申请权限；被拒绝 / 不支持时在设置页给出对应提示，不假装生效。
- * 5. 设置是「设置」面板里的独立页（「设置 → 通用」里不再占行）：
+ * 2. 「等你回答」读 `ctx.uiSession.sessionStatus`（根级只读快照：
+ *    sessionId → { running, pendingInteraction, completionUnread }）：
+ *    pendingInteraction 从无到有就是 Agent 阻塞在等用户（ask_user_question /
+ *    plan-review）。只读订阅，绝不参与 user-questions/request 应答链。
+ * 3. 「出错停止」接宿主转发事件 `api-session/error`(sessionId, message)。
+ *    错误与可能随后（或先行）到达的 status 边沿可能是同一次停止的两次播报，
+ *    用合并窗口去重（错误优先，完成弹窗延后一个窗口再决定发不发）。
+ * 4. 「窗口是否在前台」只看两个信号：标签页可见（document.hidden === false）
+ *    且窗口有焦点（document.hasFocus()）。切走标签页、窗口失焦（人在别的
+ *    应用里）都算非前台；拿不到这两个信号时按「在前台」处理（宁可少弹，
+ *    也不在用户盯着看的时候乱弹 —— 除非用户选「任何情况都弹」）。
+ * 5. 系统弹窗走标准 Web Notification API（普通浏览器与桌面壳都支持）：
+ *    默认开启；权限还是 default 时首次装载替用户申请一次（localStorage
+ *    记账只问一次），设置页另有「申请通知权限」按钮；被拒绝 / 不支持时在
+ *    设置页给出对应提示，不假装生效。权限按 Origin 生效，授权一次本站点
+ *    全部通用。每条通知独立 tag，互不顶替。
+ * 6. 提示音用 Web Audio 现场合成，不引入任何音频文件：四种音效（两声 /
+ *    三声上扬 / 上升琶音 / 圆润三角波）各有频率与节奏表，峰值按 100% 音量
+ *    给出，再乘上「用户音量 + 20」折算出的 master 增益后写进包络 —— 整档
+ *    比刻度上调 20，显示 80 就是原 100 的响度。AudioContext 装载即建、
+ *    第一次用户手势 resume（首声延迟只剩浏览器设备启动那一截，任何网页
+ *    都躲不掉）；被自动播放策略挂在 suspended 时拒绝不外抛。
+ * 7. 设置是「设置」面板里的独立页（「设置 → 通用」里不再占行）：
  *    `ctx.slots.inject('settings.section', …)`（参考 dsh-chat-locator 的
  *    LocatorSection），order 避开 chat-locator(41)；页面自行渲染全部控件
  *    与恢复默认。值用 `createSnapshotStore(value, { persist: { name } })`
  *    落浏览器本地存储，因此不需要宿主半侧注册设置命名空间。
- * 6. 所有资源（字典、$on 订阅、样式标签、定时器、排障钩子）都挂 ctx.effect，
- *    插件卸载时整体回收。
+ * 8. 所有资源（字典、$on 订阅、sessionStatus 订阅、定时器、排障钩子）都挂
+ *    ctx.effect，插件卸载时整体回收。
  *
  * @module dsh-task-reminder/client
  */
@@ -51,25 +61,15 @@ window.__ModuleLoader__.load({
 
 		/** 本地化命名空间（同时是设置页文案的键空间）。 */
 		const NS = 'task-reminder';
-		/** 样式标签标识，便于排障与幂等挂载。 */
-		const STYLE_TAG_ID = 'dsh-task-reminder/reminder.css';
 		/** 版本号，随排障钩子暴露。 */
-		const PLUGIN_VERSION = '1.2.3';
+		const PLUGIN_VERSION = '1.4.1';
 
-		/** 提示卡停留时长（毫秒），到点自动收起。 */
-		const TOAST_TTL_MS = 8000;
-		/** 同屏最多堆几张贴卡；再有多余的先把最旧的挤掉。 */
-		const MAX_TOASTS = 3;
-		/** 浮层距窗口右下角的边距（px）。 */
-		const STACK_INSET_PX = 8;
-
-		/** 六个可配置项的本地持久化键（createSnapshotStore 的 persist.name）。 */
+		/** 五个可配置项的本地持久化键（createSnapshotStore 的 persist.name）。 */
 		const NOTIFY_PERSIST_KEY = 'dsh.task-reminder.notify';
+		const NOTIFY_MODE_PERSIST_KEY = 'dsh.task-reminder.notify-mode';
 		const SOUND_PERSIST_KEY = 'dsh.task-reminder.sound';
 		const SOUND_CHOICE_PERSIST_KEY = 'dsh.task-reminder.sound-choice';
 		const VOLUME_PERSIST_KEY = 'dsh.task-reminder.volume';
-		const WIDTH_PERSIST_KEY = 'dsh.task-reminder.width';
-		const HEIGHT_PERSIST_KEY = 'dsh.task-reminder.height';
 
 		/** 音量区间与步进（百分比）。 */
 		const VOLUME_MIN = 0;
@@ -80,23 +80,25 @@ window.__ModuleLoader__.load({
 		 * 于是显示 80 就是原 100 的响度（master 1.0），显示 0 仍为静音。
 		 */
 		const VOLUME_BOOST = 20;
-		/** 卡片宽度区间与步进（px）。 */
-		const WIDTH_MIN = 240;
-		const WIDTH_MAX = 640;
-		const WIDTH_STEP = 10;
-		/** 卡片高度区间与步进（px）；0 = 不限制，随内容自动撑开。 */
-		const HEIGHT_MIN = 0;
-		const HEIGHT_MAX = 400;
-		const HEIGHT_STEP = 20;
+
+		/** 弹窗时机：任何情况都弹 / 仅非前台窗口才弹。 */
+		const NOTIFY_MODE_ALWAYS = 'always';
+		const NOTIFY_MODE_UNFOCUSED = 'unfocused';
+		/** 默认时机：任何情况都弹。 */
+		const DEFAULT_NOTIFY_MODE = NOTIFY_MODE_ALWAYS;
+		/** @type {ReadonlyArray<{ id: string, nameKey: string }>} */
+		const NOTIFY_MODES = Object.freeze([
+			Object.freeze({ id: NOTIFY_MODE_ALWAYS, nameKey: 'notify.mode.always' }),
+			Object.freeze({ id: NOTIFY_MODE_UNFOCUSED, nameKey: 'notify.mode.unfocused' }),
+		]);
 
 		/** 全部出厂值：「恢复默认」按这份表逐项写回。 */
 		const DEFAULTS = Object.freeze({
 			notify: true,
+			notifyMode: DEFAULT_NOTIFY_MODE,
 			sound: true,
 			soundChoice: 0,
 			volume: 80,
-			width: 420,
-			height: 0,
 		});
 
 		/**
@@ -156,15 +158,19 @@ window.__ModuleLoader__.load({
 
 		const zh = {
 			'nav': '任务提醒',
-			'intro': '对话任务（Agent 回合）结束时，如果人不在对话窗口前，就按这里的设置提醒：系统通知发不出时右下角兜底弹出提醒卡片（点「查看」回到该会话）、播放提示音（不管在不在对话窗口，每次完成都响）、并发送一条系统通知。切换音效会立即按当前音量发声；所有设置写入浏览器本地存储，重启后仍在，「恢复默认」一键回到出厂值。',
-			'toast.title': '对话任务已完成',
-			'toast.open': '查看',
-			'toast.close': '关闭提醒',
-			'settings.notify.title': '系统通知',
-			'settings.notify.description': '任务完成时发送一条系统通知（操作系统右下角弹出，应用退到后台也能看到）；点击通知回到该会话。默认开启，首次装载时代码会替您申请一次浏览器通知权限',
-			'notify.unsupported': '当前浏览器不支持系统通知，这一项不会生效（应用内卡片与提示音不受影响）。',
+			'intro': '对话任务（Agent 回合）停止时发送 Windows 系统弹窗（Web Notification，操作系统右下角原生通知，浏览器退到后台也看得到；点击弹窗回到该会话），并播放提示音。三种停止都会提醒：任务完成、Agent 抛出问题等你回答（ask_user_question 挂起）、出错停止（如 400 的红色错误）；同一次停止只报一次（错误优先）。弹窗时机二选一：「任何情况都弹」不管窗口是否在前台；「仅非前台窗口」在切走标签页或浏览器窗口失焦（人在别的应用）时才弹。首次装载时代码会替您申请一次浏览器通知权限（按 Origin 生效，授权一次本站点全部通用，已授权则不会再问）；所有设置写入浏览器本地存储，重启后仍在，「恢复默认」一键回到出厂值。',
+			'settings.notify.title': '系统弹窗',
+			'toast.completed.title': '对话任务已完成',
+			'toast.question.title': '等待你的回答',
+			'toast.error.title': '任务出错已停止',
+			'settings.notify.description': '任务完成时发送一条 Windows 系统弹窗；点击它回到该会话。默认开启；首次装载时代码会替您申请一次浏览器通知权限（已授权则不会再问）',
+			'notify.mode.title': '弹窗时机',
+			'notify.mode.description': '「任何情况都弹」：任务一完成就弹，不管浏览器窗口是否在前台；「仅非前台窗口」：切走标签页或浏览器窗口失焦（人在别的应用）时才弹。',
+			'notify.mode.always': '任何情况都弹',
+			'notify.mode.unfocused': '仅非前台窗口',
+			'notify.unsupported': '当前浏览器不支持系统弹窗，这一项不会生效（提示音不受影响）。',
 			'notify.denied': '浏览器已拒绝本站点的通知权限，请到地址栏的站点权限里改为「允许」后再试。',
-			'notify.pending': '已发出权限申请：在弹出的浏览器对话框里选择「允许」后即可收到系统通知。',
+			'notify.pending': '已发出权限申请：在弹出的浏览器对话框里选择「允许」后即可收到系统弹窗。',
 			'notify.request': '申请通知权限',
 			'settings.sound.title': '完成提示音',
 			'settings.sound.description': '对话任务完成后播放提示音（不管是否正在对话窗口）',
@@ -176,15 +182,8 @@ window.__ModuleLoader__.load({
 			'sound.choice.triangle': '圆润三角波',
 			'volume.title': '提示音音量',
 			'volume.description': '提示音的整体增益，当前 {value}%；0 为静音',
-			'width.title': '提醒卡宽度',
-			'width.description': '提醒卡宽度，当前 {value}px；窗口过窄时自动收缩，不会顶出可视范围',
-			'height.title': '提醒卡高度',
-			'height.description': '提醒卡高度，当前 {value}px；0 表示不限制，随内容自动撑开',
-			'preview.title': '提醒卡预览',
-			'preview.description': '按当前宽高实时画出的样例卡；调整宽度 / 高度时这里立即生效',
-			'preview.sampleSession': '示例会话',
 			'reset.title': '恢复默认',
-			'reset.description': '一键写回全部默认值：系统通知开、提示音开、第一种音效、音量 80、卡宽 420px、卡高自动。',
+			'reset.description': '一键写回全部默认值：系统弹窗开（任何情况都弹）、提示音开、第一种音效、音量 80。',
 			'reset.descriptionDefault': '当前各项都已经是默认值。',
 			'reset': '恢复默认',
 			'decrease': '减小',
@@ -192,15 +191,19 @@ window.__ModuleLoader__.load({
 		};
 		const en = {
 			'nav': 'Task reminder',
-			'intro': 'When a conversation task (agent turn) finishes while you are away from the conversation window, this page decides how you are reminded: a bottom-right reminder card as the fallback when the system notification cannot be delivered (click Open to jump back), a chime on every completion, and a system notification. Picking a chime effect plays it right away at the current volume; all settings are stored in browser local storage and survive restarts, and Restore defaults puts everything back in one click.',
-			'toast.title': 'Task complete',
-			'toast.open': 'Open',
-			'toast.close': 'Dismiss reminder',
-			'settings.notify.title': 'System notification',
-			'settings.notify.description': 'Send a system notification when a task finishes (an OS toast you can see while the app is in the background); clicking it returns to that session. On by default; the browser asks for notification permission once on the first load',
-			'notify.unsupported': 'This browser does not support system notifications, so this option has no effect (the in-app card and the chime are unaffected).',
+			'intro': 'When a conversation task (agent turn) stops, a Windows system toast goes out (Web Notification, the native notification in the bottom-right corner of your OS, visible while the browser is in the background; click it to return to that session) and a chime plays. Three stop reasons are covered: task complete, the agent is waiting for your answer (ask_user_question pending), and an error stop (a red error such as 400) — one stop is reported once, with the error taking precedence. The toast timing has two modes: Always, no matter whether the browser window is in the foreground, or Only when unfocused, which fires when you switch the tab away or the browser window loses focus (you are in another app). On the first load the code asks for browser notification permission once (per origin, shared by every plugin on this site; never asked again once granted); all settings are stored in browser local storage and survive restarts, and Restore defaults puts everything back in one click.',
+			'settings.notify.title': 'System toast',
+			'toast.completed.title': 'Task complete',
+			'toast.question.title': 'Waiting for your answer',
+			'toast.error.title': 'Task stopped with an error',
+			'settings.notify.description': 'Send a Windows system toast when a task finishes; clicking it returns to that session. On by default; the browser asks for notification permission once on the first load (never asked again once granted)',
+			'notify.mode.title': 'Toast timing',
+			'notify.mode.description': 'Always: toast as soon as a task finishes, whether or not the browser window is in the foreground. Only when unfocused: toast only when you switch the tab away or the browser window loses focus (you are in another app).',
+			'notify.mode.always': 'Always',
+			'notify.mode.unfocused': 'Only when unfocused',
+			'notify.unsupported': 'This browser does not support system toasts, so this option has no effect (the chime is unaffected).',
 			'notify.denied': 'The browser has denied notification permission for this site; allow it in the site permissions of the address bar and try again.',
-			'notify.pending': 'Permission requested: choose Allow in the browser prompt and system notifications start working.',
+			'notify.pending': 'Permission requested: choose Allow in the browser prompt and system toasts start working.',
 			'notify.request': 'Request notification permission',
 			'settings.sound.title': 'Completion sound',
 			'settings.sound.description': 'Play a chime once a conversation task finishes, whether or not you are in the conversation window',
@@ -212,15 +215,8 @@ window.__ModuleLoader__.load({
 			'sound.choice.triangle': 'Soft triangle',
 			'volume.title': 'Chime volume',
 			'volume.description': 'Overall gain of the chime, currently {value}%; 0 mutes it',
-			'width.title': 'Card width',
-			'width.description': 'Width of the reminder card, currently {value}px; it shrinks automatically in a narrow window and never overflows the viewport',
-			'height.title': 'Card height',
-			'height.description': 'Height of the reminder card, currently {value}px; 0 leaves it unconstrained and it grows with its content',
-			'preview.title': 'Card preview',
-			'preview.description': 'A sample card drawn at the current width and height; it updates as you adjust them',
-			'preview.sampleSession': 'Example session',
 			'reset.title': 'Restore defaults',
-			'reset.description': 'Writes every value back to its factory default: system notification on, chime on, first effect, 80% volume, 420px width, automatic height.',
+			'reset.description': 'Writes every value back to its factory default: system toast on (always), chime on, first effect, 80% volume.',
 			'reset.descriptionDefault': 'Everything is already at its factory value.',
 			'reset': 'Restore defaults',
 			'decrease': 'Decrease',
@@ -228,54 +224,11 @@ window.__ModuleLoader__.load({
 		};
 
 		/**
-		 * 常驻 overlay 条目上报的主区状态。
-		 * activePanelId：null = 对话窗口，非 null = 其它面板；
-		 * panelHook：usePanelInfo 是否真的递到了条目手里；
-		 * away：标签页被切走或窗口失焦（人在别的应用或别的标签页）时也为真。
+		 * 前台状态上报：标签页被切走或窗口失焦（人在别的应用）时 focused = false。
+		 * 拿不到信号时保持 true（宁可少弹，也不在用户盯着看时乱弹 —— 除非
+		 * 用户选「任何情况都弹」）。
 		 */
-		const view = { activePanelId: null, panelHook: false, away: false };
-		let warnedNoPanelHook = false;
-
-		/** 类名表（固定前缀，避免与宿主样式互相命中）。 */
-		const CSS = {
-			stack: 'tcr-stack',
-			toast: 'tcr-toast',
-			glyph: 'tcr-glyph',
-			body: 'tcr-body',
-			title: 'tcr-title',
-			desc: 'tcr-desc',
-			action: 'tcr-action',
-			close: 'tcr-close',
-		};
-
-		/** 插件自有样式：右下角浮层（间距/字号/图标随默认卡宽一起放大）。 */
-		const CSS_TEXT = [
-			`.${CSS.stack}{position:fixed;right:${STACK_INSET_PX}px;bottom:${STACK_INSET_PX}px;z-index:1200;display:flex;flex-direction:column;gap:8px;pointer-events:none}`,
-			`.${CSS.toast}{pointer-events:auto;box-sizing:border-box;display:flex;align-items:center;gap:12px;width:min(420px,calc(100vw - 16px));padding:12px 14px;border:1px solid var(--dsw-alias-border-l1);border-radius:12px;background:var(--dsw-alias-bg-overlay);box-shadow:0 8px 24px rgb(0 0 0 / 18%);color:var(--dsw-alias-label-primary);font-family:inherit;font-size:14px;line-height:22px;animation:tcr-enter .18s ease}`,
-			'@keyframes tcr-enter{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}',
-			`@media (prefers-reduced-motion:reduce){.${CSS.toast}{animation:none}}`,
-			`.${CSS.glyph}{flex:none;display:flex;align-items:center;justify-content:center;width:24px;height:24px;color:var(--dsw-alias-state-success-primary)}`,
-			`.${CSS.body}{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}`,
-			`.${CSS.title}{font-weight:500;font-size:15px}`,
-			`.${CSS.desc}{color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}`,
-			`.${CSS.action},.${CSS.close}{flex:none;cursor:pointer;border:none;background:transparent;font:inherit;color:var(--dsw-alias-brand-primary);border-radius:8px;padding:4px 8px}`,
-			`.${CSS.action}:hover,.${CSS.close}:hover{background:var(--dsw-alias-bg-layer-2)}`,
-			`.${CSS.close}{color:var(--dsw-alias-label-secondary);padding:4px 6px;font-size:16px;line-height:1}`,
-		].join('');
-
-		/**
-		 * 挂载插件样式标签。
-		 * @returns 卸载时移除该标签的函数。
-		 */
-		function mountStyles() {
-			if (typeof document === 'undefined') return () => {};
-			const tag = document.createElement('style');
-			tag.dataset.plugin = 'dsh-task-reminder';
-			tag.dataset.pluginCss = STYLE_TAG_ID;
-			tag.textContent = CSS_TEXT;
-			document.head.appendChild(tag);
-			return () => tag.remove();
-		}
+		const view = { focused: true };
 
 		/**
 		 * 取整数并夹到区间内；非法值退回兜底。
@@ -301,18 +254,6 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
-		 * 归一化卡片尺寸（px）。
-		 * @param value - 任意来源的值。
-		 * @param min - 区间下限。
-		 * @param max - 区间上限。
-		 * @param fallback - 非法值时的兜底。
-		 * @returns 夹好区间的整数。
-		 */
-		function clampSize(value, min, max, fallback) {
-			return clampInteger(value, min, max, fallback);
-		}
-
-		/**
 		 * 归一化音效选择（音效表下标）。0 是合法值，不能用真值判断短路。
 		 * @param value - 任意来源的值。
 		 * @returns [0, SOUND_CHOICES.length - 1] 内的整数下标。
@@ -324,10 +265,20 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
+		 * 归一化弹窗时机。坏值（本地存储旧数据）退回默认时机。
+		 * @param value - 任意来源的值。
+		 * @returns 'always' 或 'unfocused'。
+		 */
+		function resolveNotifyMode(value) {
+			if (value === NOTIFY_MODE_ALWAYS || value === NOTIFY_MODE_UNFOCUSED) return value;
+			return DEFAULT_NOTIFY_MODE;
+		}
+
+		/**
 		 * 取会话的展示名（ durable 标题 → 展示名 → 会话 id ）。
 		 * @param ctx - 客户端根上下文。
 		 * @param sessionId - 会话 id。
-		 * @returns 提醒卡上显示的名字。
+		 * @returns 通知正文里显示的名字。
 		 */
 		function titleOf(ctx, sessionId) {
 			try {
@@ -345,11 +296,31 @@ window.__ModuleLoader__.load({
 		/**
 		 * Web Audio 现场合成的提示音：按音效表排音，包络峰值乘上用户音量。
 		 * AudioContext 惰性创建：首次提醒通常已在用户交互之后，能直接响；
-		 * 被自动播放策略拦住时静默失败，不抛错。
-		 * @returns { play, dispose } 播放与回收。
+		 * 被自动播放策略挂在 suspended 时，用户的第一次点击 / 按键会预热并
+		 * 把它拉活。切走标签页 / 失焦期间排下的音，回到前台时立即续播。
+		 * @returns { play, warm, resume, dispose } 播放、预热、拉活与回收。
 		 */
 		function createChime() {
 			let audio = null;
+			/** 输出管路是否已预热（只预一次）。 */
+			let primed = false;
+			/**
+			 * 拉活 AudioContext。自动播放策略下，没有用户手势时浏览器会把
+			 * context 挂在 suspended，resume() 也直接拒绝；点击 / 按键等
+			 * 用户手势里调用本函数即可放行。拒绝不外抛：完成提示音不该被音频
+			 * 策略炸掉，也不该在控制台留下未处理的 rejection。
+			 */
+			function revive() {
+				if (audio === null || audio.state !== 'suspended') return;
+				try {
+					const reviving = audio.resume();
+					if (reviving !== null && typeof reviving === 'object' && typeof reviving.then === 'function') {
+						reviving.catch(() => {});
+					}
+				} catch {
+					// 浏览器这会儿不让恢复：等下一个用户手势再试。
+				}
+			}
 			/**
 			 * 排一个音：快速起振，指数衰减，杜绝爆音。
 			 * @param noteSpec - 音效表里的一条 { frequency, at, duration, peak }。
@@ -372,20 +343,55 @@ window.__ModuleLoader__.load({
 				oscillator.stop(at + noteSpec.duration + 0.02);
 			}
 			return {
+				/** 供用户手势监听调用：拉活被挂起的 AudioContext。 */
+				resume: revive,
+				/**
+				 * 在用户手势里预热 AudioContext：把音频设备的初始化挪到第一次
+				 * 交互，完成提示音与切音效试听都能立即出声，没有首声延迟。
+				 * 同时播一条 gain=0 的极短音，强制音频线程与输出设备转起来
+				 * （浏览器首次播放前的设备初始化任何网页都躲不掉，只能提前付）。
+				 */
+				warm() {
+					try {
+						if (typeof window === 'undefined') return;
+						const Ctor = window.AudioContext ?? window.webkitAudioContext;
+						if (Ctor === undefined) return;
+						audio ??= new Ctor();
+						if (audio.state === 'suspended') revive();
+						if (primed) return;
+						primed = true;
+						try {
+							const primerOsc = audio.createOscillator();
+							const primerGain = audio.createGain();
+							primerGain.gain.value = 0; // 听不见：只为把输出设备转起来
+							primerOsc.connect(primerGain);
+							primerGain.connect(audio.destination);
+							primerOsc.start();
+							primerOsc.stop(audio.currentTime + 0.01);
+						} catch {
+							// 预热音失败无所谓：正式提示音照排。
+						}
+					} catch {
+						// 预热失败不影响以后：play 里还会再试一次。
+					}
+				},
 				/**
 				 * 按当前设置播放一遍。
 				 * @param choice - 音效下标（或坏值，内部归一化）。
 				 * @param volume - 音量显示值（或坏值，内部归一化）。
+				 * @returns { scheduled, state } 是否真的排了音、播放时的 context 状态。
 				 */
 				play(choice, volume) {
 					try {
-						if (typeof window === 'undefined') return;
+						if (typeof window === 'undefined') return { scheduled: false, state: 'no-window' };
 						const volumePercent = clampVolume(volume);
-						if (volumePercent <= 0) return; // 0 = 静音：一条音都不排。
+						if (volumePercent <= 0) return { scheduled: false, state: 'muted' }; // 0 = 静音：一条音都不排。
 						const Ctor = window.AudioContext ?? window.webkitAudioContext;
-						if (Ctor === undefined) return;
+						if (Ctor === undefined) return { scheduled: false, state: 'unsupported' };
 						audio ??= new Ctor();
-						if (audio.state === 'suspended') void audio.resume();
+						// 被自动播放策略挂在 suspended 时先尝试拉活；这一下拉不动也照排，
+						// 下一个用户手势恢复后这些音仍会播出来。
+						if (audio.state === 'suspended') revive();
 						const now = audio.currentTime;
 						const spec = SOUND_CHOICES[resolveSoundChoice(choice)];
 						// 整档上调 20：显示 80 → master 1.0（原 100 的响度）。
@@ -393,8 +399,10 @@ window.__ModuleLoader__.load({
 						for (const noteSpec of spec.notes) {
 							note(noteSpec, now + noteSpec.at, master, spec.type);
 						}
+						return { scheduled: true, state: audio.state };
 					} catch {
-						// 音频不可用就安静退场，提醒卡仍然在。
+						// 音频不可用就安静退场，弹窗与其它提醒方式不受影响。
+						return { scheduled: false, state: 'failed' };
 					}
 				},
 				dispose() {
@@ -413,7 +421,7 @@ window.__ModuleLoader__.load({
 
 		/**
 		 * 系统通知（Web Notification API）。支持探测、权限申请、弹出三步；
-		 * 每一步都容忍失败：通知发不出去时弹窗与提示音照旧。
+		 * 每一步都容忍失败：弹窗发不出去时提示音照旧。
 		 * 权限状态每次现读（用户随时能在站点权限里改），不缓存。
 		 * @returns { supported, permission, request, show }。
 		 */
@@ -462,7 +470,9 @@ window.__ModuleLoader__.load({
 				show(title, body, onClick) {
 					try {
 						if (!granted()) return null;
-						const notification = new window.Notification(title, { body, tag: NOTIFICATION_TAG });
+						// 每条通知一个独立 tag：后一条不再顶掉前一条。固定 tag 的
+						// 「同一会话替换」在提醒场景里反而让用户"什么都没看到"。
+						const notification = new window.Notification(title, { body, tag: `${NOTIFICATION_TAG}-${Date.now()}` });
 						notification.onclick = () => {
 							try {
 								if (typeof window.focus === 'function') window.focus();
@@ -483,81 +493,6 @@ window.__ModuleLoader__.load({
 					}
 				},
 			};
-		}
-
-		/** 提醒卡左上角的对勾图标。 */
-		function CheckGlyph() {
-			return React.createElement(
-				'svg',
-				{ width: 16, height: 16, viewBox: '0 0 16 16', 'aria-hidden': true },
-				React.createElement('path', {
-					fill: 'currentColor',
-					d: 'M8 1.5A6.5 6.5 0 1 0 8 14.5 6.5 6.5 0 0 0 8 1.5Zm2.72 4.98-3.4 4.36a.8.8 0 0 1-1.2.06L4.6 9.4a.8.8 0 1 1 1.14-1.12l.74.75 2.83-3.62a.8.8 0 1 1 1.21 1.07Z',
-				}),
-			);
-		}
-
-		/**
-		 * 右下角提醒浮层：常驻 shell.overlay 的条目。
-		 * 没有待提醒时渲染 null，但每次渲染都会把主区状态报给 apply 侧，
-		 * 任务完成回调据此判断「用户此刻是否在对话窗口」。
-		 * @param props.useToasts - 提醒卡列表的 selector hook（inject face）。
-		 * @param props.useWidth - 卡宽（px）的 selector hook。
-		 * @param props.useHeight - 卡高（px，0=自动）的 selector hook。
-		 * @param props.dismiss - 收起一张卡。
-		 * @param props.openSession - 跳到卡片对应的会话。
-		 * @param props.usePanelInfo - 标准钩子：主区面板信息（布局包提供）。
-		 * @param props.t - 本地化函数。
-		 * @returns 浮层元素或 null。
-		 */
-		function ReminderOverlay({ useToasts, useWidth, useHeight, dismiss, openSession, usePanelInfo, t }) {
-			const panelId = typeof usePanelInfo === 'function'
-				? usePanelInfo((info) => info.activePanelId)
-				: undefined;
-			view.activePanelId = panelId ?? null;
-			view.panelHook = typeof usePanelInfo === 'function';
-			if (!view.panelHook && !warnedNoPanelHook) {
-				warnedNoPanelHook = true;
-				console.warn('dsh-task-reminder: shell.overlay 条目没有拿到 usePanelInfo，无法判断是否在对话窗口，提醒将按“非对话窗口”处理');
-			}
-			const toasts = useToasts((list) => list);
-			const width = typeof useWidth === 'function' ? useWidth((value) => value) : DEFAULTS.width;
-			const height = typeof useHeight === 'function' ? useHeight((value) => value) : DEFAULTS.height;
-			if (toasts.length === 0) return null;
-			// 卡宽写进内联样式（默认值与 CSS 的 min(420px, …) 一致）；
-			// max-width 保留视口夹取，窄窗口下不会顶出屏幕。
-			const cardStyle = { width: width + 'px', maxWidth: 'calc(100vw - 16px)' };
-			if (height > 0) cardStyle.height = height + 'px';
-			return React.createElement(
-				'div',
-				{ className: CSS.stack, role: 'status', 'aria-live': 'polite' },
-				toasts.map((toast) => React.createElement(
-					'div',
-					{ key: toast.id, className: CSS.toast, style: cardStyle },
-					React.createElement('span', { className: CSS.glyph, 'aria-hidden': true }, React.createElement(CheckGlyph)),
-					React.createElement(
-						'div',
-						{ className: CSS.body },
-						React.createElement('div', { className: CSS.title }, t('toast.title')),
-						React.createElement('div', { className: CSS.desc, title: toast.title }, toast.title),
-					),
-					React.createElement(
-						'button',
-						{ type: 'button', className: CSS.action, onClick: () => openSession(toast.sessionId) },
-						t('toast.open'),
-					),
-					React.createElement(
-						'button',
-						{
-							type: 'button',
-							className: CSS.close,
-							'aria-label': t('toast.close'),
-							onClick: () => dismiss(toast.id)
-						},
-						'×',
-					),
-				)),
-			);
 		}
 
 		//#region 设置页界面（settings.section 独立页）
@@ -680,7 +615,7 @@ window.__ModuleLoader__.load({
 			]);
 		}
 
-		/** 数字步进器（− 值 +）；`stepSize` 给宽高这类成十进位的量用。 */
+		/** 数字步进器（− 值 +）。 */
 		function Stepper({ value, min, max, stepSize = 1, label, onChange, t }) {
 			const step = (delta) => {
 				const next = Math.min(max, Math.max(min, value + delta * stepSize));
@@ -701,7 +636,7 @@ window.__ModuleLoader__.load({
 			]);
 		}
 
-		/** 音效选择：四选一分段控件。 */
+		/** 分段控件（二选一 / 多选一）。 */
 		function Segmented({ value, options, label, onChange }) {
 			return React.createElement('div', { style: PILL_STYLE, role: 'group', 'aria-label': label }, options.map((option) => React.createElement('button', {
 				key: String(option.id),
@@ -726,49 +661,19 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
-		 * 设置页里的提醒卡预览：按当前宽高实时画一张样例卡（复用真实卡片的
-		 * 类名与内联样式写法，所见即所得）；按钮只作样子，不接线、不进 Tab 序。
-		 * @param props.width - 当前卡宽（px）。
-		 * @param props.height - 当前卡高（px，0=自动）。
-		 * @param props.t - 本地化函数。
-		 * @returns 预览元素。
-		 */
-		function CardPreview({ width, height, t }) {
-			const cardStyle = { width: width + 'px', maxWidth: '100%' };
-			if (height > 0) cardStyle.height = height + 'px';
-			return React.createElement('div', {
-				style: {
-					padding: '16px',
-					borderRadius: '10px',
-					background: 'var(--dsw-alias-bg-layer-1)',
-				},
-			}, React.createElement('div', { className: CSS.toast, style: cardStyle }, [
-				React.createElement('span', { className: CSS.glyph, 'aria-hidden': true, key: 'glyph' }, React.createElement(CheckGlyph)),
-				React.createElement('div', { className: CSS.body, key: 'body' }, [
-					React.createElement('div', { className: CSS.title, key: 'title' }, t('toast.title')),
-					React.createElement('div', { className: CSS.desc, key: 'desc', title: t('preview.sampleSession') }, t('preview.sampleSession')),
-				]),
-				React.createElement('button', { type: 'button', className: CSS.action, key: 'open', tabIndex: -1 }, t('toast.open')),
-				React.createElement('button', { type: 'button', className: CSS.close, key: 'close', 'aria-label': t('toast.close'), tabIndex: -1 }, '×'),
-			]));
-		}
-
-		/**
-		 * 「任务提醒」设置页：系统通知与提示音开关、音效与音量、卡片宽高、恢复默认。
+		 * 「任务提醒」设置页：系统弹窗开关与时机、提示音开关、音效与音量、恢复默认。
 		 * 切换音效即时发声（按当前音量），不需要另点「试听」。
-		 * @param props.notifyStore - 系统通知开关 store。
+		 * @param props.notifyStore - 系统弹窗开关 store。
+		 * @param props.notifyModeStore - 弹窗时机 store。
 		 * @param props.soundStore - 提示音开关 store。
 		 * @param props.soundChoiceStore - 音效下标 store。
 		 * @param props.volumeStore - 音量 store。
-		 * @param props.widthStore - 卡宽 store。
-		 * @param props.heightStore - 卡高 store。
 		 * @param props.permissionStore - 通知权限状态 store（界面提示用）。
-		 * @param props.setNotify - 写回系统通知开关（含权限申请）。
+		 * @param props.setNotify - 写回系统弹窗开关（含权限申请）。
+		 * @param props.setNotifyMode - 写回弹窗时机。
 		 * @param props.setSound - 写回提示音开关。
 		 * @param props.setSoundChoice - 写回音效下标（切换即发声）。
 		 * @param props.setVolume - 写回音量。
-		 * @param props.setWidth - 写回卡宽。
-		 * @param props.setHeight - 写回卡高。
 		 * @param props.reset - 恢复默认。
 		 * @param props.notifySupported - 浏览器是否支持系统通知。
 		 * @param props.t - 本地化函数。
@@ -776,19 +681,17 @@ window.__ModuleLoader__.load({
 		 */
 		function ReminderSection(props) {
 			const notify = React.useSyncExternalStore(props.notifyStore.subscribe, props.notifyStore.getSnapshot);
+			const notifyMode = React.useSyncExternalStore(props.notifyModeStore.subscribe, props.notifyModeStore.getSnapshot);
 			const sound = React.useSyncExternalStore(props.soundStore.subscribe, props.soundStore.getSnapshot);
 			const soundChoice = React.useSyncExternalStore(props.soundChoiceStore.subscribe, props.soundChoiceStore.getSnapshot);
 			const volume = React.useSyncExternalStore(props.volumeStore.subscribe, props.volumeStore.getSnapshot);
-			const width = React.useSyncExternalStore(props.widthStore.subscribe, props.widthStore.getSnapshot);
-			const height = React.useSyncExternalStore(props.heightStore.subscribe, props.heightStore.getSnapshot);
 			const permission = React.useSyncExternalStore(props.permissionStore.subscribe, props.permissionStore.getSnapshot);
 			const t = props.t;
 			const isDefault = notify === DEFAULTS.notify
+				&& notifyMode === DEFAULTS.notifyMode
 				&& sound === DEFAULTS.sound
 				&& soundChoice === DEFAULTS.soundChoice
-				&& volume === DEFAULTS.volume
-				&& width === DEFAULTS.width
-				&& height === DEFAULTS.height;
+				&& volume === DEFAULTS.volume;
 			const switchRow = (rowKey, titleKey, descKey, value, setValue) => React.createElement(SettingRow, {
 				key: rowKey,
 				rowKey,
@@ -803,91 +706,68 @@ window.__ModuleLoader__.load({
 			const children = [
 				React.createElement('p', { style: INTRO_STYLE, key: 'intro' }, t('intro')),
 				switchRow('notify', 'settings.notify.title', 'settings.notify.description', notify, props.setNotify),
-				switchRow('sound', 'settings.sound.title', 'settings.sound.description', sound, props.setSound),
-				React.createElement(SettingRow, {
-					key: 'sound-choice',
-					rowKey: 'sound-choice',
-					title: t('sound.choice.title'),
-					desc: t('sound.choice.description'),
-					control: React.createElement(Segmented, {
-						value: soundChoice,
-						label: t('sound.choice.title'),
-						options: SOUND_CHOICES.map((choice, index) => ({ id: index, label: t(choice.nameKey) })),
-						onChange: (next) => props.setSoundChoice(next),
-					}),
-				}),
-				React.createElement(SettingRow, {
-					key: 'volume',
-					rowKey: 'volume',
-					title: t('volume.title'),
-					desc: t('volume.description', { value: volume }),
-					control: React.createElement(Stepper, {
-						value: volume,
-						min: VOLUME_MIN,
-						max: VOLUME_MAX,
-						stepSize: VOLUME_STEP,
-						label: t('volume.title'),
-						onChange: (next) => props.setVolume(next),
-						t,
-					}),
-				}),
-				React.createElement(SettingRow, {
-					key: 'width',
-					rowKey: 'width',
-					title: t('width.title'),
-					desc: t('width.description', { value: width }),
-					control: React.createElement(Stepper, {
-						value: width,
-						min: WIDTH_MIN,
-						max: WIDTH_MAX,
-						stepSize: WIDTH_STEP,
-						label: t('width.title'),
-						onChange: (next) => props.setWidth(next),
-						t,
-					}),
-				}),
-				React.createElement(SettingRow, {
-					key: 'height',
-					rowKey: 'height',
-					title: t('height.title'),
-					desc: t('height.description', { value: height }),
-					control: React.createElement(Stepper, {
-						value: height,
-						min: HEIGHT_MIN,
-						max: HEIGHT_MAX,
-						stepSize: HEIGHT_STEP,
-						label: t('height.title'),
-						onChange: (next) => props.setHeight(next),
-						t,
-					}),
-				}),
-				React.createElement('div', {
-					key: 'preview',
-					style: { display: 'flex', flexDirection: 'column', gap: '8px', padding: '16px 0 4px' },
-				}, [
-					React.createElement('div', { key: 'title', style: ROW_TITLE_STYLE }, t('preview.title')),
-					React.createElement(CardPreview, { key: 'body', width, height, t }),
-					React.createElement('div', { key: 'desc', style: ROW_DESC_STYLE }, t('preview.description')),
-				]),
-				React.createElement(SettingRow, {
-					key: 'reset',
-					rowKey: 'reset',
-					title: t('reset.title'),
-					desc: isDefault ? t('reset.descriptionDefault') : t('reset.description'),
-					control: React.createElement(TextButton, {
-						disabled: isDefault,
-						label: t('reset'),
-						onClick: () => props.reset(),
-					}),
-				}),
 			];
+			// 弹窗时机：开关关着时不占一行。
+			if (notify === true) {
+				children.push(React.createElement(SettingRow, {
+					key: 'notify-mode',
+					rowKey: 'notify-mode',
+					title: t('notify.mode.title'),
+					desc: t('notify.mode.description'),
+					control: React.createElement(Segmented, {
+						value: notifyMode,
+						label: t('notify.mode.title'),
+						options: NOTIFY_MODES.map((mode) => ({ id: mode.id, label: t(mode.nameKey) })),
+						onChange: (next) => props.setNotifyMode(next),
+					}),
+				}));
+			}
+			children.push(switchRow('sound', 'settings.sound.title', 'settings.sound.description', sound, props.setSound));
+			children.push(React.createElement(SettingRow, {
+				key: 'sound-choice',
+				rowKey: 'sound-choice',
+				title: t('sound.choice.title'),
+				desc: t('sound.choice.description'),
+				control: React.createElement(Segmented, {
+					value: soundChoice,
+					label: t('sound.choice.title'),
+					options: SOUND_CHOICES.map((choice, index) => ({ id: index, label: t(choice.nameKey) })),
+					onChange: (next) => props.setSoundChoice(next),
+				}),
+			}));
+			children.push(React.createElement(SettingRow, {
+				key: 'volume',
+				rowKey: 'volume',
+				title: t('volume.title'),
+				desc: t('volume.description', { value: volume }),
+				control: React.createElement(Stepper, {
+					value: volume,
+					min: VOLUME_MIN,
+					max: VOLUME_MAX,
+					stepSize: VOLUME_STEP,
+					label: t('volume.title'),
+					onChange: (next) => props.setVolume(next),
+					t,
+				}),
+			}));
+			children.push(React.createElement(SettingRow, {
+				key: 'reset',
+				rowKey: 'reset',
+				title: t('reset.title'),
+				desc: isDefault ? t('reset.descriptionDefault') : t('reset.description'),
+				control: React.createElement(TextButton, {
+					disabled: isDefault,
+					label: t('reset'),
+					onClick: () => props.reset(),
+				}),
+			}));
 			// 通知权限提示：不支持 / 被拒绝 / 等待用户在选择框里点「允许」。
 			let notifyHint = null;
 			let showPermissionButton = false;
 			if (props.notifySupported !== true) notifyHint = t('notify.unsupported');
 			else if (permission === 'denied') notifyHint = t('notify.denied');
 			else if (permission === 'default' && notify === true) {
-				// 通知默认开着，但浏览器权限还没问过：给一个一键申请的入口。
+				// 弹窗默认开着，但浏览器权限还没问过：给一个一键申请的入口。
 				notifyHint = t('notify.pending');
 				showPermissionButton = true;
 			}
@@ -907,49 +787,56 @@ window.__ModuleLoader__.load({
 		//#endregion
 
 		/**
-		 * 挂载插件：字典、六个持久化配置、完成事件订阅、弹窗浮层、独立设置页。
+		 * 挂载插件：字典、五个持久化配置、完成事件订阅、前台跟踪、独立设置页。
 		 * @param ctx - 客户端根上下文。
 		 */
 		function apply(ctx) {
 			ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-task-reminder: dictionaries');
 			const t = ctx.locale.bind(NS);
 
-			// 六个配置：值落浏览器本地持久存储，重启后仍在；不需要宿主设置命名空间。
+			// 五个配置：值落浏览器本地持久存储，重启后仍在；不需要宿主设置命名空间。
 			const notifyStore = createSnapshotStore(DEFAULTS.notify, { persist: { name: NOTIFY_PERSIST_KEY } });
+			const notifyModeStore = createSnapshotStore(DEFAULTS.notifyMode, { persist: { name: NOTIFY_MODE_PERSIST_KEY } });
 			const soundStore = createSnapshotStore(DEFAULTS.sound, { persist: { name: SOUND_PERSIST_KEY } });
 			const soundChoiceStore = createSnapshotStore(DEFAULTS.soundChoice, { persist: { name: SOUND_CHOICE_PERSIST_KEY } });
 			const volumeStore = createSnapshotStore(DEFAULTS.volume, { persist: { name: VOLUME_PERSIST_KEY } });
-			const widthStore = createSnapshotStore(DEFAULTS.width, { persist: { name: WIDTH_PERSIST_KEY } });
-			const heightStore = createSnapshotStore(DEFAULTS.height, { persist: { name: HEIGHT_PERSIST_KEY } });
 			// 通知权限状态只活在内存里（浏览器随时可能被用户改），供设置页提示。
 			const notifier = createNotifier();
 			const permissionStore = createSnapshotStore(notifier.permission());
-			// 提醒卡列表只在内存里，不持久化。
-			const toastStore = createSnapshotStore([]);
 			// 每个会话最近一次听到的 running 状态，用来识别「running → 非 running」的边沿。
 			const runningSessions = new Map();
-			// 排障计数：事件/列表两条通道各收到多少、完成被哪种原因跳过。
+			// 同一会话「停止」的三种原因合并：error 与 status 边沿可能是同一次
+			// 停止的两次播报（到达顺序不定），用合并窗口去重，错误优先。
+			const STOP_MERGE_MS = 3000;
+			const recentErrors = new Map(); // sessionId → 最近一次错误时刻
+			const pendingCompletions = new Map(); // sessionId → 待定完成弹窗的取消函数
+			// 有待答交互（ask_user_question / plan-review）的会话集合，按出现边沿提醒。
+			const pendingQuestions = new Set();
+			// 排障计数：事件/列表两条通道各收到多少、三种停止各报了多少。
 			const stats = {
 				events: 0,
 				listTicks: 0,
 				completed: 0,
-				skippedInConversation: 0,
-				soundWhileWatching: 0,
+				questions: 0,
+				errors: 0,
+				skippedFocused: 0,
+				sounds: 0,
 				notifications: 0,
 				lastEvent: null,
 				lastCompletion: null,
+				lastQuestion: null,
+				lastError: null,
+				lastSound: null,
 			};
-			// toastId → 自动收起定时器的销毁函数。
-			const timers = new Map();
 			const chime = createChime();
+			// 装载即创建 AudioContext（Windows 音频设备的冷初始化要 3-5 秒，让它
+			// 在页面加载时提前付掉）；此刻无用户手势，context 会被自动播放策略
+			// 挂在 suspended 且不渲染，第一条 gain=0 的预热音也仅是排队。真正
+			// 开始播放要等第一次用户手势 —— 届时只剩毫秒级的 resume。
+			// （浏览器控制台会留一条 "AudioContext was not allowed to start" 的
+			// 提示，这是自动播放策略的正常记录，不是错误。）
+			chime.warm();
 
-			/** 写回提示音开关。 */
-			const setSound = (next) => soundStore.set(next === true);
-			/**
-			 * 写回系统通知开关；从关到开时若权限还是 default，借这个用户手势申请。
-			 * @param next - 目标值。
-			 * @returns 申请权限的 Promise（无需申请时返回 undefined）。
-			 */
 			// 在途权限申请的序号：每次写回开关、每次自动申请都使它失效，
 			// 避免申请结果在用户又拨过关之后才回来，把新状态覆盖成过期值。
 			let notifyRequestSeq = 0;
@@ -957,6 +844,11 @@ window.__ModuleLoader__.load({
 				if (seq !== notifyRequestSeq) return; // 过期结果丢弃
 				permissionStore.set(typeof result === 'string' ? result : notifier.permission());
 			};
+			/**
+			 * 写回系统弹窗开关；从关到开时若权限还是 default，借这个用户手势申请。
+			 * @param next - 目标值。
+			 * @returns 申请权限的 Promise（无需申请时返回 undefined）。
+			 */
 			const setNotify = (next) => {
 				const on = next === true;
 				notifyStore.set(on);
@@ -972,6 +864,10 @@ window.__ModuleLoader__.load({
 				}
 				return notifier.request().then((result) => applyPermissionResult(seq, result));
 			};
+			/** 写回弹窗时机（坏值归一化到默认档）。 */
+			const setNotifyMode = (next) => notifyModeStore.set(resolveNotifyMode(next));
+			/** 写回提示音开关。 */
+			const setSound = (next) => soundStore.set(next === true);
 			/**
 			 * 写回音效下标（坏值归一化到默认档），并立即按新音效与当前音量发声 ——
 			 * 在设置页切换音效就是试听，不用再多点一步。
@@ -984,68 +880,54 @@ window.__ModuleLoader__.load({
 			};
 			/** 写回音量百分比。 */
 			const setVolume = (next) => volumeStore.set(clampVolume(next));
-			/** 写回卡宽（px）。 */
-			const setWidth = (next) => widthStore.set(clampSize(next, WIDTH_MIN, WIDTH_MAX, DEFAULTS.width));
-			/** 写回卡高（px，0=自动）。 */
-			const setHeight = (next) => heightStore.set(clampSize(next, HEIGHT_MIN, HEIGHT_MAX, DEFAULTS.height));
-			/** 恢复默认：六个配置全部写回出厂值，权限提示同步刷新。 */
+			/** 恢复默认：五个配置全部写回出厂值，权限提示同步刷新。 */
 			const resetAll = () => {
 				notifyStore.set(DEFAULTS.notify);
+				notifyModeStore.set(DEFAULTS.notifyMode);
 				soundStore.set(DEFAULTS.sound);
 				soundChoiceStore.set(DEFAULTS.soundChoice);
 				volumeStore.set(DEFAULTS.volume);
-				widthStore.set(DEFAULTS.width);
-				heightStore.set(DEFAULTS.height);
 				if (notifier.supported) permissionStore.set(notifier.permission());
 			};
 
 			/**
-			 * 收起一张提醒卡，并取消它的自动收起定时器。
-			 * @param id - 卡片 id。
+			 * 发一条系统弹窗：点击时窗口回前台并打开对应会话。
+			 * @param title - 弹窗标题（按停止原因选）。
+			 * @param body - 弹窗正文（会话名 / 问题 / 错误信息）。
+			 * @param sessionId - 相关会话。
 			 */
-			const dismiss = (id) => {
-				toastStore.set(toastStore.getSnapshot().filter((toast) => toast.id !== id));
-				const off = timers.get(id);
-				if (off !== undefined) {
-					off();
-					timers.delete(id);
-				}
-			};
-
-			/**
-			 * 弹出一张提醒卡；超出同屏上限时先挤掉最旧的。
-			 * @param sessionId - 完成任务的会话。
-			 */
-			const push = (sessionId) => {
-				const current = toastStore.getSnapshot();
-				const id = `tr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-				const next = [...current, { id, sessionId, title: titleOf(ctx, sessionId) }].slice(-MAX_TOASTS);
-				for (const dropped of current) {
-					if (!next.includes(dropped)) dismiss(dropped.id);
-				}
-				toastStore.set(next);
-				timers.set(id, ctx.timer.timeout(() => dismiss(id), TOAST_TTL_MS));
-			};
-
-			/**
-			 * 点「查看」：收起该会话的提醒卡，并回到那个会话。
-			 * @param sessionId - 会话 id。
-			 */
-			const openSession = (sessionId) => {
-				for (const toast of toastStore.getSnapshot()) {
-					if (toast.sessionId === sessionId) dismiss(toast.id);
-				}
-				ctx.uiWorkspace.openSession(sessionId);
-			};
-
-			/**
-			 * 发一条系统通知：点击时窗口回前台并打开对应会话。
-			 * @param sessionId - 完成任务的会话。
-			 * @param title - 通知正文（会话名）。
-			 */
-			const notify = (sessionId, title) => {
-				const notification = notifier.show(t('toast.title'), title, () => openSession(sessionId));
+			const notify = (title, body, sessionId) => {
+				const notification = notifier.show(title, body, () => {
+					try {
+						ctx.uiWorkspace.openSession(sessionId);
+					} catch {
+						// 会话打开失败也不影响弹窗本身。
+					}
+				});
 				if (notification !== null) stats.notifications += 1;
+			};
+
+			/** 按当前开关排一次提示音，并记进排障计数。 */
+			const chimeNow = () => {
+				if (soundStore.getSnapshot() !== true) return;
+				const sounded = chime.play(soundChoiceStore.getSnapshot(), volumeStore.getSnapshot());
+				if (sounded?.scheduled === true) stats.sounds += 1;
+				stats.lastSound = { ...sounded, at: Date.now() };
+			};
+
+			/**
+			 * 弹窗门控（三种停止共用）：开关 + 弹窗时机。
+			 * @returns true = 该发；false = 被开关或时机挡下。
+			 */
+			const shouldNotify = () => {
+				if (notifyStore.getSnapshot() !== true) return false;
+				// 「仅非前台窗口」：标签页被切走或浏览器窗口失焦（人在别的应用）才弹；
+				// 「任何情况都弹」不看前台状态，每次停止都弹。
+				if (notifyModeStore.getSnapshot() === NOTIFY_MODE_UNFOCUSED && view.focused) {
+					stats.skippedFocused += 1;
+					return false;
+				}
+				return true;
 			};
 
 			/**
@@ -1063,34 +945,34 @@ window.__ModuleLoader__.load({
 			};
 
 			/**
-			 * 一轮对话任务结束：提示音不管人在不在都响；卡片与系统通知只在
-			 * 用户不在对话窗口时出场。
-			 * @param sessionId - 完成任务的会话。
+			 * 合并窗口到点：真正决定发不发「完成」弹窗。窗口内刚报过错的会话
+			 * 只算错误，一次停止只出一种提醒（错误与 status 边沿无序到达
+			 * 也能正确合并）。
+			 * @param sessionId - 会话 id。
+			 * @param source - 触发来源（event / list），仅用于排障。
+			 */
+			const flushCompletion = (sessionId, source) => {
+				pendingCompletions.delete(sessionId);
+				const lastError = recentErrors.get(sessionId);
+				if (lastError !== undefined && Date.now() - lastError < STOP_MERGE_MS) return; // 已按错误报过
+				stats.completed += 1;
+				stats.lastCompletion = { sessionId, source, at: Date.now() };
+				if (!shouldNotify()) return;
+				notify(t('toast.completed.title'), titleOf(ctx, sessionId), sessionId);
+			};
+
+			/**
+			 * 一轮对话任务结束（running → 非 running）：完成弹窗延迟一个合并
+			 * 窗口再发，给可能随后到达的 error 事件让位。提示音是「停止」这个
+			 * 信号本身，立即响，不延迟。
+			 * @param sessionId - 会话 id。
 			 * @param source - 触发来源（event / list），仅用于排障。
 			 */
 			const complete = (sessionId, source) => {
-				stats.completed += 1;
-				stats.lastCompletion = { sessionId, source, at: Date.now() };
-				// 只有「主区停在对话窗口、标签页可见、窗口有焦点」三者同时成立，
-				// 才算用户真的在看着这场对话 —— 其余一切（切到其它面板、切走标签页、
-				// 窗口失焦人在别的应用里）都算非对话窗口，该提醒。
-				const watching = view.panelHook && view.activePanelId === null && view.away !== true;
-				// 提示音是「任务完成了」这个信号本身：不管人在不在对话窗口都响。
-				if (soundStore.getSnapshot() === true) {
-					chime.play(soundChoiceStore.getSnapshot(), volumeStore.getSnapshot());
-					if (watching) stats.soundWhileWatching += 1;
-				}
-				if (watching) {
-					// 正在看对话时卡片与通知保持安静，只留提示音。
-					stats.skippedInConversation += 1;
-					return;
-				}
-				// 通知要以「真的发得出去」为准：开了开关但权限没给，不算一条通道。
-				const notifyGranted = notifier.supported && notifier.permission() === 'granted';
-				const notifyWanted = notifyStore.getSnapshot() === true && notifyGranted;
-				// 提醒卡是兜底通道：系统通知能发出去时不弹卡，一次完成只出一种提醒。
-				if (!notifyWanted) push(sessionId);
-				if (notifyWanted) notify(sessionId, titleOf(ctx, sessionId));
+				const cancel = pendingCompletions.get(sessionId);
+				if (cancel !== undefined) cancel();
+				chimeNow();
+				pendingCompletions.set(sessionId, ctx.timer.timeout(() => flushCompletion(sessionId, source), STOP_MERGE_MS));
 			};
 
 			// 用启动时的会话列表给 running 状态做种：页面加载前就在跑的任务，
@@ -1102,10 +984,12 @@ window.__ModuleLoader__.load({
 			}
 
 			// 通道一：宿主转发事件 api-session/status(sessionId, running) —— running
-			// 掉回非 running 就是一轮对话任务结束。
+			// 掉回非 running 就是一轮对话任务结束。running = true 时作废该会话的
+			// 错误合并窗口（新任务开始，旧的错误不再参与合并）。
 			ctx.effect(() => ctx.remote.$on('api-session/status', (sessionId, running) => {
 				stats.events += 1;
 				stats.lastEvent = { sessionId, running: running === true, at: Date.now(), source: 'event' };
+				if (running === true) recentErrors.delete(sessionId);
 				if (noteRunning(sessionId, running === true)) complete(sessionId, 'event');
 			}), 'dsh-task-reminder: session status event');
 
@@ -1120,13 +1004,64 @@ window.__ModuleLoader__.load({
 					if (noteRunning(id, row.running === true)) complete(id, 'list');
 				}
 			}), 'dsh-task-reminder: session status list');
-			// 标签页可见性与窗口焦点：被切走 / 失焦时 view.away = true。
+
+			// 出错停止：宿主转发事件 api-session/error(sessionId, message) ——
+			// 如 400 这类让对话停下来的红色错误。错误优先于合并窗口内还没发出去
+			// 的完成弹窗（取消它），一次停止只出一种提醒。
+			ctx.effect(() => ctx.remote.$on('api-session/error', (sessionId, message) => {
+				stats.errors += 1;
+				stats.lastError = { sessionId, message, at: Date.now() };
+				recentErrors.set(sessionId, Date.now());
+				const cancel = pendingCompletions.get(sessionId);
+				if (cancel !== undefined) {
+					cancel();
+					pendingCompletions.delete(sessionId);
+				}
+				chimeNow();
+				if (!shouldNotify()) return;
+				const body = typeof message === 'string' && message !== '' ? message : titleOf(ctx, sessionId);
+				notify(t('toast.error.title'), body, sessionId);
+			}), 'dsh-task-reminder: session error event');
+
+			// 等你回答：uiSession.sessionStatus 的 pendingInteraction 出现边沿
+			// （ask_user_question / plan-review 挂起，Agent 阻塞在等用户操作）。
+			// 只读观测这个根级快照，绝不订阅 user-questions/request —— 那是
+			// waterfall 应答链，旁观者插进去会干扰官方问答 UI 应答。
+			ctx.effect(() => ctx.uiSession.sessionStatus.subscribe(() => {
+				const snapshot = ctx.uiSession.sessionStatus.getSnapshot();
+				for (const [sessionId, status] of snapshot) {
+					const pending = status?.pendingInteraction;
+					if (pending === undefined || pending === null) {
+						pendingQuestions.delete(sessionId);
+						continue;
+					}
+					if (pendingQuestions.has(sessionId)) continue; // 已提醒过这一轮
+					pendingQuestions.add(sessionId);
+					stats.questions += 1;
+					stats.lastQuestion = { sessionId, kind: pending.kind, at: Date.now() };
+					chimeNow();
+					if (!shouldNotify()) continue;
+					const first = Array.isArray(pending.questions) ? pending.questions[0] : undefined;
+					const body = typeof first?.question === 'string' && first.question !== '' ? first.question : titleOf(ctx, sessionId);
+					notify(t('toast.question.title'), body, sessionId);
+				}
+				// 快照里已经完全没有的会话（被删除 / 归档）从待答集合里清掉，
+				// 之后它再挂起问题时才算新的出现边沿。
+				for (const sessionId of [...pendingQuestions]) {
+					if (!snapshot.has(sessionId)) pendingQuestions.delete(sessionId);
+				}
+			}), 'dsh-task-reminder: pending questions');
+
+			// 前台跟踪：标签页被切走 / 窗口失焦时 view.focused = false。
 			ctx.effect(() => {
 				const sync = () => {
 					if (typeof document === 'undefined') return;
 					const hidden = document.hidden === true;
 					const unfocused = typeof document.hasFocus === 'function' && document.hasFocus() === false;
-					view.away = hidden || unfocused;
+					view.focused = !hidden && !unfocused;
+					// 切走/失焦期间 Chrome 可能挂起 AudioContext，期间排下的音
+					// 会压在挂起的时钟上；回到前台时顺手拉活，让它们立刻续播。
+					chime.resume();
 				};
 				sync();
 				document.addEventListener('visibilitychange', sync);
@@ -1138,10 +1073,30 @@ window.__ModuleLoader__.load({
 					window.removeEventListener('blur', sync);
 				};
 			}, 'dsh-task-reminder: window focus');
-			// 系统通知默认开着：首次装载时替用户申请一次通知权限。浏览器的
-			// Notification API 没有绕过权限的办法（其它插件不需要这一步，是因为
-			// 它们根本不发 OS 通知、只在页面内画东西）。只问一次并记账，不每帧都弹；
+
+			// 自动播放策略：没有用户手势时浏览器把 AudioContext 挂在 suspended，
+			// resume() 也会被拒，完成提示音就此无声；第一次播放还要现建音频设备，
+			// 首声会迟一拍。用户在页面上的第一次点击 / 按键就同时做两件事：
+			// 预热（把设备初始化挪到手势里，之后零延迟）与拉活。
+			ctx.effect(() => {
+				if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return () => {};
+				const revive = () => {
+					chime.warm();
+					chime.resume();
+				};
+				window.addEventListener('pointerdown', revive, { capture: true });
+				window.addEventListener('keydown', revive, { capture: true });
+				return () => {
+					window.removeEventListener('pointerdown', revive, { capture: true });
+					window.removeEventListener('keydown', revive, { capture: true });
+				};
+			}, 'dsh-task-reminder: audio autoplay revival');
+
+			// 系统弹窗默认开着：首次装载时替用户申请一次通知权限。浏览器的
+			// Notification API 没有绕过权限的办法（任何插件都不行 —— OS toast
+			// 一律要求 permission === 'granted'）。只问一次并记账，不每帧都弹；
 			// 之后权限被重置回 default 时，设置页的「申请通知权限」按钮还能再问。
+			// 权限按 Origin 共享：本站点授权一次，任何插件都通用。
 			ctx.effect(() => {
 				try {
 					const storage = typeof window !== 'undefined' ? window.localStorage : undefined;
@@ -1156,25 +1111,14 @@ window.__ModuleLoader__.load({
 					// 存储不可用（隐私模式等）就安静退场，设置页的申请按钮仍然可用。
 				}
 			}, 'dsh-task-reminder: notification permission prompt');
-			ctx.effect(() => mountStyles(), 'dsh-task-reminder: styles');
 			ctx.effect(() => () => {
-				for (const off of timers.values()) off();
-				timers.clear();
 				chime.dispose();
-			}, 'dsh-task-reminder: timers');
-
-			// 右下角弹窗：框架级浮层，不占用任何栏内空间。
-			ctx.slots.inject('shell.overlay', () => ctx.slots.register({
-				name: 'shell.overlay',
-				id: 'task-reminder',
-				order: 50,
-				locale: NS,
-				inject: () => ({
-					hooks: { toasts: toastStore, width: widthStore, height: heightStore },
-					dismiss,
-					openSession,
-				}),
-			}, ReminderOverlay));
+			}, 'dsh-task-reminder: chime');
+			// 回收待定的完成弹窗定时器（卸载时不再有延迟回调落地）。
+			ctx.effect(() => () => {
+				for (const cancel of pendingCompletions.values()) cancel();
+				pendingCompletions.clear();
+			}, 'dsh-task-reminder: deferred completions');
 
 			// 独立设置页：设置面板左侧导航里的「任务提醒」（order 避开 chat-locator 41）。
 			ctx.slots.inject('settings.section', () => ctx.slots.register({
@@ -1185,54 +1129,62 @@ window.__ModuleLoader__.load({
 				locale: NS,
 				inject: () => ({
 					notifyStore,
+					notifyModeStore,
 					soundStore,
 					soundChoiceStore,
 					volumeStore,
-					widthStore,
-					heightStore,
 					permissionStore,
 					setNotify,
+					setNotifyMode,
 					setSound,
 					setSoundChoice,
 					setVolume,
-					setWidth,
-					setHeight,
 					reset: resetAll,
 					notifySupported: notifier.supported,
 					t,
 				}),
 			}, ReminderSection));
 
-			// 排障钩子：浏览器控制台执行 __dshTaskReminder.state() 可看面板状态、
-			// 六个配置、当前卡片与各会话 running 记录。
+			// 排障钩子：浏览器控制台执行 __dshTaskReminder.state() 可看前台状态、
+			// 五个配置、通知权限与各会话 running 记录。
 			const debug = {
 				version: PLUGIN_VERSION,
 				state: () => ({
-					panelHook: view.panelHook,
-					activePanelId: view.activePanelId,
-					away: view.away,
-					inConversationWindow: view.panelHook ? view.activePanelId === null : null,
+					focused: view.focused,
 					notify: notifyStore.getSnapshot(),
+					notifyMode: notifyModeStore.getSnapshot(),
 					sound: soundStore.getSnapshot(),
 					soundChoice: soundChoiceStore.getSnapshot(),
 					volume: volumeStore.getSnapshot(),
-					width: widthStore.getSnapshot(),
-					height: heightStore.getSnapshot(),
 					notificationPermission: permissionStore.getSnapshot(),
 					notificationSupported: notifier.supported,
-					toasts: toastStore.getSnapshot(),
 					running: [...runningSessions.entries()],
 					stats: { ...stats },
 				}),
 			};
 			/**
-			 * 当场试一次：弹一张卡（取列表里第一个会话的名），并按开关放提示音。
-			 * 不经过完成判定与面板判定，专供验证弹窗与提示音是否工作。
+			 * 当场触发一条提醒（不经过判定与门控），三种停止都能演示：
+			 * `test()` / `test('completed')` 完成、`test('question')` 等你回答、
+			 * `test('error')` 出错停止。专供验证三条链路是否都通。
+			 * @param kind - 'completed'（默认）/ 'question' / 'error'。
 			 * @param sessionId - 可选，指定用哪个会话的名字。
 			 */
-			debug.test = (sessionId) => {
-				const id = sessionId ?? ctx.sessions.list.getSnapshot().ids?.[0] ?? 'test';
-				push(id);
+			debug.test = (kind, sessionId) => {
+				const resolved = kind === 'question' || kind === 'error' ? kind : 'completed';
+				const id = typeof sessionId === 'string' && sessionId !== '' ? sessionId : ctx.sessions.list.getSnapshot().ids?.[0] ?? 'test';
+				if (resolved === 'question') {
+					stats.questions += 1;
+					stats.lastQuestion = { sessionId: id, kind: 'question', at: Date.now() };
+					notify(t('toast.question.title'), '排障测试：这是一条模拟的待答问题？', id);
+				} else if (resolved === 'error') {
+					stats.errors += 1;
+					stats.lastError = { sessionId: id, message: '排障测试：模拟一条错误（如 400 Bad Request）', at: Date.now() };
+					notify(t('toast.error.title'), '排障测试：模拟一条错误（如 400 Bad Request）', id);
+				} else {
+					stats.completed += 1;
+					stats.lastCompletion = { sessionId: id, source: 'test', at: Date.now() };
+					notify(t('toast.completed.title'), titleOf(ctx, id), id);
+				}
 				if (soundStore.getSnapshot() === true) chime.play(soundChoiceStore.getSnapshot(), volumeStore.getSnapshot());
 			};
 			/** 只放音：按当前音效与音量，供排障试听。 */
@@ -1245,19 +1197,17 @@ window.__ModuleLoader__.load({
 
 		return {
 			name: 'dsh-task-reminder',
-			inject: ['slots', 'locale', 'sessions', 'remote', 'uiWorkspace', 'timer'],
+			inject: ['slots', 'locale', 'sessions', 'remote', 'uiSession', 'uiWorkspace', 'timer'],
 			apply,
 			// 纯函数与常量出口：Node 自检直接校验，不参与运行时行为。
 			diagnostics: {
-				CSS,
-				CSS_TEXT,
 				DEFAULTS,
+				DEFAULT_NOTIFY_MODE,
 				DEFAULT_SOUND_CHOICE,
-				HEIGHT_MAX,
-				HEIGHT_MIN,
-				HEIGHT_PERSIST_KEY,
-				HEIGHT_STEP,
-				MAX_TOASTS,
+				NOTIFY_MODE_ALWAYS,
+				NOTIFY_MODE_PERSIST_KEY,
+				NOTIFY_MODE_UNFOCUSED,
+				NOTIFY_MODES,
 				NOTIFY_PERSIST_KEY,
 				NOTIFICATION_TAG,
 				NS,
@@ -1265,23 +1215,16 @@ window.__ModuleLoader__.load({
 				SOUND_CHOICES,
 				SOUND_CHOICE_PERSIST_KEY,
 				SOUND_PERSIST_KEY,
-				STACK_INSET_PX,
-				STYLE_TAG_ID,
-				TOAST_TTL_MS,
 				VOLUME_BOOST,
 				VOLUME_MAX,
 				VOLUME_MIN,
 				VOLUME_PERSIST_KEY,
 				VOLUME_STEP,
-				WIDTH_MAX,
-				WIDTH_MIN,
-				WIDTH_PERSIST_KEY,
-				WIDTH_STEP,
 				clampVolume,
-				clampSize,
 				createChime,
 				createNotifier,
 				en,
+				resolveNotifyMode,
 				resolveSoundChoice,
 				titleOf,
 				zh,
