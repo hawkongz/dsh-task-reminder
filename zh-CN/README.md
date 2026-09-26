@@ -1,6 +1,6 @@
 <div align="center">
   <h1>dsh-task-reminder</h1>
-  <p>DeepSeek Harness Web 的对话任务完成提醒插件</p>
+  <p>DeepSeek Harness（Web UI 与桌面端）的对话任务完成提醒插件</p>
 
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
   [![Platform](https://img.shields.io/badge/Platform-DeepSeek%20Harness-lightgrey)](https://github.com/deepseek-ai)
@@ -43,8 +43,8 @@ Agent 回合在 DeepSeek Harness 里跑着，你却切到别的窗口看别的�
 拉不起已被最小化或收进托盘的窗口，所以点击弹窗时页面会请宿主半侧（`POST`
 `api/task-reminder/window-activation`，一条 Connection 精确 Fetch 路由）再启动
 一份应用：第二份拿不到单实例锁、立刻退出，第一份随即走
-`second-instance` → `focusPrimaryWindow()`。运行时零依赖，桌面端之外宿主半侧
-等于不存在。
+`second-instance` → `focusPrimaryWindow()`。运行时零依赖；桌面端之外没人调用这条
+路由，真被调用也只会回 501。
 
 ## ✨ 功能特性
 
@@ -251,8 +251,10 @@ node test/verify-client.mjs
      `stats.notifications` 要往上加（是 `1` 就说明浏览器接受了 toast，剩下的
      丢失在系统展示层，不是插件的问题）。
   2. 权限还是 `default`？设置页「系统弹窗」行下有「申请通知权限」按钮，点一次
-     再选「允许」；是 `denied`？去浏览器地址栏的站点权限里允许通知，再点一次
-     那个按钮。权限按 Origin 共享：本站点授权一次，所有插件通用。
+     再选「允许」；是 `denied`？这一档**故意不提供按钮**（不给被拒的站点反复弹框）：
+     去浏览器地址栏的站点权限里允许通知，权限一变成 `granted` 提示就消失；
+     把该站点的通知权限改回「询问（Ask）」则按钮会重新出现。权限按 Origin 共享：
+     本站点授权一次，所有插件通用。
   3. 浏览器接受了但屏幕上没有？那是 Windows 在压浏览器 toast。查：设置 → 系统 →
      通知（总开关**和**「浏览器」这一项的应用开关）、专注助手设为「关」
      （「仅优先级」会压掉普通 toast），并按 `Win + N` 打开通知中心看看——toast

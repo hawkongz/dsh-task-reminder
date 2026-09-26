@@ -21,6 +21,8 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, '..', 'client.js'), 'utf8');
+/** 包元数据：用来比对 client.js 里那份版本号，发布前防漂。 */
+const packageJson = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8'));
 
 /** 让出微任务/宏任务队列，供 requestPermission 这类 Promise 落地。 */
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -522,6 +524,8 @@ check('五个配置默认值符合出厂表', face.notifyStore.getSnapshot() ===
 check('系统弹窗默认开启且时机为「任何情况都弹」', face.notifyStore.getSnapshot() === true && face.notifyModeStore.getSnapshot() === 'always');
 
 check('排障钩子暴露了状态', typeof windowStub.__dshTaskReminder?.state === 'function' && windowStub.__dshTaskReminder.version === PLUGIN_VERSION);
+// 版本号写在 client.js 与 package.json 两处，漂了就发错版本的包（1.4.4 之前漂过）。
+check('client.js 的版本号与 package.json 一致', PLUGIN_VERSION === packageJson.version, `client.js=${PLUGIN_VERSION} package.json=${packageJson.version}`);
 check('排障钩子带当场试一次（test）', typeof windowStub.__dshTaskReminder?.test === 'function');
 check('排障钩子带只放音（sound）', typeof windowStub.__dshTaskReminder?.sound === 'function');
 check('排障状态覆盖五个配置、弹窗时机、通知权限与前台状态', (() => {

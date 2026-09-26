@@ -1,0 +1,28 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      # 发布前先跑测试：断言不全绿就没有后面的发布。
+      - run: node test/verify-client.mjs
+
+      # trusted publishing (OIDC)：无需 npm token、无需 OTP、无需手机确认。
+      # 前提：npmjs.com 包设置里已配置 Trusted Publisher 指向本仓库与本文件名。
+      # 没配置时这一步会以 ENEEDAUTH 失败，不会发错东西。
+      - run: npm publish --provenance

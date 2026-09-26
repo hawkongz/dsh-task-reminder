@@ -1,6 +1,6 @@
 <div align="center">
   <h1>dsh-task-reminder</h1>
-  <p>Conversation task-completion reminders for the DeepSeek Harness Web UI</p>
+  <p>Conversation task-completion reminders for DeepSeek Harness (Web UI and Desktop)</p>
 
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
   [![Platform](https://img.shields.io/badge/Platform-DeepSeek%20Harness-lightgrey)](https://github.com/deepseek-ai)
@@ -51,8 +51,9 @@ is minimized or hidden in the tray, so on a toast click the page asks the host
 half (a `POST` to `api/task-reminder/window-activation`, a Connection
 exact-Fetch route) to relaunch the app once: the second process cannot take the
 single-instance lock, exits at once, and the running app handles
-`second-instance` → `focusPrimaryWindow()`. There are no runtime dependencies,
-and outside DSH Desktop the host half is inert.
+`second-instance` → `focusPrimaryWindow()`. There are no runtime dependencies;
+outside DSH Desktop nothing calls the route, and if something did it would just
+answer 501.
 
 ## ✨ Features
 
@@ -313,10 +314,12 @@ suspended-AudioContext revival on a user gesture, and disposal.
      toast; the loss is then on the OS side, not in the plugin).
   2. Permission still `default`? The settings page shows a **Request
      notification permission** button under the System toast row — click it
-     once and choose Allow. Permission `denied`? Allow notifications for the
-     site in the browser's address-bar site settings, then click the button
-     again. Permission is per origin — granting it for this app once covers
-     every plugin on it.
+     once and choose Allow. Permission `denied`? The page deliberately offers
+     no button for a blocked site: allow notifications for the site in the
+     browser's address-bar site settings and the hint clears as soon as
+     permission is granted — set the site's notification permission back to
+     **Ask** instead and the button reappears. Permission is per origin —
+     granting it for this app once covers every plugin on it.
   3. Browser accepted but nothing shows on screen? Windows is suppressing
      browser toasts. Check: Settings → System → Notifications (master switch
      **and** the per-app switch for your browser), Focus assist set to

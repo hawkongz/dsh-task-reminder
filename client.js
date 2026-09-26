@@ -1,5 +1,5 @@
 /**
- * dsh-task-reminder —— 浏览器半侧（DSH Web）。
+ * dsh-task-reminder —— 浏览器半侧（DSH Web 与 DSH 桌面端的渲染进程）。
  *
  * 目标：对话任务（Agent 回合）停止时发送 Windows 系统弹窗，并播放提示音 ——
  *   1. 系统弹窗走 Web Notification API（操作系统右下角原生通知，浏览器退到
@@ -79,8 +79,11 @@ window.__ModuleLoader__.load({
 
 		/** 本地化命名空间（同时是设置页文案的键空间）。 */
 		const NS = 'task-reminder';
-		/** 版本号，随排障钩子暴露。 */
-		const PLUGIN_VERSION = '1.4.3';
+		/**
+		 * 版本号，随排障钩子暴露。必须与 package.json 的 version 一致：
+		 * 自检里有一条断言直接比这两处，版本漂了就会红。
+		 */
+		const PLUGIN_VERSION = '1.4.4';
 
 		/** 五个可配置项的本地持久化键（createSnapshotStore 的 persist.name）。 */
 		const NOTIFY_PERSIST_KEY = 'dsh.task-reminder.notify';
@@ -169,7 +172,11 @@ window.__ModuleLoader__.load({
 		/** 默认音效（第一种）。 */
 		const DEFAULT_SOUND_CHOICE = 0;
 
-		/** 系统通知的 tag：同一会话的重复通知在系统层替换，不堆一摞。 */
+		/**
+		 * 系统通知 tag 的前缀：真正的 tag 是「前缀-时间戳」，每条通知各不相同，
+		 * 后一条不会顶掉前一条（固定 tag 的「同一会话替换」在提醒场景里反而
+		 * 让用户什么都没看到）。
+		 */
 		const NOTIFICATION_TAG = 'dsh-task-reminder';
 		/** 「已经替用户申请过通知权限」的记账键（localStorage）：只问一次。 */
 		const PERMISSION_ASKED_KEY = 'dsh.task-reminder.permission-asked';
@@ -181,6 +188,8 @@ window.__ModuleLoader__.load({
 			'toast.completed.title': '对话任务已完成',
 			'toast.question.title': '等待你的回答',
 			'toast.error.title': '任务出错已停止',
+			'test.question': '排障测试：这是一条模拟的待答问题？',
+			'test.error': '排障测试：模拟一条错误（如 400 Bad Request）',
 			'settings.notify.description': '任务完成时发送一条 Windows 系统弹窗；点击它回到该会话。默认开启；首次装载时代码会替您申请一次浏览器通知权限（已授权则不会再问）',
 			'notify.mode.title': '弹窗时机',
 			'notify.mode.description': '「任何情况都弹」：任务一完成就弹，不管浏览器窗口是否在前台；「仅非前台窗口」：切走标签页或浏览器窗口失焦（人在别的应用）时才弹。',
@@ -214,6 +223,8 @@ window.__ModuleLoader__.load({
 			'toast.completed.title': 'Task complete',
 			'toast.question.title': 'Waiting for your answer',
 			'toast.error.title': 'Task stopped with an error',
+			'test.question': 'Diagnostics test: this is a simulated pending question?',
+			'test.error': 'Diagnostics test: a simulated error (e.g. 400 Bad Request)',
 			'settings.notify.description': 'Send a Windows system toast when a task finishes; clicking it returns to that session. On by default; the browser asks for notification permission once on the first load (never asked again once granted)',
 			'notify.mode.title': 'Toast timing',
 			'notify.mode.description': 'Always: toast as soon as a task finishes, whether or not the browser window is in the foreground. Only when unfocused: toast only when you switch the tab away or the browser window loses focus (you are in another app).',
@@ -1107,8 +1118,10 @@ window.__ModuleLoader__.load({
 			 * @param message - 错误正文（网关原文）。
 			 */
 			const reportError = (sessionId, message) => {
-				if (freshReport(sessionId)?.kind === 'error') return; // 本停止已按错误报过
+				// 对账票据只读一次：读两次的话，「读到的票据」与「据它做的决定」
+				// 之间隔着一个可能刚好过期的瞬间，撤回就会被跳过。
 				const prior = freshReport(sessionId);
+				if (prior?.kind === 'error') return; // 本停止已按错误报过
 				if (prior?.kind === 'completion') {
 					// 兜底网：错误后到——撤回完成弹窗只留错误；音已响过，不重响。
 					if (!shouldNotify()) return; // 保留完成弹窗作为唯一提醒
@@ -1378,11 +1391,11 @@ window.__ModuleLoader__.load({
 				if (resolved === 'question') {
 					stats.questions += 1;
 					stats.lastQuestion = { sessionId: id, kind: 'question', at: Date.now() };
-					notify(t('toast.question.title'), '排障测试：这是一条模拟的待答问题？', id);
+					notify(t('toast.question.title'), t('test.question'), id);
 				} else if (resolved === 'error') {
 					stats.errors += 1;
-					stats.lastError = { sessionId: id, message: '排障测试：模拟一条错误（如 400 Bad Request）', at: Date.now() };
-					notify(t('toast.error.title'), '排障测试：模拟一条错误（如 400 Bad Request）', id);
+					stats.lastError = { sessionId: id, message: t('test.error'), at: Date.now() };
+					notify(t('toast.error.title'), t('test.error'), id);
 				} else {
 					stats.completed += 1;
 					stats.lastCompletion = { sessionId: id, source: 'test', at: Date.now() };
