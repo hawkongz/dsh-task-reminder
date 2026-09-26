@@ -451,6 +451,10 @@ window.__ModuleLoader__.load({
 		/**
 		 * 宿主半侧注册的「唤醒桌面窗口」路由（相对本页路径，经 dsh-app 协议
 		 * 转发到宿主，与 RPC 走同一条 /api 通道）。宿主实现见 index.js。
+		 *
+		 * 这里**故意不带前导斜杠**（宿主侧的注册路径是 `/api/...`）：桌面壳把
+		 * `dsh-app://app/*` 里非前端的相对路径按原样转发给宿主，写成绝对路径
+		 * 会被当成前端路由、转发不到宿主。别「顺手」补上那个斜杠。
 		 */
 		const DESKTOP_ACTIVATION_ROUTE = 'api/task-reminder/window-activation';
 
