@@ -22,7 +22,32 @@ jobs:
       # 发布前先跑测试：断言不全绿就没有后面的发布。
       - run: node test/verify-client.mjs
 
+      # tag 必须与 package.json 的 version 对上，否则手动 dispatch 会拿当前分支乱发。
+      - name: Tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json v${version}"
+            exit 1
+          fi
+
+      # 版本已在 registry 上就不再发布（重推 tag 不该弄红构建）；新版本才继续。
+      - name: Is this version already published?
+        id: published
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+            echo "${name}@${version} is already on the registry — nothing to publish."
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+
       # trusted publishing (OIDC)：无需 npm token、无需 OTP、无需手机确认。
       # 前提：npmjs.com 包设置里已配置 Trusted Publisher 指向本仓库与本文件名。
       # 没配置时这一步会以 ENEEDAUTH 失败，不会发错东西。
-      - run: npm publish --provenance
+      - name: Publish
+        if: steps.published.outputs.exists == 'false'
+        run: npm publish --provenance
