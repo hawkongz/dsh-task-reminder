@@ -50,4 +50,15 @@ jobs:
       # 没配置时这一步会以 ENEEDAUTH 失败，不会发错东西。
       - name: Publish
         if: steps.published.outputs.exists == 'false'
-        run: npm publish --provenance
+        run: |
+          set -o pipefail
+          if npm publish --provenance 2>&1 | tee /tmp/npm-publish.log; then
+            exit 0
+          fi
+          # registry 索引有传播延迟：上面那次探测可能没看到刚发布的版本，于是这里会撞上
+          # “版本已存在”。那不是故障，跳过即可（v1.4.5 就踩过这一次）。
+          if grep -q 'cannot publish over the previously published versions' /tmp/npm-publish.log; then
+            echo "::notice::this version is already on the registry — nothing to publish"
+            exit 0
+          fi
+          exit 1
