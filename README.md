@@ -337,8 +337,9 @@ suspended-AudioContext revival on a user gesture, and disposal.
   some Windows machines), and the autoplay policy allows that start only from
   a user gesture — no in-page code can start audio before one, so every
   website shares this cost. The habit that removes it: after opening the page,
-  click anywhere in it once (the plugin resumes the context and plays a silent
-  primer on that first gesture); by the time you switch an effect or a task
+  click anywhere in it once — that first gesture is what resumes the audio
+  context (the plugin already queued a silent primer at load, so the device has
+  had the whole page load to start); by the time you switch an effect or a task
   finishes, the device is warm and the chime is immediate.
 * **A toast fires while you watch the conversation.** That is the **Always**
   timing mode doing its job. Switch the Toast timing row to **Only when

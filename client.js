@@ -1110,8 +1110,10 @@ window.__ModuleLoader__.load({
 				stats.completed += 1;
 				stats.lastCompletion = { sessionId, source, at: Date.now() };
 				chimeNow();
-				if (!shouldNotify()) return;
-				trackReport(sessionId, 'completion', notify(t('toast.completed.title'), titleOf(ctx, sessionId), sessionId));
+				// 票据与「弹窗发不发得出去」无关：门控关掉时也要记，否则同一次停止晚到
+				// 的错误会被当成一次新停止、再响一声（关掉弹窗 / 仅非前台时会双响）。
+				const canNotify = shouldNotify();
+				trackReport(sessionId, 'completion', canNotify ? notify(t('toast.completed.title'), titleOf(ctx, sessionId), sessionId) : null);
 			};
 
 			/**
@@ -1126,20 +1128,18 @@ window.__ModuleLoader__.load({
 				// 之间隔着一个可能刚好过期的瞬间，撤回就会被跳过。
 				const prior = freshReport(sessionId);
 				if (prior?.kind === 'error') return; // 本停止已按错误报过
+				// 门控只决定「这条弹窗发不发」，票据一律照记：同一次停止的重复边沿与
+				// 晚到的错误都靠这张表去重，关了弹窗也不能让它失效（否则会双响）。
+				const canNotify = shouldNotify();
 				if (prior?.kind === 'completion') {
 					// 兜底网：错误后到——撤回完成弹窗只留错误；音已响过，不重响。
-					if (!shouldNotify()) return; // 保留完成弹窗作为唯一提醒
-					if (prior.notification !== null) prior.notification.close();
-					stats.errors += 1;
-					stats.lastError = { sessionId, message, at: Date.now() };
-					trackReport(sessionId, 'error', notify(t('toast.error.title'), errorBody(sessionId, message), sessionId));
-					return;
+					if (canNotify && prior.notification !== null) prior.notification.close();
+				} else {
+					chimeNow();
 				}
 				stats.errors += 1;
 				stats.lastError = { sessionId, message, at: Date.now() };
-				chimeNow();
-				if (!shouldNotify()) return;
-				trackReport(sessionId, 'error', notify(t('toast.error.title'), errorBody(sessionId, message), sessionId));
+				trackReport(sessionId, 'error', canNotify ? notify(t('toast.error.title'), errorBody(sessionId, message), sessionId) : null);
 			};
 
 			/**
@@ -1222,6 +1222,12 @@ window.__ModuleLoader__.load({
 					const row = snapshot.byId?.[id];
 					if (row === undefined || row === null) continue;
 					if (noteRunning(id, row.running === true)) complete(id, 'list');
+				}
+				// 已经不在列表里、且值已经是 false 的会话（没有待决的完成边沿）可以丢掉，
+				// 免得每个见过的会话都永久留一个布尔。值为 true 的不动：列表投影可能只是
+				// 暂时陈旧，删掉会把真实的完成边沿弄丢。
+				for (const [id, running] of [...runningSessions]) {
+					if (running === false && snapshot.byId?.[id] === undefined) runningSessions.delete(id);
 				}
 			}), 'dsh-task-reminder: session status list');
 
@@ -1405,7 +1411,7 @@ window.__ModuleLoader__.load({
 					stats.lastCompletion = { sessionId: id, source: 'test', at: Date.now() };
 					notify(t('toast.completed.title'), titleOf(ctx, id), id);
 				}
-				if (soundStore.getSnapshot() === true) chime.play(soundChoiceStore.getSnapshot(), volumeStore.getSnapshot());
+				chimeNow(); // 与正式路径共用同一处放音与记账（stats.sounds / lastSound）
 			};
 			/** 只放音：按当前音效与音量，供排障试听。 */
 			debug.sound = () => chime.play(soundChoiceStore.getSnapshot(), volumeStore.getSnapshot());
@@ -1420,10 +1426,10 @@ window.__ModuleLoader__.load({
 			inject: ['slots', 'locale', 'sessions', 'remote', 'uiSession', 'uiWorkspace', 'timer'],
 			apply,
 			// 纯函数与常量出口：Node 自检直接校验，不参与运行时行为。
+			// 每个键都要有读者（自检或文档）；没有读者的出口会在发布前被清掉。
 			diagnostics: {
 				DEFAULTS,
 				DEFAULT_NOTIFY_MODE,
-				DEFAULT_SOUND_CHOICE,
 				DESKTOP_ACTIVATION_ROUTE,
 				NOTIFY_MODE_ALWAYS,
 				NOTIFY_MODE_PERSIST_KEY,
@@ -1442,10 +1448,8 @@ window.__ModuleLoader__.load({
 				VOLUME_PERSIST_KEY,
 				VOLUME_STEP,
 				clampVolume,
-				createChime,
 				createNotifier,
 				en,
-				requestDesktopActivation,
 				resolveNotifyMode,
 				resolveSoundChoice,
 				titleOf,

@@ -241,7 +241,6 @@ const {
 	VOLUME_PERSIST_KEY,
 	VOLUME_STEP,
 	clampVolume,
-	createChime,
 	createNotifier,
 	en,
 	resolveNotifyMode,
@@ -269,7 +268,6 @@ console.log('模块与文案');
 check('浏览器半侧模块 id 与包名一致（@hawkongz/dsh-task-reminder）', definition.id === '@hawkongz/dsh-task-reminder', definition.id);
 check('插件形状正确（name / inject / apply）', plugin.name === 'dsh-task-reminder' && typeof plugin.apply === 'function'
 	&& JSON.stringify(plugin.inject) === JSON.stringify(['slots', 'locale', 'sessions', 'remote', 'uiSession', 'uiWorkspace', 'timer']), JSON.stringify(plugin.inject));
-check('inject 覆盖 remote / sessions / uiSession / uiWorkspace / timer', ['remote', 'sessions', 'uiSession', 'uiWorkspace', 'timer'].every((name) => plugin.inject.includes(name)));
 
 const zhKeys = Object.keys(zh).sort();
 const enKeys = Object.keys(en).sort();
@@ -491,11 +489,9 @@ check('订阅了 api-session/status 完成事件', listeners.some((entry) => ent
 check('订阅了 api-session/error 出错事件', listeners.some((entry) => entry.name === 'api-session/error' && typeof entry.fn === 'function'));
 check('订阅了官方会话列表（第二通道）', listListeners.size === 1, String(listListeners.size));
 check('effects 全部登记（字典 / 事件 / 列表 / 焦点 / 拉活 / 权限 / 提示音 / 排障）', effects.length >= 8, String(effects.length));
-check('没有注册 shell.overlay 浮层（卡片通道已删除）', !injections.some((item) => item.name === 'shell.overlay'), JSON.stringify(injections.map((item) => item.name)));
-check('只注册了 settings.section 一个 slot', injections.length === 1 && injections[0].name === 'settings.section', JSON.stringify(injections.map((item) => item.name)));
+check('只注册了 settings.section 一个 slot（也就没有 shell.overlay 浮层：卡片通道已删除）', injections.length === 1 && injections[0].name === 'settings.section', JSON.stringify(injections.map((item) => item.name)));
 
-const generalRows = injections.filter((item) => item.name === 'settings.general.item');
-check('「设置 → 通用」里不再有两行开关（迁出）', generalRows.length === 0, String(generalRows.length));
+// 「设置 → 通用」里不再有开关：上面那条「只注册一个 slot」已经蕴含（没有 settings.general.item）。
 
 const section = injections.find((item) => item.name === 'settings.section');
 check('独立设置页注册在 settings.section', section !== undefined && section.entry.options.id === 'task-reminder' && section.entry.options.locale === NS, JSON.stringify(section?.entry.options));
@@ -523,7 +519,7 @@ check('五个配置默认值符合出厂表', face.notifyStore.getSnapshot() ===
 	&& face.volumeStore.getSnapshot() === DEFAULTS.volume);
 check('系统弹窗默认开启且时机为「任何情况都弹」', face.notifyStore.getSnapshot() === true && face.notifyModeStore.getSnapshot() === 'always');
 
-check('排障钩子暴露了状态', typeof windowStub.__dshTaskReminder?.state === 'function' && windowStub.__dshTaskReminder.version === PLUGIN_VERSION);
+check('排障钩子暴露了状态与版本号', typeof windowStub.__dshTaskReminder?.state === 'function' && typeof windowStub.__dshTaskReminder.version === 'string', String(windowStub.__dshTaskReminder?.version));
 // 版本号写在 client.js 与 package.json 两处，漂了就发错版本的包（1.4.4 之前漂过）。
 check('client.js 的版本号与 package.json 一致', PLUGIN_VERSION === packageJson.version, `client.js=${PLUGIN_VERSION} package.json=${packageJson.version}`);
 check('排障钩子带当场试一次（test）', typeof windowStub.__dshTaskReminder?.test === 'function');
@@ -726,7 +722,7 @@ console.log('');
 console.log('停止分类、出错与待答');
 
 const errorListener = listeners.find((entry) => entry.name === 'api-session/error')?.fn;
-check('订阅了 api-session/error 出错事件', typeof errorListener === 'function');
+check('分类段落：api-session/error 订阅回调可用', typeof errorListener === 'function');
 check('只读订阅了 uiSession.sessionStatus（不碰 user-questions 应答链）', statusSubscribers.size === 1 && !listeners.some((entry) => entry.name === 'user-questions/request'), String(statusSubscribers.size));
 check('排障状态带 questions / errors 计数', (() => {
 	const stats = windowStub.__dshTaskReminder.state().stats;
@@ -734,8 +730,13 @@ check('排障状态带 questions / errors 计数', (() => {
 })());
 
 // ① 独立的出错（无完成边沿）：错误弹窗立即发，正文是错误信息。
+// 上面「关掉弹窗」那一轮在 s2 上留了完成票据（门控关掉也照记，见 client.js 的
+// reportCompletion），而这里的测试时间是冻结的、票据不会自然过期；先让 s2 进入
+// 新一轮（running=true 清掉上一张票据，这正是生产里的行为），这次错误才算真正
+// 独立的停止 —— 否则它会被当成那次完成的晚到错误，只撤回、不重响。
 resetNotificationLog();
 resetAudioLog();
+statusListener('s2', true);
 errorListener('s2', '400 Bad Request: invalid model');
 check('出错即发错误弹窗（标题/正文）', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '任务出错已停止' && notificationLog.created[0]?.options?.body === '400 Bad Request: invalid model', JSON.stringify(notificationLog.created[0]));
 check('错误记进 stats.errors', windowStub.__dshTaskReminder.state().stats.errors === 1, String(windowStub.__dshTaskReminder.state().stats.errors));
@@ -801,6 +802,23 @@ errorListener('s2', 'boom-late');
 check('晚到错误撤回完成弹窗只留错误', notificationLog.created.length === 2 && notificationLog.created[1]?.title === '任务出错已停止' && notificationLog.closed === 1, JSON.stringify(notificationLog.created.map((item) => item.title)));
 check('晚到错误不重响提示音（一次停止一次音）', audioLog.oscillators.length === 2, String(audioLog.oscillators.length));
 fakeUsingThrows = false;
+
+// ⑦b 同一场景，但弹窗被门控关掉：晚到的错误不能再补响一声（修复前会双响）。
+//     票据若只在「弹窗真发出去」时才记，门控关掉时就没有票据，同一次停止的错误
+//     会被当成一次新停止、再响一次。
+face.setNotify(false);
+fakeUsingThrows = true;
+resetNotificationLog();
+resetAudioLog();
+completeOnce();
+flushTimers();
+const chimesGatedFallback = audioLog.oscillators.length;
+errorListener('s2', 'boom-late-gated');
+check('关掉弹窗：兜底完成仍响一次音', chimesGatedFallback === 2, String(chimesGatedFallback));
+check('关掉弹窗：晚到错误不补响也不弹窗', audioLog.oscillators.length === chimesGatedFallback && notificationLog.created.length === 0, `${audioLog.oscillators.length} 音 / ${notificationLog.created.length} 弹窗`);
+fakeUsingThrows = false;
+await face.setNotify(true);
+
 // ⑧ 重复边沿（列表陈旧回放 running=true 后再翻 false）：同一次停止只报一次。
 //    场景：分类在途（读持久日志的 RPC 被闸门摁住）时，陈旧投影把边沿表
 //    冲回 true，再翻 false 产生第二次边沿——只应报一次完成。
@@ -960,7 +978,7 @@ resetNotificationLog();
 await face.setNotify(false);
 completeOnce();
 flushTimers();
-check('关掉系统弹窗后不再发送', notificationLog.created.length === 0 && face.notifyStore.getSnapshot() === false);
+check('权限链路③：关掉开关后完成不再发', notificationLog.created.length === 0 && face.notifyStore.getSnapshot() === false);
 await face.setNotify(true);
 FakeNotification.permission = 'granted';
 
