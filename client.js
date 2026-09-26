@@ -50,7 +50,10 @@
  *    默认开启；权限还是 default 时首次装载替用户申请一次（localStorage
  *    记账只问一次），设置页另有「申请通知权限」按钮；被拒绝 / 不支持时在
  *    设置页给出对应提示，不假装生效。权限按 Origin 生效，授权一次本站点
- *    全部通用。每条通知独立 tag，互不顶替。
+ *    全部通用。每条通知独立 tag，互不顶替。点击弹窗：打开对应会话 + 关闭弹窗；
+ *    拉回前台分两路 —— 普通浏览器 `window.focus()` 就够，桌面壳（DSH Desktop）
+ *    的渲染进程拉不起最小化 / 托盘窗口，改由 `requestDesktopActivation()`
+ *    请宿主半侧跑一次 `dsh://open`（宿主实现与理由见 index.js）。
  * 6. 提示音用 Web Audio 现场合成，不引入任何音频文件：四种音效（两声 /
  *    三声上扬 / 上升琶音 / 圆润三角波）各有频率与节奏表，峰值按 100% 音量
  *    给出，再乘上「用户音量 + 20」折算出的 master 增益后写进包络 —— 整档
@@ -435,6 +438,35 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
+		 * 宿主半侧注册的「唤醒桌面窗口」路由（相对本页路径，经 dsh-app 协议
+		 * 转发到宿主，与 RPC 走同一条 /api 通道）。宿主实现见 index.js。
+		 */
+		const DESKTOP_ACTIVATION_ROUTE = 'api/task-reminder/window-activation';
+
+		/**
+		 * 桌面壳（DSH Desktop / Electron）里把窗口拉回前台。
+		 * 普通浏览器里 `window.focus()` 就够；桌面壳的渲染进程拉不起最小化 /
+		 * 已收进托盘的窗口 —— 只有主进程的 focusPrimaryWindow() 会
+		 * restore()/show()/focus()，而它只由托盘点击与「再启动一份自己」
+		 * （`dsh://open` 深度链接）触发。插件在渲染进程里既没有那条 IPC 也发不出
+		 * 外部协议，于是请宿主半侧代跑一次深度链接。
+		 * 窗口本来就在前台时不打扰宿主；拿不到宿主 / 路由不存在 / 请求失败都
+		 * 静默放弃 —— 唤不起前台也不能影响「打开对应会话」这条主路径。
+		 */
+		function requestDesktopActivation() {
+			try {
+				if (typeof window === 'undefined' || !('dshDesktop' in window)) return;
+				if (typeof document !== 'undefined' && document.hidden === false
+					&& typeof document.hasFocus === 'function' && document.hasFocus()) return;
+				if (typeof window.fetch !== 'function') return;
+				const request = window.fetch(DESKTOP_ACTIVATION_ROUTE, { method: 'POST', cache: 'no-store' });
+				if (request !== null && typeof request === 'object' && typeof request.then === 'function') request.catch(() => {});
+			} catch {
+				// 宿主没接住 / 路由不存在都不影响会话跳转。
+			}
+		}
+
+		/**
 		 * 系统通知（Web Notification API）。支持探测、权限申请、弹出三步；
 		 * 每一步都容忍失败：弹窗发不出去时提示音照旧。
 		 * 权限状态每次现读（用户随时能在站点权限里改），不缓存。
@@ -489,6 +521,8 @@ window.__ModuleLoader__.load({
 						// 「同一会话替换」在提醒场景里反而让用户"什么都没看到"。
 						const notification = new window.Notification(title, { body, tag: `${NOTIFICATION_TAG}-${Date.now()}` });
 						notification.onclick = () => {
+							// 先把窗口叫回来（桌面壳才需要、也才发得出去），再切会话。
+							requestDesktopActivation();
 							try {
 								if (typeof window.focus === 'function') window.focus();
 							} catch {
@@ -1373,6 +1407,7 @@ window.__ModuleLoader__.load({
 				DEFAULTS,
 				DEFAULT_NOTIFY_MODE,
 				DEFAULT_SOUND_CHOICE,
+				DESKTOP_ACTIVATION_ROUTE,
 				NOTIFY_MODE_ALWAYS,
 				NOTIFY_MODE_PERSIST_KEY,
 				NOTIFY_MODE_UNFOCUSED,
@@ -1393,6 +1428,7 @@ window.__ModuleLoader__.load({
 				createChime,
 				createNotifier,
 				en,
+				requestDesktopActivation,
 				resolveNotifyMode,
 				resolveSoundChoice,
 				titleOf,

@@ -221,6 +221,7 @@ const { diagnostics } = plugin;
 const {
 	DEFAULTS,
 	DEFAULT_NOTIFY_MODE,
+	DESKTOP_ACTIVATION_ROUTE,
 	NOTIFY_MODE_ALWAYS,
 	NOTIFY_MODE_PERSIST_KEY,
 	NOTIFY_MODE_UNFOCUSED,
@@ -605,6 +606,32 @@ check('提示音每次完成都响（页面有焦点也响）', audioLog.oscilla
 check('排障状态记录完成来源为 event', windowStub.__dshTaskReminder.state().stats.lastCompletion?.source === 'event');
 notificationLog.created[0].onclick();
 check('点击弹窗：窗口回前台并打开对应会话、关闭弹窗', notificationLog.focused === 1 && opened.includes('s2') && notificationLog.closed === 1, JSON.stringify(notificationLog));
+
+// 桌面壳（DSH Desktop / Electron）：渲染进程的 window.focus() 拉不起最小化 /
+// 已关进托盘的窗口，改请宿主半侧跑一次 dsh://open（second-instance →
+// focusPrimaryWindow）。窗口本就在前台时不打扰宿主；普通浏览器（没有
+// dshDesktop 全局）完全不走这条路。
+const desktopRequests = [];
+windowStub.dshDesktop = { protocolVersion: 1 };
+windowStub.fetch = (input, init) => {
+	desktopRequests.push({ input, init });
+	return Promise.resolve({ status: 204 });
+};
+setFocus({ hidden: false, focused: false });
+notificationLog.created[0].onclick();
+check('桌面壳里窗口失焦时点弹窗会请宿主唤醒窗口', desktopRequests.length === 1 && desktopRequests[0].input === DESKTOP_ACTIVATION_ROUTE && desktopRequests[0].init?.method === 'POST', JSON.stringify(desktopRequests));
+setFocus({ hidden: true, focused: true });
+notificationLog.created[0].onclick();
+check('桌面壳里窗口最小化时点弹窗同样请宿主唤醒', desktopRequests.length === 2, JSON.stringify(desktopRequests));
+setFocus({ hidden: false, focused: true });
+notificationLog.created[0].onclick();
+check('桌面壳里窗口已在前台时点弹窗不请求唤醒', desktopRequests.length === 2, JSON.stringify(desktopRequests));
+delete windowStub.dshDesktop;
+setFocus({ hidden: false, focused: false });
+notificationLog.created[0].onclick();
+check('普通浏览器里点弹窗不发唤醒请求', desktopRequests.length === 2, JSON.stringify(desktopRequests));
+delete windowStub.fetch;
+setFocus({ hidden: false, focused: true });
 
 // 「仅非前台窗口」：页面有焦点 → 不弹，记 skippedFocused。
 face.setNotifyMode('unfocused');

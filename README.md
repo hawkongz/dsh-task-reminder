@@ -44,15 +44,24 @@ switch the tab away or the browser window loses focus). There is no in-app
 card: the OS toast is the only visual channel. Everything is configured on its
 own settings page and persists across restarts.
 
-The whole plugin lives on the browser side. The host half (`index.js`) is an
-empty `apply() {}`, and there are no runtime dependencies — the host ships it
-to the page as a client plugin.
+The reminder logic all lives on the browser side — the host half (`index.js`)
+adds exactly one thing, and only inside DSH Desktop: **raising the app window
+when you click a toast**. An Electron renderer cannot pull back a window that
+is minimized or hidden in the tray, so on a toast click the page asks the host
+half (a `POST` to `api/task-reminder/window-activation`, a Connection
+exact-Fetch route) to relaunch the app once: the second process cannot take the
+single-instance lock, exits at once, and the running app handles
+`second-instance` → `focusPrimaryWindow()`. There are no runtime dependencies,
+and outside DSH Desktop the host half is inert.
 
 ## ✨ Features
 
 * **Windows system toast as the single visual channel:** Web Notification API,
   an OS toast you can see while the app is in the background. Clicking it
-  brings the window forward and opens the session. Three stop reasons are
+  brings the window forward and opens the session — `window.focus()` in a
+  browser, and in DSH Desktop the host half raises the minimized or tray-hidden
+  app window (see
+  [DSH Desktop](#dsh-desktop-clicking-a-toast-raises-the-app-window)). Three stop reasons are
   covered: **task complete**, **waiting for your answer** (the agent blocked
   in `ask_user_question` / plan review — detected by reading the read-only
   `uiSession.sessionStatus` snapshot, never by joining the question waterfall),
@@ -247,6 +256,27 @@ __dshTaskReminder.test()
 __dshTaskReminder.sound()
 ```
 
+### DSH Desktop: clicking a toast raises the app window
+
+In the Electron desktop app the toast behaves the same, plus one step only the
+host half can perform. A renderer process cannot pull back a window that
+Windows minimized or that DSH hid into the tray: `window.focus()` does nothing
+for it, and only the main process's `focusPrimaryWindow()`
+(`restore()` → `show()` → `focus()`) can — reachable from a tray click and from
+a second launch of the app (`dsh://open`, handled as `second-instance`). A
+plugin page has neither that IPC nor the ability to navigate to an external
+protocol.
+
+So on a toast click the page sends `POST api/task-reminder/window-activation`
+(a Connection exact-Fetch route registered by the host half, sharing the normal
+`/api` channel and cookie auth), and the host half relaunches the app once: the
+new process cannot take the single-instance lock, exits immediately, and the
+running instance raises its window. The request goes out only when the page is
+in DSH Desktop (`'dshDesktop' in window`) **and** the window is not in the
+foreground. In a plain browser, on a DSH build where the route is absent, or
+when the request fails, it is a silent no-op: opening the right session is
+never affected. macOS uses `open dsh://open`; other platforms skip it.
+
 ### Self-check
 
 ```bash
@@ -262,8 +292,9 @@ being misreported) and late-error retraction for one stop, the chime
 sounding on every stop regardless of window state, the five settings'
 defaults / read / write / restore, the oscillator parameters for every effect
 and volume, all notification permission paths plus the in-page
-permission-request button, the suspended-AudioContext revival on a user
-gesture, and disposal.
+permission-request button, the desktop window-activation request (only from DSH
+Desktop and only while the window is not in the foreground), the
+suspended-AudioContext revival on a user gesture, and disposal.
 
 ## 🔧 Troubleshooting
 
@@ -310,6 +341,13 @@ gesture, and disposal.
   timing mode doing its job. Switch the Toast timing row to **Only when
   unfocused** and the toast fires only when the tab is switched away or the
   browser window loses focus.
+* **DSH Desktop: the toast opens the session but the window stays minimized.**
+  Raising the window is host-half work added in 1.4.4, and the host reads
+  plugins only at process start — a running app still holds the old `index.js`.
+  Check the profile shows 1.4.4
+  (`dsh --profile desktop --dump-config | Select-String task-reminder`), then
+  quit the app completely and open it again. A missing route is silent by
+  design: the session still opens, only the window is not raised.
 
 ## 📌 Topics
 
