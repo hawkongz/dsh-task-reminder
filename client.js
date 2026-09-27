@@ -13,6 +13,12 @@
  * 视觉通道。提醒方式、音效、音量全部在「设置 → 任务提醒」独立页里配置，值落
  * 浏览器本地存储，重启后仍在；「恢复默认」一键写回出厂值。
  *
+ * **子智能体会话默认不提醒**：Agent Teams 的 lead 派出的子代理、以及任何非 lead
+ * 智能体自己起的子代理，它们的停止都会以独立的 sessionId 出现在三条检测通道和
+ * `api-session/error` 里；那些停止既不代表用户手上的对话跑完，一个回合里还可能
+ * 连响好几次，因此默认挡掉。要连子智能体一起提醒，在设置页把「子智能体提醒」
+ * 打开即可（值同样落本地存储，恢复默认会关回去）。
+ *
  * 七条实现要点：
  *
  * 1. 「任务完成」的信号有三条通道，共用一张 running 边沿表，天然去重：
@@ -22,7 +28,7 @@
  *    通道三：`ctx.uiSession.sessionStatus` 快照里每个会话的 running 位（与
  *    sidebar 运行指示灯同源；fork 出来的子会话列表投影不可靠——陈旧 /
  *    不翻，这条路是最可靠的一路）。转发事件万一没递到本插件，另外两条
- *    路仍能收到完成。
+ *    路仍能收到完成。三条通道都先过子智能体闸（默认关，见要点 9）。
  * 2. 「等你回答」读 `ctx.uiSession.sessionStatus`（根级只读快照：
  *    sessionId → { running, pendingInteraction, completionUnread }）：
  *    pendingInteraction 从无到有就是 Agent 阻塞在等用户（ask_user_question /
@@ -67,6 +73,11 @@
  *    落浏览器本地存储，因此不需要宿主半侧注册设置命名空间。
  * 8. 所有资源（字典、$on 订阅、sessionStatus 订阅、定时器、排障钩子）都挂
  *    ctx.effect，插件卸载时整体回收。
+ * 9. 子智能体过滤只认列表行上的 `origin === 'subagent'`（官方侧边栏判定子会话
+ *    可见性用的就是这一个字段）：fork 出来的会话带 `parentId` 但 origin 不是
+ *    'subagent'，照旧提醒。行还没进列表时读不到 origin，按「不是子智能体」
+ *    处理 —— 宁可多提醒一条，也不把用户的真实回合静音。子智能体与父会话各自
+ *    独立：挡下子智能体的停止不会让父会话那次完成静音。
  *
  * @module dsh-task-reminder/client
  */
@@ -83,14 +94,16 @@ window.__ModuleLoader__.load({
 		 * 版本号，随排障钩子暴露。必须与 package.json 的 version 一致：
 		 * 自检里有一条断言直接比这两处，版本漂了就会红。
 		 */
-		const PLUGIN_VERSION = '1.4.5';
+		const PLUGIN_VERSION = '1.4.6';
 
-		/** 五个可配置项的本地持久化键（createSnapshotStore 的 persist.name）。 */
+		/** 六个可配置项的本地持久化键（createSnapshotStore 的 persist.name）。 */
 		const NOTIFY_PERSIST_KEY = 'dsh.task-reminder.notify';
 		const NOTIFY_MODE_PERSIST_KEY = 'dsh.task-reminder.notify-mode';
 		const SOUND_PERSIST_KEY = 'dsh.task-reminder.sound';
 		const SOUND_CHOICE_PERSIST_KEY = 'dsh.task-reminder.sound-choice';
 		const VOLUME_PERSIST_KEY = 'dsh.task-reminder.volume';
+		/** 子智能体会话提醒开关的持久化键（默认关，见文件头说明）。 */
+		const SUBAGENT_PERSIST_KEY = 'dsh.task-reminder.subagent';
 
 		/** 音量区间与步进（百分比）。 */
 		const VOLUME_MIN = 0;
@@ -120,6 +133,8 @@ window.__ModuleLoader__.load({
 			sound: true,
 			soundChoice: 0,
 			volume: 80,
+			// 子智能体的停止不算「你的对话跑完了」，默认不提醒（见文件头要点 9）。
+			subagent: false,
 		});
 
 		/**
@@ -195,6 +210,8 @@ window.__ModuleLoader__.load({
 			'notify.mode.description': '「任何情况都弹」：任务一完成就弹，不管浏览器窗口是否在前台；「仅非前台窗口」：切走标签页或浏览器窗口失焦（人在别的应用）时才弹。',
 			'notify.mode.always': '任何情况都弹',
 			'notify.mode.unfocused': '仅非前台窗口',
+			'subagent.title': '子智能体提醒',
+			'subagent.description': '默认关闭：lead 的子代理与其他智能体起的子智能体，它们各自停止时不提醒（一个回合里会连响好几次）。打开后子智能体的完成 / 等待回答 / 出错也和普通对话一样提醒。',
 			'notify.unsupported': '当前浏览器不支持系统弹窗，这一项不会生效（提示音不受影响）。',
 			'notify.denied': '浏览器已拒绝本站点的通知权限，请到地址栏的站点权限里改为「允许」后再试。',
 			'notify.pending': '已发出权限申请：在弹出的浏览器对话框里选择「允许」后即可收到系统弹窗。',
@@ -210,7 +227,7 @@ window.__ModuleLoader__.load({
 			'volume.title': '提示音音量',
 			'volume.description': '提示音的整体增益，当前 {value}%；0 为静音',
 			'reset.title': '恢复默认',
-			'reset.description': '一键写回全部默认值：系统弹窗开（任何情况都弹）、提示音开、第一种音效、音量 80。',
+			'reset.description': '一键写回全部默认值：系统弹窗开（任何情况都弹）、子智能体提醒关、提示音开、第一种音效、音量 80。',
 			'reset.descriptionDefault': '当前各项都已经是默认值。',
 			'reset': '恢复默认',
 			'decrease': '减小',
@@ -230,6 +247,8 @@ window.__ModuleLoader__.load({
 			'notify.mode.description': 'Always: toast as soon as a task finishes, whether or not the browser window is in the foreground. Only when unfocused: toast only when you switch the tab away or the browser window loses focus (you are in another app).',
 			'notify.mode.always': 'Always',
 			'notify.mode.unfocused': 'Only when unfocused',
+			'subagent.title': 'Subagent reminders',
+			'subagent.description': 'Off by default: subagent sessions (the ones a lead or any other agent spawns) do not remind you when they stop — a single turn can otherwise chime several times. Turn this on to remind for subagent completions, pending questions and errors exactly like ordinary sessions.',
 			'notify.unsupported': 'This browser does not support system toasts, so this option has no effect (the chime is unaffected).',
 			'notify.denied': 'The browser has denied notification permission for this site; allow it in the site permissions of the address bar and try again.',
 			'notify.pending': 'Permission requested: choose Allow in the browser prompt and system toasts start working.',
@@ -245,7 +264,7 @@ window.__ModuleLoader__.load({
 			'volume.title': 'Chime volume',
 			'volume.description': 'Overall gain of the chime, currently {value}%; 0 mutes it',
 			'reset.title': 'Restore defaults',
-			'reset.description': 'Writes every value back to its factory default: system toast on (always), chime on, first effect, 80% volume.',
+			'reset.description': 'Writes every value back to its factory default: system toast on (always), subagent reminders off, chime on, first effect, 80% volume.',
 			'reset.descriptionDefault': 'Everything is already at its factory value.',
 			'reset': 'Restore defaults',
 			'decrease': 'Decrease',
@@ -301,6 +320,34 @@ window.__ModuleLoader__.load({
 		function resolveNotifyMode(value) {
 			if (value === NOTIFY_MODE_ALWAYS || value === NOTIFY_MODE_UNFOCUSED) return value;
 			return DEFAULT_NOTIFY_MODE;
+		}
+
+		/**
+		 * 归一化「子智能体提醒」开关：只有布尔真值算打开，坏值（本地存储旧数据 /
+		 * 字符串 'true'）一律退回默认的关闭。
+		 * @param value - 任意来源的值。
+		 * @returns 是否连子智能体的停止一起提醒。
+		 */
+		function resolveDoNotifySubagent(value) {
+			return value === true;
+		}
+
+		/**
+		 * 这个会话是不是子智能体会话。只认官方列表行上的 `origin === 'subagent'`
+		 * ——这也是官方侧边栏判定子会话可见性的唯一字段；fork 出来的会话带
+		 * `parentId` 但 origin 不是 'subagent'，不能连它一起挡掉。
+		 * 行还没进列表（origin 读不到）时不当作子智能体：宁可多提醒一条，也不把
+		 * 用户的真实回合静音。读列表抛错同理。
+		 * @param ctx - 客户端根上下文。
+		 * @param sessionId - 会话 id。
+		 * @returns 是子智能体会话时为 true。
+		 */
+		function isSubagentSession(ctx, sessionId) {
+			try {
+				return ctx.sessions.list.getSnapshot().byId?.[sessionId]?.origin === 'subagent';
+			} catch {
+				return false;
+			}
 		}
 
 		/**
@@ -732,12 +779,14 @@ window.__ModuleLoader__.load({
 		 * @param props.soundStore - 提示音开关 store。
 		 * @param props.soundChoiceStore - 音效下标 store。
 		 * @param props.volumeStore - 音量 store。
+		 * @param props.subagentStore - 子智能体提醒开关 store。
 		 * @param props.permissionStore - 通知权限状态 store（界面提示用）。
 		 * @param props.setNotify - 写回系统弹窗开关（含权限申请）。
 		 * @param props.setNotifyMode - 写回弹窗时机。
 		 * @param props.setSound - 写回提示音开关。
 		 * @param props.setSoundChoice - 写回音效下标（切换即发声）。
 		 * @param props.setVolume - 写回音量。
+		 * @param props.setSubagent - 写回子智能体提醒开关。
 		 * @param props.reset - 恢复默认。
 		 * @param props.notifySupported - 浏览器是否支持系统通知。
 		 * @param props.t - 本地化函数。
@@ -749,13 +798,15 @@ window.__ModuleLoader__.load({
 			const sound = React.useSyncExternalStore(props.soundStore.subscribe, props.soundStore.getSnapshot);
 			const soundChoice = React.useSyncExternalStore(props.soundChoiceStore.subscribe, props.soundChoiceStore.getSnapshot);
 			const volume = React.useSyncExternalStore(props.volumeStore.subscribe, props.volumeStore.getSnapshot);
+			const subagent = React.useSyncExternalStore(props.subagentStore.subscribe, props.subagentStore.getSnapshot);
 			const permission = React.useSyncExternalStore(props.permissionStore.subscribe, props.permissionStore.getSnapshot);
 			const t = props.t;
 			const isDefault = notify === DEFAULTS.notify
 				&& notifyMode === DEFAULTS.notifyMode
 				&& sound === DEFAULTS.sound
 				&& soundChoice === DEFAULTS.soundChoice
-				&& volume === DEFAULTS.volume;
+				&& volume === DEFAULTS.volume
+				&& subagent === DEFAULTS.subagent;
 			const switchRow = (rowKey, titleKey, descKey, value, setValue) => React.createElement(SettingRow, {
 				key: rowKey,
 				rowKey,
@@ -786,6 +837,8 @@ window.__ModuleLoader__.load({
 					}),
 				}));
 			}
+			// 子智能体提醒：放在弹窗时机之后，因为它只是「再多提醒一些什么」。
+			children.push(switchRow('subagent', 'subagent.title', 'subagent.description', subagent, props.setSubagent));
 			children.push(switchRow('sound', 'settings.sound.title', 'settings.sound.description', sound, props.setSound));
 			children.push(React.createElement(SettingRow, {
 				key: 'sound-choice',
@@ -851,19 +904,21 @@ window.__ModuleLoader__.load({
 		//#endregion
 
 		/**
-		 * 挂载插件：字典、五个持久化配置、完成事件订阅、前台跟踪、独立设置页。
+		 * 挂载插件：字典、六个持久化配置、完成事件订阅、前台跟踪、独立设置页。
 		 * @param ctx - 客户端根上下文。
 		 */
 		function apply(ctx) {
 			ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-task-reminder: dictionaries');
 			const t = ctx.locale.bind(NS);
 
-			// 五个配置：值落浏览器本地持久存储，重启后仍在；不需要宿主设置命名空间。
+			// 六个配置：值落浏览器本地持久存储，重启后仍在；不需要宿主设置命名空间。
 			const notifyStore = createSnapshotStore(DEFAULTS.notify, { persist: { name: NOTIFY_PERSIST_KEY } });
 			const notifyModeStore = createSnapshotStore(DEFAULTS.notifyMode, { persist: { name: NOTIFY_MODE_PERSIST_KEY } });
 			const soundStore = createSnapshotStore(DEFAULTS.sound, { persist: { name: SOUND_PERSIST_KEY } });
 			const soundChoiceStore = createSnapshotStore(DEFAULTS.soundChoice, { persist: { name: SOUND_CHOICE_PERSIST_KEY } });
 			const volumeStore = createSnapshotStore(DEFAULTS.volume, { persist: { name: VOLUME_PERSIST_KEY } });
+			// 子智能体提醒：默认关（load 出来的坏值归一化到关）。
+			const subagentStore = createSnapshotStore(resolveDoNotifySubagent(DEFAULTS.subagent), { persist: { name: SUBAGENT_PERSIST_KEY } });
 			// 通知权限状态只活在内存里（浏览器随时可能被用户改），供设置页提示。
 			const notifier = createNotifier();
 			const permissionStore = createSnapshotStore(notifier.permission());
@@ -945,6 +1000,8 @@ window.__ModuleLoader__.load({
 			};
 			/** 写回弹窗时机（坏值归一化到默认档）。 */
 			const setNotifyMode = (next) => notifyModeStore.set(resolveNotifyMode(next));
+			/** 写回「子智能体提醒」开关（只有布尔真值算打开）。 */
+			const setSubagent = (next) => subagentStore.set(resolveDoNotifySubagent(next));
 			/** 写回提示音开关。 */
 			const setSound = (next) => soundStore.set(next === true);
 			/**
@@ -959,13 +1016,14 @@ window.__ModuleLoader__.load({
 			};
 			/** 写回音量百分比。 */
 			const setVolume = (next) => volumeStore.set(clampVolume(next));
-			/** 恢复默认：五个配置全部写回出厂值，权限提示同步刷新。 */
+			/** 恢复默认：六个配置全部写回出厂值，权限提示同步刷新。 */
 			const resetAll = () => {
 				notifyStore.set(DEFAULTS.notify);
 				notifyModeStore.set(DEFAULTS.notifyMode);
 				soundStore.set(DEFAULTS.sound);
 				soundChoiceStore.set(DEFAULTS.soundChoice);
 				volumeStore.set(DEFAULTS.volume);
+				subagentStore.set(DEFAULTS.subagent);
 				if (notifier.supported) permissionStore.set(notifier.permission());
 			};
 
@@ -1008,6 +1066,19 @@ window.__ModuleLoader__.load({
 					return false;
 				}
 				return true;
+			};
+
+			/**
+			 * 这个会话的停止该不该走提醒流程（三种停止 + 出错事件共用的第一道闸）。
+			 * 只有子智能体会话且用户没打开「子智能体提醒」时才挡下：挡在整条流程
+			 * 的最前面 —— 边沿表、分类、提示音、弹窗、待答集合、grace 全都不参与，
+			 * 子智能体与父会话各自独立，父会话自己的完成照常提醒。
+			 * @param sessionId - 会话 id。
+			 * @returns true = 该提醒。
+			 */
+			const shouldRemindFor = (sessionId) => {
+				if (subagentStore.getSnapshot() === true) return true;
+				return !isSubagentSession(ctx, sessionId);
 			};
 
 			/**
@@ -1154,6 +1225,7 @@ window.__ModuleLoader__.load({
 			 * @param source - 触发来源（event / list / status），仅用于排障。
 			 */
 			const complete = (sessionId, source) => {
+				if (!shouldRemindFor(sessionId)) return; // 子智能体（默认关）：整条流程不参与
 				if (pendingQuestions.has(sessionId)) return; // 询问待答：那次停止由询问弹窗负责
 				if (completing.has(sessionId)) return; // 同一次停止的分类已在途（重复边沿）
 				const grace = questionGrace.delete(sessionId);
@@ -1236,6 +1308,8 @@ window.__ModuleLoader__.load({
 			// 去重与「撤回完成弹窗」的对账都在 reportError 里：一次停止只报
 			// 一次、错误优先。
 			ctx.effect(() => ctx.remote.$on('api-session/error', (sessionId, message) => {
+				// 子智能体（默认关）的出错同样不报：它不是用户手上那次对话的失败。
+				if (!shouldRemindFor(sessionId)) return;
 				reportError(sessionId, message);
 			}), 'dsh-task-reminder: session error event');
 			// 等你回答 + 第三完成通道：uiSession.sessionStatus 快照 ——
@@ -1243,10 +1317,13 @@ window.__ModuleLoader__.load({
 			// plan-review）；每个 entry 的 running 位同时是完成检测的第三来源（与
 			// sidebar 运行指示灯同源，fork 会话的列表投影不可靠时这条路仍可靠）。
 			// 只读观测这个根级快照，绝不订阅 user-questions/request —— 那是
-			// waterfall 应答链，旁观者插进去会干扰官方问答 UI 应答。
+			// waterfall 应答链，旁观者插进去会干扰官方问答 UI 应答。子智能体
+			// 会话（默认关）在整条循环最前面就跳过：不记边沿、不记待答。
 			ctx.effect(() => ctx.uiSession.sessionStatus.subscribe(() => {
 				const snapshot = ctx.uiSession.sessionStatus.getSnapshot();
 				for (const [sessionId, status] of snapshot) {
+					// 子智能体（默认关）：边沿、待答、grace 一概不碰。
+					if (!shouldRemindFor(sessionId)) continue;
 					// running 位也计入边沿表（三条通道共用一张表，天然去重）。
 					if (noteRunning(sessionId, status?.running === true)) complete(sessionId, 'status');
 					const pending = status?.pendingInteraction;
@@ -1359,12 +1436,14 @@ window.__ModuleLoader__.load({
 					soundStore,
 					soundChoiceStore,
 					volumeStore,
+					subagentStore,
 					permissionStore,
 					setNotify,
 					setNotifyMode,
 					setSound,
 					setSoundChoice,
 					setVolume,
+					setSubagent,
 					reset: resetAll,
 					notifySupported: notifier.supported,
 					t,
@@ -1372,7 +1451,7 @@ window.__ModuleLoader__.load({
 			}, ReminderSection));
 
 			// 排障钩子：浏览器控制台执行 __dshTaskReminder.state() 可看前台状态、
-			// 五个配置、通知权限与各会话 running 记录。
+			// 六个配置、通知权限与各会话 running 记录。
 			const debug = {
 				version: PLUGIN_VERSION,
 				state: () => ({
@@ -1382,6 +1461,7 @@ window.__ModuleLoader__.load({
 					sound: soundStore.getSnapshot(),
 					soundChoice: soundChoiceStore.getSnapshot(),
 					volume: volumeStore.getSnapshot(),
+					subagent: subagentStore.getSnapshot(),
 					notificationPermission: permissionStore.getSnapshot(),
 					notificationSupported: notifier.supported,
 					running: [...runningSessions.entries()],
@@ -1442,6 +1522,7 @@ window.__ModuleLoader__.load({
 				SOUND_CHOICES,
 				SOUND_CHOICE_PERSIST_KEY,
 				SOUND_PERSIST_KEY,
+				SUBAGENT_PERSIST_KEY,
 				VOLUME_BOOST,
 				VOLUME_MAX,
 				VOLUME_MIN,
@@ -1450,6 +1531,8 @@ window.__ModuleLoader__.load({
 				clampVolume,
 				createNotifier,
 				en,
+				isSubagentSession,
+				resolveDoNotifySubagent,
 				resolveNotifyMode,
 				resolveSoundChoice,
 				titleOf,

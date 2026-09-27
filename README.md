@@ -90,6 +90,19 @@ answer 501.
   **Request notification permission** button under the System toast row
   re-asks. A denied or unsupported Notification API degrades to a clear hint
   on the settings page instead of failing silently.
+* **Subagent sessions are muted by default:** the agents a lead spawns, and the
+  ones any other agent spawns, stop in their own sessions — each of those stops
+  reaches the plugin as just another `sessionId`, and one turn can easily fire
+  several reminders while the conversation you actually asked for is still
+  running. They are filtered out of all three detection channels and the error
+  event before any of the edge, classification, chime or toast work happens, by
+  dropping exactly the list rows whose `origin` is `subagent` (the field the
+  official sidebar uses to keep subagent children out of the session list). What
+  you lose is nothing: the session you are watching reports its own completion.
+  Forked sessions carry a `parentId` but not that origin, so a fork still
+  reminds you. A **Subagent reminders** switch on the settings page turns the
+  reminders for subagents back on, completions, pending questions and errors
+  alike — it is off out of the box and Restore defaults turns it off again.
 * **Four synthesized chimes:** two-tone (classic), rising three-tone, rising
   arpeggio, and soft triangle — generated live with Web Audio, so no audio
   files are shipped. Picking an effect plays it immediately at the current
@@ -233,19 +246,20 @@ changed `client.js`.
 | :--- | :--- | :--- |
 | System toast | On | `dsh.task-reminder.notify` |
 | Toast timing (Always / Only when unfocused) | Always | `dsh.task-reminder.notify-mode` |
+| Subagent reminders | Off | `dsh.task-reminder.subagent` |
 | Completion sound | On | `dsh.task-reminder.sound` |
 | Chime effect (four options) | Two-tone (classic) | `dsh.task-reminder.sound-choice` |
 | Chime volume (0–100) | 80 | `dsh.task-reminder.volume` |
 
-A restore-defaults button writes back: toast on (Always), sound on, first
-effect, volume 80.
+A restore-defaults button writes back: toast on (Always), subagent reminders
+off, sound on, first effect, volume 80.
 
 ### Browser console helpers
 
 In the browser DevTools console:
 
 ```js
-// Window focus state, the five settings, toast timing, notification
+// Window focus state, the six settings, toast timing, notification
 // permission, per-session running records, channel counters, duplicate
 // suppressions, recent stops and the last stop of each kind
 __dshTaskReminder.state()
@@ -290,7 +304,9 @@ channels with repeated-edge suppression, the two toast timing modes, the
 three stop reasons (completion, pending question, error) with the turn/end
 classification (including the unclosed-turn retry that keeps a cancel from
 being misreported) and late-error retraction for one stop, the chime
-sounding on every stop regardless of window state, the five settings'
+sounding on every stop regardless of window state, the subagent filter (silent
+for all three stop reasons while the switch is off, all three back when it is
+on, forked sessions unaffected), the six settings'
 defaults / read / write / restore, the oscillator parameters for every effect
 and volume, all notification permission paths plus the in-page
 permission-request button, the desktop window-activation request (only from DSH

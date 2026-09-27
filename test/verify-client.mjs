@@ -235,6 +235,7 @@ const {
 	SOUND_CHOICES,
 	SOUND_CHOICE_PERSIST_KEY,
 	SOUND_PERSIST_KEY,
+	SUBAGENT_PERSIST_KEY,
 	VOLUME_BOOST,
 	VOLUME_MAX,
 	VOLUME_MIN,
@@ -243,6 +244,8 @@ const {
 	clampVolume,
 	createNotifier,
 	en,
+	isSubagentSession,
+	resolveDoNotifySubagent,
 	resolveNotifyMode,
 	resolveSoundChoice,
 	titleOf,
@@ -499,34 +502,47 @@ check('设置页 order 避开 chat-locator(41)', section.entry.options.order ===
 check('设置页导航标题走本地化', section.entry.options.label() === '任务提醒', section.entry.options.label());
 const sectionFace = () => section.entry.options.inject();
 const face = sectionFace();
-check('设置页 face 带五个配置 store 与写回函数', ['notifyStore', 'notifyModeStore', 'soundStore', 'soundChoiceStore', 'volumeStore', 'permissionStore'].every((name) => typeof face[name]?.getSnapshot === 'function')
-	&& ['setNotify', 'setNotifyMode', 'setSound', 'setSoundChoice', 'setVolume'].every((name) => typeof face[name] === 'function'));
+check('设置页 face 带六个配置 store 与写回函数', ['notifyStore', 'notifyModeStore', 'soundStore', 'soundChoiceStore', 'volumeStore', 'subagentStore', 'permissionStore'].every((name) => typeof face[name]?.getSnapshot === 'function')
+	&& ['setNotify', 'setNotifyMode', 'setSound', 'setSoundChoice', 'setVolume', 'setSubagent'].every((name) => typeof face[name] === 'function'));
 check('设置页 face 不带卡片相关（宽度/高度/预览/弹窗开关）', !('widthStore' in face) && !('heightStore' in face) && !('setWidth' in face) && !('setHeight' in face) && !('popupStore' in face) && !('preview' in face));
 check('设置页 face 带恢复默认、通知支持标志与本地化函数', typeof face.reset === 'function' && typeof face.notifySupported === 'boolean' && typeof face.t === 'function');
 check('浏览器桩支持 Notification 时 notifySupported 为真', face.notifySupported === true);
 
-check('六个 store：五个持久化 + 权限状态不持久化', persistedStores.length === 6
+check('七个 store：六个持久化 + 权限状态不持久化', persistedStores.length === 7
 	&& persistedStores[0].options?.persist?.name === NOTIFY_PERSIST_KEY
 	&& persistedStores[1].options?.persist?.name === NOTIFY_MODE_PERSIST_KEY
 	&& persistedStores[2].options?.persist?.name === SOUND_PERSIST_KEY
 	&& persistedStores[3].options?.persist?.name === SOUND_CHOICE_PERSIST_KEY
 	&& persistedStores[4].options?.persist?.name === VOLUME_PERSIST_KEY
-	&& persistedStores[5].options === undefined, JSON.stringify(persistedStores.map((store) => store.options?.persist?.name)));
-check('五个配置默认值符合出厂表', face.notifyStore.getSnapshot() === DEFAULTS.notify
+	&& persistedStores[5].options?.persist?.name === SUBAGENT_PERSIST_KEY
+	&& persistedStores[6].options === undefined, JSON.stringify(persistedStores.map((store) => store.options?.persist?.name)));
+check('六个配置默认值符合出厂表', face.notifyStore.getSnapshot() === DEFAULTS.notify
 	&& face.notifyModeStore.getSnapshot() === DEFAULTS.notifyMode
 	&& face.soundStore.getSnapshot() === DEFAULTS.sound
 	&& face.soundChoiceStore.getSnapshot() === DEFAULTS.soundChoice
-	&& face.volumeStore.getSnapshot() === DEFAULTS.volume);
+	&& face.volumeStore.getSnapshot() === DEFAULTS.volume
+	&& face.subagentStore.getSnapshot() === DEFAULTS.subagent);
 check('系统弹窗默认开启且时机为「任何情况都弹」', face.notifyStore.getSnapshot() === true && face.notifyModeStore.getSnapshot() === 'always');
+check('子智能体提醒默认关闭（默认不提示子智能体）', DEFAULTS.subagent === false && face.subagentStore.getSnapshot() === false, String(face.subagentStore.getSnapshot()));
+check('子智能体开关只认布尔真值（坏值退回关）', resolveDoNotifySubagent(true) === true && resolveDoNotifySubagent(false) === false
+	&& resolveDoNotifySubagent('true') === false && resolveDoNotifySubagent(1) === false && resolveDoNotifySubagent(undefined) === false && resolveDoNotifySubagent(null) === false);
+check('isSubagentSession 只认 origin === "subagent"', (() => {
+	const ctxFor = (byId) => ({ sessions: { list: { getSnapshot: () => ({ ids: [], byId }) } } });
+	return isSubagentSession(ctxFor({ a: { origin: 'subagent' } }), 'a') === true
+		&& isSubagentSession(ctxFor({ b: { parentId: 'a' } }), 'b') === false // fork：有 parentId 但 origin 不是 subagent
+		&& isSubagentSession(ctxFor({ c: {} }), 'c') === false
+		&& isSubagentSession(ctxFor({}), 'missing') === false // 行还没进列表：不当子智能体
+		&& isSubagentSession({ sessions: { list: { getSnapshot: () => { throw new Error('boom'); } } } }, 'a') === false;
+})());
 
 check('排障钩子暴露了状态与版本号', typeof windowStub.__dshTaskReminder?.state === 'function' && typeof windowStub.__dshTaskReminder.version === 'string', String(windowStub.__dshTaskReminder?.version));
 // 版本号写在 client.js 与 package.json 两处，漂了就发错版本的包（1.4.4 之前漂过）。
 check('client.js 的版本号与 package.json 一致', PLUGIN_VERSION === packageJson.version, `client.js=${PLUGIN_VERSION} package.json=${packageJson.version}`);
 check('排障钩子带当场试一次（test）', typeof windowStub.__dshTaskReminder?.test === 'function');
 check('排障钩子带只放音（sound）', typeof windowStub.__dshTaskReminder?.sound === 'function');
-check('排障状态覆盖五个配置、弹窗时机、通知权限与前台状态', (() => {
+check('排障状态覆盖六个配置、弹窗时机、通知权限与前台状态', (() => {
 	const state = windowStub.__dshTaskReminder.state();
-	return ['notify', 'notifyMode', 'sound', 'soundChoice', 'volume', 'focused', 'notificationPermission', 'notificationSupported'].every((key) => key in state) && !('toasts' in state) && !('popup' in state);
+	return ['notify', 'notifyMode', 'sound', 'soundChoice', 'volume', 'subagent', 'focused', 'notificationPermission', 'notificationSupported'].every((key) => key in state) && !('toasts' in state) && !('popup' in state);
 })());
 check('做种后 s1 记为 running、s2/s3 记为空闲', JSON.stringify(windowStub.__dshTaskReminder.state().running) === JSON.stringify([['s1', true], ['s2', false], ['s3', false]]), JSON.stringify(windowStub.__dshTaskReminder.state().running));
 
@@ -715,14 +731,102 @@ check('关掉弹窗后提示音照响', audioLog.oscillators.length === 2, Strin
 face.setNotify(true);
 
 // ---------------------------------------------------------------------------
+// 子智能体会话过滤（默认关）：lead / 非 lead 起的子代理不比普通对话提醒
+// ---------------------------------------------------------------------------
+
+console.log('');
+console.log('子智能体过滤（默认关）');
+
+// 子智能体会话：官方列表里 `origin === 'subagent'`（这正是侧边栏判定子会话
+// 可见性用的字段）。sub 列表已有行（通道二能看到），status 快照通道也覆盖它；
+// fork 出来的会话带 parentId 但 origin 不是 'subagent'，不能一起挡掉。
+for (const [id, origin] of [['sub', 'subagent'], ['fork', undefined]]) {
+	hostList.byId[id] = { title: id, displayTitle: id, running: false, ...(origin === undefined ? {} : { origin }) };
+}
+hostList.ids.push('sub', 'fork');
+setStatusRunning('sub', false);
+setStatusRunning('fork', false);
+
+/** 宿主转发事件 api-session/error 的回调（下面几段共用）。 */
+const errorListener = listeners.find((entry) => entry.name === 'api-session/error')?.fn;
+check('子智能体过滤段落：api-session/error 订阅回调可用', typeof errorListener === 'function');
+
+check('子智能体开关默认关，普通会话不受影响', face.subagentStore.getSnapshot() === false && face.notifyStore.getSnapshot() === true);
+
+// 本段会在开关打开时故意报几条子智能体的错误 / 待答，排障计数因此会先涨一截：
+// 停止分类那一段的「第几条」断言改为按增量比（开关关掉的那些一条都不会计），
+// 基准在这段跑完、进入分类段落时再取一次。
+let errorsBeforeClassify = 0;
+let questionsBeforeClassify = 0;
+
+// ① 子智能体完成：不弹也不响。
+statusListener('sub', true);
+resetNotificationLog();
+resetAudioLog();
+statusListener('sub', false);
+await tick();
+check('子智能体完成（默认关）：不弹窗也不响音', notificationLog.created.length === 0 && audioLog.oscillators.length === 0, `${notificationLog.created.length} / ${audioLog.oscillators.length}`);
+
+// ② 子智能体出错：同样不报。
+resetNotificationLog();
+resetAudioLog();
+errorListener('sub', 'subagent boom');
+check('子智能体出错（默认关）：不弹窗也不响音', notificationLog.created.length === 0 && audioLog.oscillators.length === 0, `${notificationLog.created.length} / ${audioLog.oscillators.length}`);
+
+// ③ 子智能体挂起问题：不报，也不该污染待答集合影响它的下一次停止。
+resetNotificationLog();
+resetAudioLog();
+setPendingInteraction('sub', { sessionId: 'sub', kind: 'question', key: 'question:sub', questions: [{ id: 'q1', question: '子智能体的问题？' }] });
+check('子智能体挂起问题（默认关）：不弹窗也不响音', notificationLog.created.length === 0 && audioLog.oscillators.length === 0, `${notificationLog.created.length} / ${audioLog.oscillators.length}`);
+setPendingInteraction('sub', null);
+
+// ④ fork 出来的会话（有 parentId、origin 不是 subagent）：照常提醒 —— 过滤只能
+//    认 origin，认 parentId 会把用户的复制会话一起静音。
+setRunning('fork', true);
+resetNotificationLog();
+setRunning('fork', false);
+await tick();
+check('fork 会话（非 subagent）照常提醒', notificationLog.created.length === 1 && notificationLog.created[0]?.options?.body === 'fork', JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
+
+// ⑤ 打开开关：三种停止都恢复（完成 / 出错 / 挂起问题）。
+face.setSubagent(true);
+check('打开后写入子智能体开关', face.subagentStore.getSnapshot() === true);
+statusListener('sub', true);
+resetNotificationLog();
+resetAudioLog();
+statusListener('sub', false);
+await tick();
+check('打开开关后：子智能体完成也提醒（正文是子会话名）', notificationLog.created.length === 1 && notificationLog.created[0]?.options?.body === 'sub' && audioLog.oscillators.length === 2, `${notificationLog.created.length} / ${audioLog.oscillators.length}`);
+resetNotificationLog();
+resetAudioLog();
+statusListener('sub', true);
+errorListener('sub', 'subagent boom 2');
+check('打开开关后：子智能体出错也提醒', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '任务出错已停止' && notificationLog.created[0]?.options?.body === 'subagent boom 2', JSON.stringify(notificationLog.created[0]));
+resetNotificationLog();
+setPendingInteraction('sub', { sessionId: 'sub', kind: 'question', key: 'question:sub2', questions: [{ id: 'q1', question: '第二个子问题？' }] });
+check('打开开关后：子智能体挂起问题也提醒', notificationLog.created.length === 1 && notificationLog.created[0]?.options?.body === '第二个子问题？', JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
+setPendingInteraction('sub', null);
+
+// ⑥ 关回去：子智能体立刻恢复静音（子智能体再接着跑 → 停止也不报）。
+face.setSubagent(false);
+statusListener('sub', true);
+resetNotificationLog();
+resetAudioLog();
+statusListener('sub', false);
+await tick();
+check('关回去后：子智能体停止重新静音', notificationLog.created.length === 0 && audioLog.oscillators.length === 0, `${notificationLog.created.length} / ${audioLog.oscillators.length}`);
+
+// ---------------------------------------------------------------------------
 // 出错停止（api-session/error）与等你回答（pendingInteraction 出现边沿）
 // ---------------------------------------------------------------------------
 
 console.log('');
 console.log('停止分类、出错与待答');
 
-const errorListener = listeners.find((entry) => entry.name === 'api-session/error')?.fn;
 check('分类段落：api-session/error 订阅回调可用', typeof errorListener === 'function');
+// 子智能体段落已经报过几条，之后的绝对条数断言从这两个基准重新起算。
+errorsBeforeClassify = windowStub.__dshTaskReminder.state().stats.errors;
+questionsBeforeClassify = windowStub.__dshTaskReminder.state().stats.questions;
 check('只读订阅了 uiSession.sessionStatus（不碰 user-questions 应答链）', statusSubscribers.size === 1 && !listeners.some((entry) => entry.name === 'user-questions/request'), String(statusSubscribers.size));
 check('排障状态带 questions / errors 计数', (() => {
 	const stats = windowStub.__dshTaskReminder.state().stats;
@@ -739,7 +843,7 @@ resetAudioLog();
 statusListener('s2', true);
 errorListener('s2', '400 Bad Request: invalid model');
 check('出错即发错误弹窗（标题/正文）', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '任务出错已停止' && notificationLog.created[0]?.options?.body === '400 Bad Request: invalid model', JSON.stringify(notificationLog.created[0]));
-check('错误记进 stats.errors', windowStub.__dshTaskReminder.state().stats.errors === 1, String(windowStub.__dshTaskReminder.state().stats.errors));
+check('错误记进 stats.errors', windowStub.__dshTaskReminder.state().stats.errors === errorsBeforeClassify + 1, String(windowStub.__dshTaskReminder.state().stats.errors));
 check('出错也响提示音', audioLog.oscillators.length === 2, String(audioLog.oscillators.length));
 
 // ② 停止边沿分类为 error：只发错误弹窗，不出现完成弹窗（网关错误场景）。
@@ -751,7 +855,7 @@ await tick();
 check('分类为 error：只弹错误一条（无完成弹窗）', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '任务出错已停止', JSON.stringify(notificationLog.created.map((item) => item.title)));
 check('错误正文取 turn/end 里的网关原文', notificationLog.created[0]?.options?.body === '401 AuthError: Invalid API key.', JSON.stringify(notificationLog.created[0]?.options?.body));
 check('分类错误也响一次提示音', audioLog.oscillators.length === 2, String(audioLog.oscillators.length));
-check('分类错误记进 stats.errors', windowStub.__dshTaskReminder.state().stats.errors === 2, String(windowStub.__dshTaskReminder.state().stats.errors));
+check('分类错误记进 stats.errors', windowStub.__dshTaskReminder.state().stats.errors === errorsBeforeClassify + 2, String(windowStub.__dshTaskReminder.state().stats.errors));
 
 // ③ 分类已报错误，后到的 api-session/error 不重复报（一次停止一次）。
 errorListener('s2', '401 AuthError: Invalid API key.');
@@ -887,7 +991,7 @@ resetNotificationLog();
 resetAudioLog();
 setPendingInteraction('s2', { sessionId: 's2', kind: 'question', key: 'question:1', questions: [{ id: 'q1', question: '要用哪个数据库？' }] });
 check('出现问题即发「等待你的回答」弹窗（正文是首个问题）', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '等待你的回答' && notificationLog.created[0]?.options?.body === '要用哪个数据库？', JSON.stringify(notificationLog.created[0]));
-check('待答记进 stats.questions', windowStub.__dshTaskReminder.state().stats.questions === 1, String(windowStub.__dshTaskReminder.state().stats.questions));
+check('待答记进 stats.questions', windowStub.__dshTaskReminder.state().stats.questions === questionsBeforeClassify + 1, String(windowStub.__dshTaskReminder.state().stats.questions));
 check('待答也响提示音', audioLog.oscillators.length === 2, String(audioLog.oscillators.length));
 
 // ⑪ 询问待答期间的停止边沿：不报（那次停止由询问弹窗负责）。
@@ -1037,13 +1141,14 @@ FakeNotification.permission = 'granted';
 console.log('');
 console.log('设置页');
 
-// 默认态：两个开关 + 弹窗时机（二选一，默认「任何情况都弹」）+ 音效四选一 + 音量步进 + 恢复默认。
+// 默认态：三个开关 + 弹窗时机（二选一，默认「任何情况都弹」）+ 音效四选一 + 音量步进 + 恢复默认。
 sectionNodes = renderSection();
 const switches = sectionNodes.filter((node) => node.type === 'Switch');
-check('设置页渲染两个开关（系统弹窗 / 提示音）', switches.length === 2, String(switches.length));
+check('设置页渲染三个开关（系统弹窗 / 子智能体提醒 / 提示音）', switches.length === 3, String(switches.length));
 check('系统弹窗排在第一位且默认开启', switches[0]?.props?.label === '系统弹窗' && switches[0]?.props?.checked === true, JSON.stringify(switches.map((node) => [node.props.label, node.props.checked])));
-check('提示音开关默认开启', switches[1]?.props?.label === '完成提示音' && switches[1]?.props?.checked === true);
-check('两个开关的 onChange 都接到了写回函数', switches.every((node) => typeof node.props.onChange === 'function'));
+check('子智能体提醒默认关闭（第二行）', switches[1]?.props?.label === '子智能体提醒' && switches[1]?.props?.checked === false, JSON.stringify(switches.map((node) => [node.props.label, node.props.checked])));
+check('提示音开关默认开启', switches[2]?.props?.label === '完成提示音' && switches[2]?.props?.checked === true);
+check('三个开关的 onChange 都接到了写回函数', switches.every((node) => typeof node.props.onChange === 'function'));
 check('设置页没有「试听」按钮（切换音效即发声）', !sectionNodes.some((node) => node.type === 'button' && node.children?.[0] === '试听'));
 
 const segmentedGroups = sectionNodes.filter((node) => node.type === 'div' && node.props?.role === 'group'
@@ -1103,8 +1208,8 @@ const resetButtonAfter = sectionNodes.find((node) => node.type === 'button' && n
 check('改花后「恢复默认」按钮置灰解除', resetButtonAfter?.props?.disabled === false, String(resetButtonAfter?.props?.disabled));
 check('改花后说明换成默认值清单', sectionNodes.some((node) => typeof node.children?.[0] === 'string' && node.children[0].startsWith('一键写回全部默认值')));
 resetButtonAfter.props.onClick();
-check('恢复默认写回全部五个配置（弹窗回开、时机回任何情况都弹）', face.notifyStore.getSnapshot() === true && face.notifyModeStore.getSnapshot() === 'always' && face.soundStore.getSnapshot() === true
-	&& face.soundChoiceStore.getSnapshot() === 0 && face.volumeStore.getSnapshot() === 80,
+check('恢复默认写回全部六个配置（弹窗回开、时机回任何情况都弹、子智能体提醒回关）', face.notifyStore.getSnapshot() === true && face.notifyModeStore.getSnapshot() === 'always' && face.soundStore.getSnapshot() === true
+	&& face.soundChoiceStore.getSnapshot() === 0 && face.volumeStore.getSnapshot() === 80 && face.subagentStore.getSnapshot() === false,
 	JSON.stringify(windowStub.__dshTaskReminder.state()));
 
 // 权限被拒时设置页给出提示。
