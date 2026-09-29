@@ -6,8 +6,9 @@
  *      后台也看得到；点击回到该会话）。三种停止原因都提醒：任务完成、
  *      Agent 抛出问题等你回答（ask_user_question 挂起）、出错停止（如 400
  *      的红色错误）；同一次停止的错误与完成只报一次；
- *   2. 播放一声提示音（三种停止都响，不管在不在对话窗口；四种合成音效可选，
- *      音量可调；切换音效即时发声试听）。
+ *   2. 播放一声提示音（三种停止都响，不管在不在对话窗口；四种合成音效
+ *      + 一档「自定义」（上传本机音频文件）可选，音量可调；切换音效即时发声
+ *      试听）。
  * 弹窗时机二选一：「任何情况都弹」任务一停止就弹；「仅非前台窗口」在切走
  * 标签页或浏览器窗口失焦（人在别的应用）时才弹。没有应用内卡片：弹窗是唯一
  * 视觉通道。提醒方式、音效、音量全部在「设置 → 任务提醒」独立页里配置，值落
@@ -60,12 +61,17 @@
  *    拉回前台分两路 —— 普通浏览器 `window.focus()` 就够，桌面壳（DSH Desktop）
  *    的渲染进程拉不起最小化 / 托盘窗口，改由 `requestDesktopActivation()`
  *    请宿主半侧跑一次 `dsh://open`（宿主实现与理由见 index.js）。
- * 6. 提示音用 Web Audio 现场合成，不引入任何音频文件：四种音效（两声 /
- *    三声上扬 / 上升琶音 / 圆润三角波）各有频率与节奏表，峰值按 100% 音量
- *    给出，再乘上「用户音量 + 20」折算出的 master 增益后写进包络 —— 整档
- *    比刻度上调 20，显示 80 就是原 100 的响度。AudioContext 装载即建、
- *    第一次用户手势 resume（首声延迟只剩浏览器设备启动那一截，任何网页
- *    都躲不掉）；被自动播放策略挂在 suspended 时拒绝不外抛。
+ * 6. 提示音用 Web Audio 现场合成，插件包里不装任何音频文件：四种合成音效
+ *    （两声 / 三声上扬 / 上升琶音 / 圆润三角波）各有频率与节奏表，峰值按
+ *    100% 音量给出，再乘上「用户音量 + 20」折算出的 master 增益后写进包络
+ *    —— 整档比刻度上调 20，显示 80 就是原 100 的响度。第五档是「自定义」：
+ *    用户在本机选一个音频文件，字节存进浏览器 IndexedDB（不是 localStorage，
+ *    那里 5MB 同步写配额装不下音频），装载 / 换文件时 decodeAudioData 解码成
+ *    AudioBuffer，播放走同一个 master 增益，首尾各加 10ms 淡入淡出防爆音。
+ *    音频只在本机、不上传也不进包；IndexedDB / 解码 / 文件任一环节不可用时
+ *    安静回落到第一种合成音效，提醒不会变哑。AudioContext 装载即建、第一次
+ *    用户手势 resume（首声延迟只剩浏览器设备启动那一截，任何网页都躲不掉）；
+ *    被自动播放策略挂在 suspended 时拒绝不外抛。
  * 7. 设置是「设置」面板里的独立页（「设置 → 通用」里不再占行）：
  *    `ctx.slots.inject('settings.section', …)`（参考 dsh-chat-locator 的
  *    LocatorSection），order 避开 chat-locator(41)；页面自行渲染全部控件
@@ -94,7 +100,7 @@ window.__ModuleLoader__.load({
 		 * 版本号，随排障钩子暴露。必须与 package.json 的 version 一致：
 		 * 自检里有一条断言直接比这两处，版本漂了就会红。
 		 */
-		const PLUGIN_VERSION = '1.4.6';
+		const PLUGIN_VERSION = '1.5.0';
 
 		/** 六个可配置项的本地持久化键（createSnapshotStore 的 persist.name）。 */
 		const NOTIFY_PERSIST_KEY = 'dsh.task-reminder.notify';
@@ -135,6 +141,8 @@ window.__ModuleLoader__.load({
 			volume: 80,
 			// 子智能体的停止不算「你的对话跑完了」，默认不提醒（见文件头要点 9）。
 			subagent: false,
+			// 自定义音效的元数据（文件名等）；音频本体在 IndexedDB，见要点 6。
+			customSound: null,
 		});
 
 		/**
@@ -188,6 +196,33 @@ window.__ModuleLoader__.load({
 		const DEFAULT_SOUND_CHOICE = 0;
 
 		/**
+		 * 自定义音效（上传本机音频）的档位下标：排在四种合成音效之后，因此它是
+		 * 合法下标而不是音效表条目 —— SOUND_CHOICES 仍只有四种合成波形，自定义
+		 * 音频的字节既不进插件包，也不进 localStorage。
+		 */
+		const CUSTOM_SOUND_CHOICE = SOUND_CHOICES.length;
+		/** 自定义音效元数据（文件名 / 大小 / 类型）的持久化键；音频本体在 IndexedDB。 */
+		const CUSTOM_SOUND_PERSIST_KEY = 'dsh.task-reminder.custom-sound';
+		/** 自定义音频的 IndexedDB 库名 / 版本 / 对象仓库名 / 固定主键。 */
+		const CUSTOM_SOUND_DB_NAME = 'dsh.task-reminder';
+		const CUSTOM_SOUND_DB_VERSION = 1;
+		const CUSTOM_SOUND_STORE_NAME = 'sounds';
+		const CUSTOM_SOUND_RECORD_KEY = 'custom';
+		/** 自定义音频的字节上限：5MB 够十几秒 mp3，同时挡住误选的大文件。 */
+		const CUSTOM_SOUND_MAX_BYTES = 5 * 1024 * 1024;
+		/** 自定义音效各状态对应的设置页说明文案键（见 CUSTOM_STATUS_KEYS 的用法）。 */
+		const CUSTOM_SOUND_STATUS_KEYS = Object.freeze({
+			idle: 'sound.custom.empty',
+			loading: 'sound.custom.loading',
+			ready: 'sound.custom.ready',
+			missing: 'sound.custom.missing',
+			'decode-failed': 'sound.custom.decodeFailed',
+			'store-failed': 'sound.custom.storeFailed',
+			'too-large': 'sound.custom.tooLarge',
+			unsupported: 'sound.custom.unsupported',
+		});
+
+		/**
 		 * 系统通知 tag 的前缀：真正的 tag 是「前缀-时间戳」，每条通知各不相同，
 		 * 后一条不会顶掉前一条（固定 tag 的「同一会话替换」在提醒场景里反而
 		 * 让用户什么都没看到）。
@@ -219,15 +254,27 @@ window.__ModuleLoader__.load({
 			'settings.sound.title': '完成提示音',
 			'settings.sound.description': '对话任务完成后播放提示音（不管是否正在对话窗口）',
 			'sound.choice.title': '提示音音效',
-			'sound.choice.description': '四种合成音效，用 Web Audio 现场生成，不加载任何音频文件；点选即按当前音量发声。浏览器重启后第一次播放有 3-5 秒延迟（音频设备冷启动），之后立即出声',
+			'sound.choice.description': '四种合成音效用 Web Audio 现场生成；第五档「自定义」播放你上传的本机音频（只存本地，不上传）。点选即按当前音量发声；浏览器重启后第一次播放有 3-5 秒延迟（音频设备冷启动）',
 			'sound.choice.two-tone': '两声（经典）',
 			'sound.choice.three-tone': '三声上扬',
 			'sound.choice.arpeggio': '上升琶音',
 			'sound.choice.triangle': '圆润三角波',
+			'sound.choice.custom': '自定义',
+			'sound.custom.title': '自定义音效',
+			'sound.custom.empty': '选择本机音频文件（mp3 / wav / ogg / m4a 等）作为提示音；文件只存在这个浏览器里（IndexedDB），不会上传，重启后仍在',
+			'sound.custom.ready': '当前文件：{name}（{size} KB）；选「自定义（上传音频）」即按提示音音量播放，点「清除」换回合成音效',
+			'sound.custom.loading': '正在读取并解码音频文件…',
+			'sound.custom.missing': '上次选的音频在本机已丢失（换浏览器或清了站点数据），请重新选择；提醒暂用第一种合成音效',
+			'sound.custom.decodeFailed': '这个文件浏览器解不开（编码不支持或文件损坏）；提醒回落到第一种合成音效，请重新选择',
+			'sound.custom.storeFailed': '本地存储不可用（隐私模式或空间不足），文件没能保存；提醒回落到合成音效',
+			'sound.custom.tooLarge': '文件太大（上限 {max} MB），请换一个小一点的音频',
+			'sound.custom.unsupported': '这个浏览器不支持 IndexedDB，无法在本地保存自定义音频；提醒继续用四种合成音效',
+			'sound.custom.pick': '选择文件',
+			'sound.custom.clear': '清除',
 			'volume.title': '提示音音量',
 			'volume.description': '提示音的整体增益，当前 {value}%；0 为静音',
 			'reset.title': '恢复默认',
-			'reset.description': '一键写回全部默认值：系统弹窗开（任何情况都弹）、子智能体提醒关、提示音开、第一种音效、音量 80。',
+			'reset.description': '一键写回全部默认值：系统弹窗开（任何情况都弹）、子智能体提醒关、提示音开、第一种音效、音量 80；自定义音效文件会保留，需要时在「自定义音效」行点「清除」。',
 			'reset.descriptionDefault': '当前各项都已经是默认值。',
 			'reset': '恢复默认',
 			'decrease': '减小',
@@ -256,15 +303,27 @@ window.__ModuleLoader__.load({
 			'settings.sound.title': 'Completion sound',
 			'settings.sound.description': 'Play a chime once a conversation task finishes, whether or not you are in the conversation window',
 			'sound.choice.title': 'Chime effect',
-			'sound.choice.description': 'Four synthesized chimes generated live with Web Audio; no audio files are loaded. Picking one plays it at the current volume. The first play after a browser restart can take 3-5 s (audio-device cold start); afterwards it is immediate',
+			'sound.choice.description': 'Four synthesized chimes generated live with Web Audio; Custom plays an audio file you upload (stored locally, never uploaded). Picking one plays it at the current volume; the first play after a browser restart can take 3-5 s (audio-device cold start)',
 			'sound.choice.two-tone': 'Two-tone (classic)',
 			'sound.choice.three-tone': 'Rising three-tone',
 			'sound.choice.arpeggio': 'Rising arpeggio',
 			'sound.choice.triangle': 'Soft triangle',
+			'sound.choice.custom': 'Custom',
+			'sound.custom.title': 'Custom chime',
+			'sound.custom.empty': 'Pick an audio file from this machine (mp3 / wav / ogg / m4a …) as the chime; it is stored only in this browser (IndexedDB), never uploaded, and survives restarts',
+			'sound.custom.ready': 'Current file: {name} ({size} KB); choosing Custom (upload) plays it at the chime volume, Clear goes back to a synthesized chime',
+			'sound.custom.loading': 'Reading and decoding the audio file…',
+			'sound.custom.missing': 'The audio picked earlier is gone from this browser; pick it again. Reminders use the first synthesized chime meanwhile',
+			'sound.custom.decodeFailed': 'This browser cannot decode that file (unsupported codec or damaged data); reminders fall back to the first synthesized chime — please pick another file',
+			'sound.custom.storeFailed': 'Local storage is unavailable (private mode or out of space), so the file was not saved; reminders fall back to a synthesized chime',
+			'sound.custom.tooLarge': 'The file is too large (limit {max} MB); please pick a smaller audio file',
+			'sound.custom.unsupported': 'This browser has no IndexedDB, so a custom audio file cannot be stored locally; reminders keep using the four synthesized chimes',
+			'sound.custom.pick': 'Choose file',
+			'sound.custom.clear': 'Clear',
 			'volume.title': 'Chime volume',
 			'volume.description': 'Overall gain of the chime, currently {value}%; 0 mutes it',
 			'reset.title': 'Restore defaults',
-			'reset.description': 'Writes every value back to its factory default: system toast on (always), subagent reminders off, chime on, first effect, 80% volume.',
+			'reset.description': 'Writes every value back to its factory default: system toast on (always), subagent reminders off, chime on, first effect, 80% volume; an uploaded custom chime file is kept — use Clear in the Custom chime row to remove it.',
 			'reset.descriptionDefault': 'Everything is already at its factory value.',
 			'reset': 'Restore defaults',
 			'decrease': 'Decrease',
@@ -302,14 +361,15 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
-		 * 归一化音效选择（音效表下标）。0 是合法值，不能用真值判断短路。
+		 * 归一化音效选择（音效下标）。0 与自定义档（CUSTOM_SOUND_CHOICE）都是合法
+		 * 值，不能用真值判断短路。
 		 * @param value - 任意来源的值。
-		 * @returns [0, SOUND_CHOICES.length - 1] 内的整数下标。
+		 * @returns [0, CUSTOM_SOUND_CHOICE] 内的整数下标。
 		 */
 		function resolveSoundChoice(value) {
 			const index = typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : Number.NaN;
 			if (!Number.isFinite(index)) return DEFAULT_SOUND_CHOICE;
-			return clampInteger(index, 0, SOUND_CHOICES.length - 1, DEFAULT_SOUND_CHOICE);
+			return clampInteger(index, 0, CUSTOM_SOUND_CHOICE, DEFAULT_SOUND_CHOICE);
 		}
 
 		/**
@@ -330,6 +390,119 @@ window.__ModuleLoader__.load({
 		 */
 		function resolveDoNotifySubagent(value) {
 			return value === true;
+		}
+
+		/**
+		 * 归一化自定义音效的元数据（从本地存储 / IndexedDB 读出来的可能是坏数据）。
+		 * 只留显示与排障要用的字段；文件名缺失视为「没有自定义音效」。
+		 * @param value - 任意来源的值。
+		 * @returns {{ name: string, size: number, type: string, at: number } | null} 合法元数据或 null。
+		 */
+		function normalizeCustomMeta(value) {
+			if (value === null || typeof value !== 'object') return null;
+			const name = typeof value.name === 'string' && value.name.trim() !== '' ? value.name : '';
+			if (name === '') return null;
+			const size = typeof value.size === 'number' && Number.isFinite(value.size) && value.size > 0 ? Math.round(value.size) : 0;
+			const type = typeof value.type === 'string' ? value.type : '';
+			const at = typeof value.at === 'number' && Number.isFinite(value.at) ? value.at : 0;
+			return { name, size, type, at };
+		}
+
+		/** 这个浏览器能不能用 IndexedDB 存自定义音频（不能时设置页直接说清楚）。 */
+		function indexedDbAvailable() {
+			try {
+				if (typeof window === 'undefined') return false;
+				const factory = window.indexedDB;
+				return factory !== null && factory !== undefined && typeof factory === 'object' && typeof factory.open === 'function';
+			} catch {
+				return false;
+			}
+		}
+
+		/**
+		 * 自定义音频的本地仓库（IndexedDB）。音频字节（几十 KB ~ 数 MB）不进
+		 * localStorage：那里的配额是同步写、满了直接抛，而且是本站点所有插件
+		 * 共用。打开一次后复用连接；每一步都容错 —— 不支持 / 隐私模式 / 配额
+		 * 不足一律走失败分支（由调用方回落合成音效），绝不外抛。
+		 * @returns { put, read, remove } 写入 / 读取 / 删除，都是 Promise。
+		 */
+		function createCustomSoundStore() {
+			let opening = null;
+			/**
+			 * 取（并缓存）数据库连接；失败时丢掉缓存，下一次操作可以重新打开。
+			 * @returns Promise<IDBDatabase>。
+			 */
+			function open() {
+				if (!indexedDbAvailable()) return Promise.reject(new Error('indexeddb-unsupported'));
+				if (opening === null) {
+					opening = new Promise((resolve, reject) => {
+						let request;
+						try {
+							request = window.indexedDB.open(CUSTOM_SOUND_DB_NAME, CUSTOM_SOUND_DB_VERSION);
+						} catch (error) {
+							reject(error);
+							return;
+						}
+						request.onupgradeneeded = () => {
+							try {
+								const db = request.result;
+								if (db.objectStoreNames.contains(CUSTOM_SOUND_STORE_NAME) === false) db.createObjectStore(CUSTOM_SOUND_STORE_NAME);
+							} catch {
+								// 建仓库失败留给 onerror / 后续事务报错，这里不额外抛。
+							}
+						};
+						request.onsuccess = () => resolve(request.result);
+						request.onerror = () => reject(request.error ?? new Error('indexeddb-open-failed'));
+						request.onblocked = () => reject(new Error('indexeddb-blocked'));
+					});
+					opening.catch(() => { opening = null; });
+				}
+				return opening;
+			}
+			/**
+			 * 跑一次事务请求。
+			 * @param mode - 'readonly' | 'readwrite'。
+			 * @param run - 收到 objectStore 后发出请求并返回该请求。
+			 * @returns Promise<请求结果>；任何一步失败都 reject。
+			 */
+			function request(mode, run) {
+				return open().then((db) => new Promise((resolve, reject) => {
+					let pending;
+					try {
+						const store = db.transaction(CUSTOM_SOUND_STORE_NAME, mode).objectStore(CUSTOM_SOUND_STORE_NAME);
+						pending = run(store);
+					} catch (error) {
+						reject(error);
+						return;
+					}
+					pending.onsuccess = () => resolve(pending.result);
+					pending.onerror = () => reject(pending.error ?? new Error('indexeddb-request-failed'));
+				}));
+			}
+			return {
+				/**
+				 * 写入（覆盖）唯一那条自定义音频记录。
+				 * @param record - { name, size, type, at, blob }。
+				 * @returns Promise<boolean> 是否写成功。
+				 */
+				put(record) {
+					return request('readwrite', (store) => store.put(record, CUSTOM_SOUND_RECORD_KEY)).then(() => true).catch(() => false);
+				},
+				/**
+				 * 读那条记录；读不出来（不支持 / 被挡）时 reject，由调用方决定怎么提示。
+				 * @returns Promise<记录 | undefined>。
+				 */
+				read() {
+					return request('readonly', (store) => store.get(CUSTOM_SOUND_RECORD_KEY));
+				},
+				/**
+				 * 删掉那条记录。
+				 * @returns Promise<boolean> 是否删成功。
+				 */
+				remove() {
+					return request('readwrite', (store) => store.delete(CUSTOM_SOUND_RECORD_KEY)).then(() => true).catch(() => false);
+				},
+			};
 		}
 
 		/**
@@ -418,9 +591,108 @@ window.__ModuleLoader__.load({
 				oscillator.start(at);
 				oscillator.stop(at + noteSpec.duration + 0.02);
 			}
+			/**
+			 * 按内置音效表排一遍合成音（四种合成音效的播放实现）。
+			 * @param choice - 内置音效下标（坏值内部归一化）。
+			 * @param volume - 音量显示值（或坏值，内部归一化）。
+			 * @returns { scheduled, state } 是否真的排了音、播放时的 context 状态。
+			 */
+			function playPreset(choice, volume) {
+				try {
+					if (typeof window === 'undefined') return { scheduled: false, state: 'no-window' };
+					const volumePercent = clampVolume(volume);
+					if (volumePercent <= 0) return { scheduled: false, state: 'muted' }; // 0 = 静音：一条音都不排。
+					const Ctor = window.AudioContext ?? window.webkitAudioContext;
+					if (Ctor === undefined) return { scheduled: false, state: 'unsupported' };
+					audio ??= new Ctor();
+					// 被自动播放策略挂在 suspended 时先尝试拉活；这一下拉不动也照排，
+					// 下一个用户手势恢复后这些音仍会播出来。
+					if (audio.state === 'suspended') revive();
+					const now = audio.currentTime;
+					// 这一层只负责合成音效表：自定义档（下标越界）由 play 分流，不会走到这里。
+					const spec = SOUND_CHOICES[Math.min(resolveSoundChoice(choice), SOUND_CHOICES.length - 1)];
+					// 整档上调 20：显示 80 → master 1.0（原 100 的响度）。
+					const master = (volumePercent + VOLUME_BOOST) / 100;
+					for (const noteSpec of spec.notes) {
+						note(noteSpec, now + noteSpec.at, master, spec.type);
+					}
+					return { scheduled: true, state: audio.state };
+				} catch {
+					// 音频不可用就安静退场，弹窗与其它提醒方式不受影响。
+					return { scheduled: false, state: 'failed' };
+				}
+			}
+			/**
+			 * 播一段解码好的自定义音频：走同一个 master 增益（用户音量 + 20），
+			 * 首尾各 10ms 淡入淡出 —— 用户自己的音频常是硬切，不加包络会爆音。
+			 * @param buffer - decode() 得到的 AudioBuffer。
+			 * @param volume - 音量显示值（或坏值，内部归一化）。
+			 * @returns { scheduled, state } 是否真的排了音、播放时的 context 状态。
+			 */
+			function playBuffer(buffer, volume) {
+				try {
+					if (typeof window === 'undefined') return { scheduled: false, state: 'no-window' };
+					const volumePercent = clampVolume(volume);
+					if (volumePercent <= 0) return { scheduled: false, state: 'muted' }; // 0 = 静音：不排。
+					if (buffer === null || buffer === undefined) return { scheduled: false, state: 'custom-missing' };
+					const Ctor = window.AudioContext ?? window.webkitAudioContext;
+					if (Ctor === undefined) return { scheduled: false, state: 'unsupported' };
+					audio ??= new Ctor();
+					if (audio.state === 'suspended') revive();
+					if (typeof audio.createBufferSource !== 'function') return { scheduled: false, state: 'unsupported' };
+					const now = audio.currentTime;
+					const master = (volumePercent + VOLUME_BOOST) / 100;
+					const peak = Math.max(0.0001, master);
+					const duration = typeof buffer.duration === 'number' && Number.isFinite(buffer.duration) ? buffer.duration : 0;
+					const source = audio.createBufferSource();
+					const envelope = audio.createGain();
+					source.buffer = buffer;
+					envelope.gain.setValueAtTime(0.0001, now);
+					envelope.gain.exponentialRampToValueAtTime(peak, now + 0.01);
+					if (duration > 0.03) {
+						// 尾巴 20ms 淡出：太短的音频（<30ms）不做，免得 ramp 交叉。
+						envelope.gain.setValueAtTime(peak, now + duration - 0.02);
+						envelope.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+					}
+					source.connect(envelope);
+					envelope.connect(audio.destination);
+					source.start(now);
+					return { scheduled: true, state: audio.state };
+				} catch {
+					return { scheduled: false, state: 'failed' };
+				}
+			}
+			/**
+			 * 解码一段本地音频（Blob / File / ArrayBuffer）成 AudioBuffer。
+			 * 用回调式 decodeAudioData：Safari 等实现上比 Promise 式稳；编码不支持
+			 * 或数据损坏时 reject，由调用方把状态写清楚并回落合成音效。
+			 * @param data - Blob / File / ArrayBuffer。
+			 * @returns Promise<AudioBuffer>。
+			 */
+			function decode(data) {
+				return (async () => {
+					const input = data !== null && data !== undefined && typeof data.arrayBuffer === 'function'
+						? await data.arrayBuffer()
+						: data;
+					if (typeof window === 'undefined') throw new Error('no-window');
+					const Ctor = window.AudioContext ?? window.webkitAudioContext;
+					if (Ctor === undefined) throw new Error('unsupported');
+					audio ??= new Ctor();
+					if (typeof audio.decodeAudioData !== 'function') throw new Error('no-decoder');
+					return new Promise((resolve, reject) => {
+						try {
+							audio.decodeAudioData(input, (decoded) => resolve(decoded), (error) => reject(error ?? new Error('decode-failed')));
+						} catch (error) {
+							reject(error);
+						}
+					});
+				})();
+			}
 			return {
 				/** 供用户手势监听调用：拉活被挂起的 AudioContext。 */
 				resume: revive,
+				decode,
+				playBuffer,
 				/**
 				 * 在用户手势里预热 AudioContext：把音频设备的初始化挪到第一次
 				 * 交互，完成提示音与切音效试听都能立即出声，没有首声延迟。
@@ -452,34 +724,24 @@ window.__ModuleLoader__.load({
 					}
 				},
 				/**
-				 * 按当前设置播放一遍。
-				 * @param choice - 音效下标（或坏值，内部归一化）。
+				 * 按当前设置播放一遍：内置档走合成音效表，自定义档走解码好的
+				 * AudioBuffer。自定义档没有可用音频时（还没解码完 / 解码失败 /
+				 * 文件被清掉 / IndexedDB 读不回来）回落第一种合成音效 ——
+				 * 提醒宁可换一种声音，也不能变哑。
+				 * @param choice - 音效下标（或坏值，内部归一化；自定义档见 CUSTOM_SOUND_CHOICE）。
 				 * @param volume - 音量显示值（或坏值，内部归一化）。
+				 * @param customBuffer - 解码好的自定义音频；没有则为 null / undefined。
 				 * @returns { scheduled, state } 是否真的排了音、播放时的 context 状态。
 				 */
-				play(choice, volume) {
-					try {
-						if (typeof window === 'undefined') return { scheduled: false, state: 'no-window' };
-						const volumePercent = clampVolume(volume);
-						if (volumePercent <= 0) return { scheduled: false, state: 'muted' }; // 0 = 静音：一条音都不排。
-						const Ctor = window.AudioContext ?? window.webkitAudioContext;
-						if (Ctor === undefined) return { scheduled: false, state: 'unsupported' };
-						audio ??= new Ctor();
-						// 被自动播放策略挂在 suspended 时先尝试拉活；这一下拉不动也照排，
-						// 下一个用户手势恢复后这些音仍会播出来。
-						if (audio.state === 'suspended') revive();
-						const now = audio.currentTime;
-						const spec = SOUND_CHOICES[resolveSoundChoice(choice)];
-						// 整档上调 20：显示 80 → master 1.0（原 100 的响度）。
-						const master = (volumePercent + VOLUME_BOOST) / 100;
-						for (const noteSpec of spec.notes) {
-							note(noteSpec, now + noteSpec.at, master, spec.type);
+				play(choice, volume, customBuffer) {
+					if (resolveSoundChoice(choice) === CUSTOM_SOUND_CHOICE) {
+						if (customBuffer === null || customBuffer === undefined) {
+							// 回落：文件还没解码完 / 解不开 / 被清掉时播第一种合成音效。
+							return { ...playPreset(DEFAULT_SOUND_CHOICE, volume), custom: false, customFallback: true };
 						}
-						return { scheduled: true, state: audio.state };
-					} catch {
-						// 音频不可用就安静退场，弹窗与其它提醒方式不受影响。
-						return { scheduled: false, state: 'failed' };
+						return { ...playBuffer(customBuffer, volume), custom: true };
 					}
+					return playPreset(choice, volume);
 				},
 				dispose() {
 					const closing = audio;
@@ -630,13 +892,18 @@ window.__ModuleLoader__.load({
 			display: 'flex',
 			alignItems: 'center',
 			gap: '8px',
+			// 控件装不下时整行折行（音效档位多、窗口窄）：描述拿整行宽度，
+			// 而不是被挤成一列单字。
+			flexWrap: 'wrap',
+			rowGap: '8px',
 			padding: '16px 0',
 			borderBottom: '0.5px solid var(--dsw-alias-border-l2)',
 		};
 		const ROW_TEXT_STYLE = {
 			display: 'flex',
 			flexDirection: 'column',
-			flex: '1',
+			// 基准 240px：与控件并排时至少占这么宽，放不下就让控件换到下一行。
+			flex: '1 1 240px',
 			gap: '4px',
 			minWidth: '0',
 			paddingRight: '24px',
@@ -657,15 +924,19 @@ window.__ModuleLoader__.load({
 			display: 'flex',
 			alignItems: 'center',
 			flex: 'none',
+			maxWidth: '100%',
 		};
 		const PILL_STYLE = {
 			display: 'inline-flex',
 			alignItems: 'center',
-			height: '36px',
-			padding: '0 4px',
+			// minHeight + 可折行：档位多（五个音效）或窗口窄时，档位自己折成
+			// 两行，不会把左边的描述挤扁。
+			minHeight: '36px',
+			padding: '4px',
 			gap: '2px',
 			borderRadius: '18px',
 			background: 'var(--dsw-alias-bg-layer-2)',
+			flexWrap: 'wrap',
 		};
 		const STEP_BUTTON_STYLE = {
 			width: '28px',
@@ -696,6 +967,7 @@ window.__ModuleLoader__.load({
 			fontSize: '13px',
 			lineHeight: '20px',
 			cursor: 'pointer',
+			whiteSpace: 'nowrap',
 		};
 		const SEGMENT_ACTIVE_STYLE = {
 			background: 'var(--dsw-alias-bg-layer-1)',
@@ -714,11 +986,23 @@ window.__ModuleLoader__.load({
 			cursor: 'pointer',
 			whiteSpace: 'nowrap',
 		};
+		/** 自定义音效行的控件排布：「选择文件」（+ 有文件时的「清除」）。 */
+		const CUSTOM_CONTROL_STYLE = {
+			display: 'flex',
+			alignItems: 'center',
+			gap: '8px',
+			flexWrap: 'wrap',
+		};
 
-		/** 设置页里的一行：文案在左、控件在右。 */
-		function SettingRow({ rowKey, title, desc, control }) {
-			return React.createElement('div', { style: ROW_STYLE, key: rowKey }, [
-				React.createElement('div', { style: ROW_TEXT_STYLE, key: 'text' }, [
+		/**
+		 * 设置页里的一行：文案在左、控件在右；wide 控件（五个档位的音效选择）
+		 * 用 stacked 改成「文案占满一行、控件另起一行」，否则描述会被挤成一列单字。
+		 */
+		function SettingRow({ rowKey, title, desc, control, stacked }) {
+			const rowStyle = stacked === true ? { ...ROW_STYLE, flexDirection: 'column', alignItems: 'stretch' } : ROW_STYLE;
+			const textStyle = stacked === true ? { ...ROW_TEXT_STYLE, flex: '1 1 auto', paddingRight: '0' } : ROW_TEXT_STYLE;
+			return React.createElement('div', { style: rowStyle, key: rowKey }, [
+				React.createElement('div', { style: textStyle, key: 'text' }, [
 					React.createElement('div', { style: ROW_TITLE_STYLE, key: 'title' }, title),
 					React.createElement('div', { style: ROW_DESC_STYLE, key: 'desc' }, desc),
 				]),
@@ -780,6 +1064,8 @@ window.__ModuleLoader__.load({
 		 * @param props.soundChoiceStore - 音效下标 store。
 		 * @param props.volumeStore - 音量 store。
 		 * @param props.subagentStore - 子智能体提醒开关 store。
+		 * @param props.customMetaStore - 自定义音效元数据 store（文件名等）。
+		 * @param props.customStatusStore - 自定义音效状态 store（读取中用 / 就绪 / 失败）。
 		 * @param props.permissionStore - 通知权限状态 store（界面提示用）。
 		 * @param props.setNotify - 写回系统弹窗开关（含权限申请）。
 		 * @param props.setNotifyMode - 写回弹窗时机。
@@ -787,8 +1073,11 @@ window.__ModuleLoader__.load({
 		 * @param props.setSoundChoice - 写回音效下标（切换即发声）。
 		 * @param props.setVolume - 写回音量。
 		 * @param props.setSubagent - 写回子智能体提醒开关。
+		 * @param props.setCustomSound - 写回自定义音效（存文件 + 解码 + 试听）。
+		 * @param props.clearCustomSound - 清除自定义音效。
 		 * @param props.reset - 恢复默认。
 		 * @param props.notifySupported - 浏览器是否支持系统通知。
+		 * @param props.customSupported - 浏览器是否能用 IndexedDB 存自定义音频。
 		 * @param props.t - 本地化函数。
 		 * @returns 设置页元素。
 		 */
@@ -799,7 +1088,12 @@ window.__ModuleLoader__.load({
 			const soundChoice = React.useSyncExternalStore(props.soundChoiceStore.subscribe, props.soundChoiceStore.getSnapshot);
 			const volume = React.useSyncExternalStore(props.volumeStore.subscribe, props.volumeStore.getSnapshot);
 			const subagent = React.useSyncExternalStore(props.subagentStore.subscribe, props.subagentStore.getSnapshot);
+			const customMeta = React.useSyncExternalStore(props.customMetaStore.subscribe, props.customMetaStore.getSnapshot);
+			const customStatus = React.useSyncExternalStore(props.customStatusStore.subscribe, props.customStatusStore.getSnapshot);
 			const permission = React.useSyncExternalStore(props.permissionStore.subscribe, props.permissionStore.getSnapshot);
+			// 隐藏的文件选择框：那个按钮点它，选中文件后走 onChange（浏览器只允许
+			// 用户手势直接打开文件选择框，程序不能凭空读本地文件）。
+			const customFileInput = React.useRef(null);
 			const t = props.t;
 			const isDefault = notify === DEFAULTS.notify
 				&& notifyMode === DEFAULTS.notifyMode
@@ -843,14 +1137,63 @@ window.__ModuleLoader__.load({
 			children.push(React.createElement(SettingRow, {
 				key: 'sound-choice',
 				rowKey: 'sound-choice',
+				// 五个档位 + 一段长说明：这一行改成上下排，说明拿整行宽度。
+				stacked: true,
 				title: t('sound.choice.title'),
 				desc: t('sound.choice.description'),
 				control: React.createElement(Segmented, {
 					value: soundChoice,
 					label: t('sound.choice.title'),
-					options: SOUND_CHOICES.map((choice, index) => ({ id: index, label: t(choice.nameKey) })),
+					// 四种合成音效 + 第五档「自定义」（上传本机音频）。
+					options: [...SOUND_CHOICES.map((choice, index) => ({ id: index, label: t(choice.nameKey) })),
+						{ id: CUSTOM_SOUND_CHOICE, label: t('sound.choice.custom') }],
 					onChange: (next) => props.setSoundChoice(next),
 				}),
+			}));
+			// 自定义音效：选择 / 清除本机音频，并如实显示当前状态（读取中 / 就绪 /
+			// 解不开 / 存不下 / 文件丢了）。音频本体在 IndexedDB，元数据只用于显示。
+			const customKey = props.customSupported !== true
+				? 'sound.custom.unsupported'
+				: (CUSTOM_SOUND_STATUS_KEYS[customStatus] ?? 'sound.custom.empty');
+			const customDesc = customKey === 'sound.custom.ready' && customMeta !== null
+				? t(customKey, { name: customMeta.name, size: Math.max(1, Math.round(customMeta.size / 1024)) })
+				: t(customKey, { max: Math.round(CUSTOM_SOUND_MAX_BYTES / (1024 * 1024)) });
+			children.push(React.createElement(SettingRow, {
+				key: 'sound-custom',
+				rowKey: 'sound-custom',
+				title: t('sound.custom.title'),
+				desc: customDesc,
+				control: React.createElement('div', { style: CUSTOM_CONTROL_STYLE, key: 'custom-control' }, [
+					React.createElement('input', {
+						key: 'custom-file',
+						type: 'file',
+						accept: 'audio/*',
+						ref: customFileInput,
+						style: { display: 'none' },
+						onChange: (event) => {
+							const file = event?.target?.files?.[0];
+							if (file !== undefined && file !== null) props.setCustomSound(file);
+						},
+					}),
+					React.createElement(TextButton, {
+						key: 'custom-pick',
+						disabled: props.customSupported !== true,
+						label: t('sound.custom.pick'),
+						onClick: () => {
+							const input = customFileInput.current;
+							if (input !== null && input !== undefined && typeof input.click === 'function') {
+								input.value = ''; // 允许连续两次选同一个文件（否则 change 不再触发）
+								input.click();
+							}
+						},
+					}),
+					customMeta === null ? null : React.createElement(TextButton, {
+						key: 'custom-clear',
+						disabled: false,
+						label: t('sound.custom.clear'),
+						onClick: () => props.clearCustomSound(),
+					}),
+				]),
 			}));
 			children.push(React.createElement(SettingRow, {
 				key: 'volume',
@@ -904,14 +1247,15 @@ window.__ModuleLoader__.load({
 		//#endregion
 
 		/**
-		 * 挂载插件：字典、六个持久化配置、完成事件订阅、前台跟踪、独立设置页。
+		 * 挂载插件：字典、七个持久化配置、完成事件订阅、前台跟踪、独立设置页。
 		 * @param ctx - 客户端根上下文。
 		 */
 		function apply(ctx) {
 			ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-task-reminder: dictionaries');
 			const t = ctx.locale.bind(NS);
 
-			// 六个配置：值落浏览器本地持久存储，重启后仍在；不需要宿主设置命名空间。
+			// 六个配置 + 自定义音效元数据：值落浏览器本地持久存储，重启后仍在；
+			// 不需要宿主设置命名空间（音频本体在 IndexedDB，不进 localStorage）。
 			const notifyStore = createSnapshotStore(DEFAULTS.notify, { persist: { name: NOTIFY_PERSIST_KEY } });
 			const notifyModeStore = createSnapshotStore(DEFAULTS.notifyMode, { persist: { name: NOTIFY_MODE_PERSIST_KEY } });
 			const soundStore = createSnapshotStore(DEFAULTS.sound, { persist: { name: SOUND_PERSIST_KEY } });
@@ -919,6 +1263,12 @@ window.__ModuleLoader__.load({
 			const volumeStore = createSnapshotStore(DEFAULTS.volume, { persist: { name: VOLUME_PERSIST_KEY } });
 			// 子智能体提醒：默认关（load 出来的坏值归一化到关）。
 			const subagentStore = createSnapshotStore(resolveDoNotifySubagent(DEFAULTS.subagent), { persist: { name: SUBAGENT_PERSIST_KEY } });
+			// 自定义音效的元数据（文件名 / 大小）：只用于设置页显示，落 localStorage；
+			// 音频本体（几十 KB ~ 数 MB）进 IndexedDB，见 createCustomSoundStore。
+			const customMetaStore = createSnapshotStore(normalizeCustomMeta(DEFAULTS.customSound), { persist: { name: CUSTOM_SOUND_PERSIST_KEY } });
+			// 自定义音效的当前状态只活在内存里，供设置页如实提示：
+			// idle / loading / ready / missing / decode-failed / store-failed / too-large。
+			const customStatusStore = createSnapshotStore('idle');
 			// 通知权限状态只活在内存里（浏览器随时可能被用户改），供设置页提示。
 			const notifier = createNotifier();
 			const permissionStore = createSnapshotStore(notifier.permission());
@@ -971,6 +1321,78 @@ window.__ModuleLoader__.load({
 			// 提示，这是自动播放策略的正常记录，不是错误。）
 			chime.warm();
 
+			const customSounds = createCustomSoundStore();
+			// 解码好的自定义音频（AudioBuffer）+ 版本号：解码 / 存盘都是异步的，
+			// 期间用户又选了一个文件或点了清除时，晚到的结果据此作废，不会让旧
+			// 文件的解码结果盖掉新选择。
+			let customBuffer = null;
+			let customRevision = 0;
+			/**
+			 * 把一条自定义音频记录解码成播放用的 AudioBuffer。
+			 * @param revision - 取用时的版本号（结果落地时据此判断是否已作废）。
+			 * @param blob - 音频字节（Blob / File）。
+			 * @param preview - 解码成功后是否当场按当前音量试听（用户刚选完文件时为真）。
+			 */
+			const adoptCustomRecord = (revision, blob, preview) => {
+				if (revision === customRevision) customStatusStore.set('loading');
+				void chime.decode(blob).then((buffer) => {
+					if (revision !== customRevision) return; // 期间又换文件 / 清了：这次结果作废
+					customBuffer = buffer;
+					customStatusStore.set('ready');
+					if (preview === true) chime.playBuffer(buffer, volumeStore.getSnapshot());
+				}).catch(() => {
+					if (revision !== customRevision) return;
+					customBuffer = null;
+					customStatusStore.set('decode-failed');
+				});
+			};
+			/**
+			 * 写入自定义音效：校验 → 存 IndexedDB → 记元数据 → 切到自定义档 →
+			 * 解码成功即试听一次。任何一步失败都如实写状态并回落合成音效，
+			 * 不静默假装成功。
+			 * @param file - 文件选择框给出的 File。
+			 */
+			const setCustomSound = (file) => {
+				if (file === null || file === undefined || typeof file !== 'object') return;
+				if (!indexedDbAvailable()) {
+					customStatusStore.set('unsupported');
+					return;
+				}
+				const size = typeof file.size === 'number' && Number.isFinite(file.size) ? file.size : 0;
+				if (size > CUSTOM_SOUND_MAX_BYTES) {
+					customStatusStore.set('too-large');
+					return;
+				}
+				const meta = normalizeCustomMeta({
+					name: typeof file.name === 'string' && file.name !== '' ? file.name : 'audio',
+					size,
+					type: typeof file.type === 'string' ? file.type : '',
+					at: Date.now(),
+				});
+				if (meta === null) return;
+				const revision = (customRevision += 1);
+				customStatusStore.set('loading');
+				void customSounds.put({ ...meta, blob: file }).then((stored) => {
+					if (revision !== customRevision) return;
+					if (stored !== true) {
+						customStatusStore.set('store-failed');
+						return;
+					}
+					customMetaStore.set(meta);
+					soundChoiceStore.set(CUSTOM_SOUND_CHOICE); // 选完文件即切到自定义档
+					adoptCustomRecord(revision, file, true);
+				});
+			};
+			/** 清除自定义音效：删 IndexedDB 记录与元数据，并切回第一种合成音效。 */
+			const clearCustomSound = () => {
+				customRevision += 1;
+				customBuffer = null;
+				customMetaStore.set(null);
+				customStatusStore.set('idle');
+				if (soundChoiceStore.getSnapshot() === CUSTOM_SOUND_CHOICE) soundChoiceStore.set(DEFAULT_SOUND_CHOICE);
+				void customSounds.remove();
+			};
+
 			// 在途权限申请的序号：每次写回开关、每次自动申请都使它失效，
 			// 避免申请结果在用户又拨过关之后才回来，把新状态覆盖成过期值。
 			let notifyRequestSeq = 0;
@@ -1006,13 +1428,14 @@ window.__ModuleLoader__.load({
 			const setSound = (next) => soundStore.set(next === true);
 			/**
 			 * 写回音效下标（坏值归一化到默认档），并立即按新音效与当前音量发声 ——
-			 * 在设置页切换音效就是试听，不用再多点一步。
+			 * 在设置页切换音效就是试听，不用再多点一步。切到自定义档而音频还没
+			 * 解码好时，play 内部回落到第一种合成音效，不会静默无声。
 			 * @param next - 目标音效下标。
 			 */
 			const setSoundChoice = (next) => {
 				const resolved = resolveSoundChoice(next);
 				soundChoiceStore.set(resolved);
-				chime.play(resolved, volumeStore.getSnapshot());
+				chime.play(resolved, volumeStore.getSnapshot(), customBuffer);
 			};
 			/** 写回音量百分比。 */
 			const setVolume = (next) => volumeStore.set(clampVolume(next));
@@ -1021,6 +1444,8 @@ window.__ModuleLoader__.load({
 				notifyStore.set(DEFAULTS.notify);
 				notifyModeStore.set(DEFAULTS.notifyMode);
 				soundStore.set(DEFAULTS.sound);
+				// 自定义音效文件是用户的素材、不是配置值：恢复默认只把音效档写回
+				// 第一种合成音效，文件留着（要删点「自定义音效」行的「清除」）。
 				soundChoiceStore.set(DEFAULTS.soundChoice);
 				volumeStore.set(DEFAULTS.volume);
 				subagentStore.set(DEFAULTS.subagent);
@@ -1048,7 +1473,7 @@ window.__ModuleLoader__.load({
 			/** 按当前开关排一次提示音，并记进排障计数。 */
 			const chimeNow = () => {
 				if (soundStore.getSnapshot() !== true) return;
-				const sounded = chime.play(soundChoiceStore.getSnapshot(), volumeStore.getSnapshot());
+				const sounded = chime.play(soundChoiceStore.getSnapshot(), volumeStore.getSnapshot(), customBuffer);
 				if (sounded?.scheduled === true) stats.sounds += 1;
 				stats.lastSound = { ...sounded, at: Date.now() };
 			};
@@ -1413,6 +1838,37 @@ window.__ModuleLoader__.load({
 			ctx.effect(() => () => {
 				chime.dispose();
 			}, 'dsh-task-reminder: chime');
+			// 装载即恢复自定义音效：IndexedDB 是唯一事实来源（localStorage 里的元数据
+			// 只是显示缓存）—— 记录在就解码好待用；记录不在（换浏览器、清了站点数据、
+			// 或者本来就没上传过）就把陈旧元数据清掉，免得设置页显示一个已经没了的
+			// 文件。读不出来（隐私模式）时保留缓存并如实提示，不冒充「就绪」。
+			ctx.effect(() => {
+				if (!indexedDbAvailable()) return () => {};
+				let cancelled = false;
+				const revision = (customRevision += 1);
+				const cached = customMetaStore.getSnapshot();
+				if (cached !== null) customStatusStore.set('loading');
+				void customSounds.read().then((record) => {
+					if (cancelled || revision !== customRevision) return;
+					const meta = normalizeCustomMeta(record);
+					if (meta === null) {
+						if (cached !== null) customMetaStore.set(null);
+						customStatusStore.set('idle');
+						return;
+					}
+					customMetaStore.set(meta);
+					const blob = record?.blob;
+					if (blob === null || blob === undefined) {
+						customStatusStore.set('missing');
+						return;
+					}
+					adoptCustomRecord(revision, blob, false);
+				}).catch(() => {
+					if (cancelled || revision !== customRevision) return;
+					customStatusStore.set(cached === null ? 'idle' : 'store-failed');
+				});
+				return () => { cancelled = true; };
+			}, 'dsh-task-reminder: custom sound restore');
 			// 回收对账票据与它们的遗忘定时器、grace 标记（卸载时不再有延迟回调落地）。
 			ctx.effect(() => () => {
 				for (const entry of recentReports.values()) {
@@ -1437,6 +1893,8 @@ window.__ModuleLoader__.load({
 					soundChoiceStore,
 					volumeStore,
 					subagentStore,
+					customMetaStore,
+					customStatusStore,
 					permissionStore,
 					setNotify,
 					setNotifyMode,
@@ -1444,8 +1902,11 @@ window.__ModuleLoader__.load({
 					setSoundChoice,
 					setVolume,
 					setSubagent,
+					setCustomSound,
+					clearCustomSound,
 					reset: resetAll,
 					notifySupported: notifier.supported,
+					customSupported: indexedDbAvailable(),
 					t,
 				}),
 			}, ReminderSection));
@@ -1462,6 +1923,11 @@ window.__ModuleLoader__.load({
 					soundChoice: soundChoiceStore.getSnapshot(),
 					volume: volumeStore.getSnapshot(),
 					subagent: subagentStore.getSnapshot(),
+					customSound: {
+						meta: customMetaStore.getSnapshot(),
+						status: customStatusStore.getSnapshot(),
+						decoded: customBuffer !== null,
+					},
 					notificationPermission: permissionStore.getSnapshot(),
 					notificationSupported: notifier.supported,
 					running: [...runningSessions.entries()],
@@ -1494,7 +1960,7 @@ window.__ModuleLoader__.load({
 				chimeNow(); // 与正式路径共用同一处放音与记账（stats.sounds / lastSound）
 			};
 			/** 只放音：按当前音效与音量，供排障试听。 */
-			debug.sound = () => chime.play(soundChoiceStore.getSnapshot(), volumeStore.getSnapshot());
+			debug.sound = () => chime.play(soundChoiceStore.getSnapshot(), volumeStore.getSnapshot(), customBuffer);
 			window.__dshTaskReminder = debug;
 			ctx.effect(() => () => {
 				if (window.__dshTaskReminder === debug) delete window.__dshTaskReminder;
@@ -1508,6 +1974,9 @@ window.__ModuleLoader__.load({
 			// 纯函数与常量出口：Node 自检直接校验，不参与运行时行为。
 			// 每个键都要有读者（自检或文档）；没有读者的出口会在发布前被清掉。
 			diagnostics: {
+				CUSTOM_SOUND_CHOICE,
+				CUSTOM_SOUND_MAX_BYTES,
+				CUSTOM_SOUND_PERSIST_KEY,
 				DEFAULTS,
 				DEFAULT_NOTIFY_MODE,
 				DESKTOP_ACTIVATION_ROUTE,
@@ -1532,6 +2001,7 @@ window.__ModuleLoader__.load({
 				createNotifier,
 				en,
 				isSubagentSession,
+				normalizeCustomMeta,
 				resolveDoNotifySubagent,
 				resolveNotifyMode,
 				resolveSoundChoice,

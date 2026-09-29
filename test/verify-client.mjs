@@ -42,6 +42,9 @@ const reactStub = {
 		return type({ ...(props ?? {}), children: children.length <= 1 ? children[0] : children });
 	},
 	useSyncExternalStore: (subscribe, getSnapshot) => getSnapshot(),
+	// 隐藏文件选择框的 ref：桩里没人会真的把 DOM 节点塞进 current，所以组件
+	// 里的用法必须是「取到才点」；用例可以自己往 current 里放一个假的 input。
+	useRef: (initial) => ({ current: initial }),
 };
 
 /** 记录每个持久化 store 的创建参数，供断言 persist 键。 */
@@ -151,7 +154,7 @@ FakeNotification.requestPermission = () => {
 };
 
 /** Web Audio 录音桩：记录振荡器与增益节点，验证「提示音真的排了音、参数正确」。 */
-const audioLog = { contexts: 0, instances: [], oscillators: [], gains: [], resumed: 0, closed: 0 };
+const audioLog = { contexts: 0, instances: [], oscillators: [], gains: [], bufferSources: [], decodes: [], decodeFails: false, resumed: 0, closed: 0 };
 class FakeAudioContext {
 	constructor() {
 		audioLog.contexts += 1;
@@ -186,17 +189,103 @@ class FakeAudioContext {
 	createGain() {
 		const gain = {
 			peak: null,
+			ramps: [],
 			gain: {
 				setValueAtTime: () => {},
-				// 每个包络 ramp 两次（起振峰值 → 衰减尾），只记第一条。
-				exponentialRampToValueAtTime: (value) => { if (gain.peak === null) gain.peak = value; },
+				// 每个包络 ramp 两次（起振峰值 → 衰减尾），peak 只记第一条。
+				exponentialRampToValueAtTime: (value) => {
+					gain.ramps.push(value);
+					if (gain.peak === null) gain.peak = value;
+				},
 			},
 			connect: (node) => node,
 		};
 		audioLog.gains.push(gain);
 		return gain;
 	}
+	createBufferSource() {
+		const source = {
+			buffer: null,
+			startAt: null,
+			connect: (node) => node,
+			start: (at) => { source.startAt = at; },
+		};
+		audioLog.bufferSources.push(source);
+		return source;
+	}
+	decodeAudioData(data, onSuccess, onError) {
+		audioLog.decodes.push(data);
+		if (audioLog.decodeFails === true) {
+			if (typeof onError === 'function') onError(new Error('decode-failed'));
+			return;
+		}
+		// 解码结果只需要 duration（播放时要算淡出尾巴）。
+		if (typeof onSuccess === 'function') onSuccess({ duration: 0.5, sampleRate: 48000, length: 24000 });
+	}
 }
+
+/**
+ * IndexedDB 桩：只实现插件用到的那条路径（open → 一个对象仓库 → get / put / delete），
+ * 全部在微任务里落地。failOpen / failPut 用来演练「打不开」「写不进去」两条失败分支。
+ */
+const idbBacking = { records: new Map(), openCount: 0, failOpen: false, failPut: false };
+const idbRequest = () => ({ result: undefined, error: null, onsuccess: null, onerror: null });
+const settleIdb = (request, result) => {
+	Promise.resolve().then(() => {
+		request.result = result;
+		if (typeof request.onsuccess === 'function') request.onsuccess({ target: request });
+	});
+};
+const failIdb = (request, error) => {
+	Promise.resolve().then(() => {
+		request.error = error;
+		if (typeof request.onerror === 'function') request.onerror({ target: request });
+	});
+};
+const fakeObjectStore = () => ({
+	get(key) {
+		const request = idbRequest();
+		settleIdb(request, idbBacking.records.get(key));
+		return request;
+	},
+	put(value, key) {
+		const request = idbRequest();
+		if (idbBacking.failPut) {
+			failIdb(request, new Error('quota exceeded'));
+			return request;
+		}
+		idbBacking.records.set(key, value);
+		settleIdb(request, key);
+		return request;
+	},
+	delete(key) {
+		const request = idbRequest();
+		idbBacking.records.delete(key);
+		settleIdb(request, undefined);
+		return request;
+	},
+});
+const fakeDatabase = {
+	objectStoreNames: { contains: () => true },
+	createObjectStore: () => {},
+	transaction: () => ({ objectStore: () => fakeObjectStore() }),
+};
+const FakeIndexedDB = {
+	open() {
+		idbBacking.openCount += 1;
+		const request = idbRequest();
+		if (idbBacking.failOpen) {
+			failIdb(request, new Error('blocked'));
+			return request;
+		}
+		request.result = fakeDatabase;
+		Promise.resolve().then(() => {
+			if (typeof request.onupgradeneeded === 'function') request.onupgradeneeded({ target: request });
+			if (typeof request.onsuccess === 'function') request.onsuccess({ target: request });
+		});
+		return request;
+	},
+};
 
 /** localStorage 桩：记账「已经申请过通知权限」。 */
 const localStorageBacking = {};
@@ -208,6 +297,7 @@ const windowStub = {
 	},
 	Notification: FakeNotification,
 	AudioContext: FakeAudioContext,
+	indexedDB: FakeIndexedDB,
 	focus: () => { notificationLog.focused += 1; },
 	addEventListener: listenOn('window'),
 	removeEventListener: unlistenFrom('window'),
@@ -221,6 +311,9 @@ if (definition === undefined) throw new Error('verify-client: client.js did not 
 const plugin = definition.factory(requireStub);
 const { diagnostics } = plugin;
 const {
+	CUSTOM_SOUND_CHOICE,
+	CUSTOM_SOUND_MAX_BYTES,
+	CUSTOM_SOUND_PERSIST_KEY,
 	DEFAULTS,
 	DEFAULT_NOTIFY_MODE,
 	DESKTOP_ACTIVATION_ROUTE,
@@ -245,6 +338,7 @@ const {
 	createNotifier,
 	en,
 	isSubagentSession,
+	normalizeCustomMeta,
 	resolveDoNotifySubagent,
 	resolveNotifyMode,
 	resolveSoundChoice,
@@ -287,6 +381,10 @@ check('弹窗时机文案注明两种语义', zh['notify.mode.always'] === '任�
 	&& en['notify.mode.always'] === 'Always' && en['notify.mode.unfocused'] === 'Only when unfocused');
 check('音效/音量/恢复默认各有文案', ['sound.choice.title', 'sound.choice.description', 'volume.title', 'volume.description', 'reset.title', 'reset.description', 'reset.descriptionDefault'].every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
 check('四种音效各有名字文案', SOUND_CHOICES.every((choice) => typeof zh[choice.nameKey] === 'string' && zh[choice.nameKey] !== '' && typeof en[choice.nameKey] === 'string' && en[choice.nameKey] !== ''));
+check('自定义音效有档位名与全部状态文案', ['sound.choice.custom', 'sound.custom.title', 'sound.custom.empty', 'sound.custom.ready', 'sound.custom.loading', 'sound.custom.missing', 'sound.custom.decodeFailed', 'sound.custom.storeFailed', 'sound.custom.tooLarge', 'sound.custom.unsupported', 'sound.custom.pick', 'sound.custom.clear'].every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
+check('自定义档下标排在四种合成音效之后', CUSTOM_SOUND_CHOICE === SOUND_CHOICES.length && CUSTOM_SOUND_CHOICE === 4, String(CUSTOM_SOUND_CHOICE));
+check('自定义音效的元数据持久化键符合约定', CUSTOM_SOUND_PERSIST_KEY === 'dsh.task-reminder.custom-sound');
+check('自定义音频有字节上限（正整数，防误选大文件）', Number.isInteger(CUSTOM_SOUND_MAX_BYTES) && CUSTOM_SOUND_MAX_BYTES > 0, String(CUSTOM_SOUND_MAX_BYTES));
 check('通知权限有三条提示文案', ['notify.unsupported', 'notify.denied', 'notify.pending'].every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
 check('步进器有增减无障碍标签', typeof zh['decrease'] === 'string' && typeof zh['increase'] === 'string' && typeof en['decrease'] === 'string' && typeof en['increase'] === 'string');
 check('导语说明唯一视觉通道是 Windows 系统弹窗', zh['intro'].includes('Windows 系统弹窗') && !zh['intro'].includes('卡片'), zh['intro'].slice(0, 40));
@@ -318,9 +416,11 @@ check('音量说明只保留增益与插值，不带上调解释（按用户要�
 	&& en['volume.description'] === 'Overall gain of the chime, currently {value}%; 0 mutes it'
 	&& !zh['volume.description'].includes('整档') && !en['volume.description'].includes('shifted up by 20'), JSON.stringify({ zh: zh['volume.description'], en: en['volume.description'] }));
 
-check('resolveSoundChoice 接受合法下标（含 0）', [0, 1, 2, 3].every((index) => resolveSoundChoice(index) === index));
-check('resolveSoundChoice 夹住越界与坏值', resolveSoundChoice(9) === 3 && resolveSoundChoice(-2) === 0 && resolveSoundChoice(Number.NaN) === 0 && resolveSoundChoice('x') === 0 && resolveSoundChoice(null) === 0);
+check('resolveSoundChoice 接受合法下标（含 0 与自定义档）', [0, 1, 2, 3, CUSTOM_SOUND_CHOICE].every((index) => resolveSoundChoice(index) === index));
+check('resolveSoundChoice 夹住越界与坏值', resolveSoundChoice(9) === CUSTOM_SOUND_CHOICE && resolveSoundChoice(-2) === 0 && resolveSoundChoice(Number.NaN) === 0 && resolveSoundChoice('x') === 0 && resolveSoundChoice(null) === 0);
 check('resolveSoundChoice 四舍五入到整数档', resolveSoundChoice(1.4) === 1 && resolveSoundChoice(2.6) === 3);
+check('normalizeCustomMeta 保留合法元数据', JSON.stringify(normalizeCustomMeta({ name: 'ding.mp3', size: 1234.6, type: 'audio/mpeg', at: 7 })) === JSON.stringify({ name: 'ding.mp3', size: 1235, type: 'audio/mpeg', at: 7 }), JSON.stringify(normalizeCustomMeta({ name: 'ding.mp3', size: 1234.6, type: 'audio/mpeg', at: 7 })));
+check('normalizeCustomMeta 坏值一律视为没有自定义音效', normalizeCustomMeta(null) === null && normalizeCustomMeta('ding.mp3') === null && normalizeCustomMeta({}) === null && normalizeCustomMeta({ name: '' }) === null && normalizeCustomMeta({ name: '   ' }) === null && normalizeCustomMeta({ name: 'a.mp3', size: -5, type: 7, at: 'x' }).size === 0);
 check('clampVolume 夹住 0~100', clampVolume(0) === 0 && clampVolume(100) === 100 && clampVolume(140) === 100 && clampVolume(-5) === 0);
 check('clampVolume 坏值退回默认音量', clampVolume(Number.NaN) === DEFAULTS.volume && clampVolume('loud') === DEFAULTS.volume && clampVolume(null) === DEFAULTS.volume);
 check('音量区间覆盖 0~100 且步进为正', VOLUME_MIN === 0 && VOLUME_MAX === 100 && VOLUME_STEP > 0);
@@ -504,18 +604,22 @@ const sectionFace = () => section.entry.options.inject();
 const face = sectionFace();
 check('设置页 face 带六个配置 store 与写回函数', ['notifyStore', 'notifyModeStore', 'soundStore', 'soundChoiceStore', 'volumeStore', 'subagentStore', 'permissionStore'].every((name) => typeof face[name]?.getSnapshot === 'function')
 	&& ['setNotify', 'setNotifyMode', 'setSound', 'setSoundChoice', 'setVolume', 'setSubagent'].every((name) => typeof face[name] === 'function'));
+check('设置页 face 带自定义音效的 store、写回函数与支持标志', typeof face.customMetaStore?.getSnapshot === 'function' && typeof face.customStatusStore?.getSnapshot === 'function'
+	&& typeof face.setCustomSound === 'function' && typeof face.clearCustomSound === 'function' && face.customSupported === true, JSON.stringify({ customSupported: face.customSupported }));
 check('设置页 face 不带卡片相关（宽度/高度/预览/弹窗开关）', !('widthStore' in face) && !('heightStore' in face) && !('setWidth' in face) && !('setHeight' in face) && !('popupStore' in face) && !('preview' in face));
 check('设置页 face 带恢复默认、通知支持标志与本地化函数', typeof face.reset === 'function' && typeof face.notifySupported === 'boolean' && typeof face.t === 'function');
 check('浏览器桩支持 Notification 时 notifySupported 为真', face.notifySupported === true);
 
-check('七个 store：六个持久化 + 权限状态不持久化', persistedStores.length === 7
+check('九个 store：七个持久化 + 权限与自定义音效状态不持久化', persistedStores.length === 9
 	&& persistedStores[0].options?.persist?.name === NOTIFY_PERSIST_KEY
 	&& persistedStores[1].options?.persist?.name === NOTIFY_MODE_PERSIST_KEY
 	&& persistedStores[2].options?.persist?.name === SOUND_PERSIST_KEY
 	&& persistedStores[3].options?.persist?.name === SOUND_CHOICE_PERSIST_KEY
 	&& persistedStores[4].options?.persist?.name === VOLUME_PERSIST_KEY
 	&& persistedStores[5].options?.persist?.name === SUBAGENT_PERSIST_KEY
-	&& persistedStores[6].options === undefined, JSON.stringify(persistedStores.map((store) => store.options?.persist?.name)));
+	&& persistedStores[6].options?.persist?.name === CUSTOM_SOUND_PERSIST_KEY
+	&& persistedStores[7].options === undefined && persistedStores[8].options === undefined, JSON.stringify(persistedStores.map((store) => store.options?.persist?.name)));
+check('自定义音效的元数据默认空（没上传过就是 null）', face.customMetaStore.getSnapshot() === null && DEFAULTS.customSound === null && face.customStatusStore.getSnapshot() === 'idle', JSON.stringify({ meta: face.customMetaStore.getSnapshot(), status: face.customStatusStore.getSnapshot() }));
 check('六个配置默认值符合出厂表', face.notifyStore.getSnapshot() === DEFAULTS.notify
 	&& face.notifyModeStore.getSnapshot() === DEFAULTS.notifyMode
 	&& face.soundStore.getSnapshot() === DEFAULTS.sound
@@ -582,6 +686,7 @@ const statusListener = listeners.find((entry) => entry.name === 'api-session/sta
 const resetAudioLog = () => {
 	audioLog.oscillators.length = 0;
 	audioLog.gains.length = 0;
+	audioLog.bufferSources.length = 0;
 };
 const resetNotificationLog = () => {
 	notificationLog.created.length = 0;
@@ -1141,7 +1246,7 @@ FakeNotification.permission = 'granted';
 console.log('');
 console.log('设置页');
 
-// 默认态：三个开关 + 弹窗时机（二选一，默认「任何情况都弹」）+ 音效四选一 + 音量步进 + 恢复默认。
+// 默认态：三个开关 + 弹窗时机（二选一，默认「任何情况都弹」）+ 音效四选一 + 自定义音效 + 音量步进 + 恢复默认。
 sectionNodes = renderSection();
 const switches = sectionNodes.filter((node) => node.type === 'Switch');
 check('设置页渲染三个开关（系统弹窗 / 子智能体提醒 / 提示音）', switches.length === 3, String(switches.length));
@@ -1169,8 +1274,8 @@ sectionNodes = renderSection();
 const soundGroup = sectionNodes.find((node) => node.type === 'div' && node.props?.role === 'group'
 	&& node.props?.['aria-label'] === '提示音音效');
 const soundSegmentedButtons = kidsOf(soundGroup).filter((node) => node.type === 'button' && typeof node.props?.['aria-pressed'] === 'boolean');
-check('音效选择是四选一分段控件', soundSegmentedButtons.length === 4 && soundSegmentedButtons.filter((node) => node.props['aria-pressed'] === true).length === 1, String(soundSegmentedButtons.length));
-check('音效分段按钮文案与顺序', JSON.stringify(soundSegmentedButtons.map((node) => node.children?.[0])) === JSON.stringify(['两声（经典）', '三声上扬', '上升琶音', '圆润三角波']), JSON.stringify(soundSegmentedButtons.map((node) => node.children?.[0])));
+check('音效选择是五选一分段控件（四种合成 + 自定义）', soundSegmentedButtons.length === 5 && soundSegmentedButtons.filter((node) => node.props['aria-pressed'] === true).length === 1, String(soundSegmentedButtons.length));
+check('音效分段按钮文案与顺序', JSON.stringify(soundSegmentedButtons.map((node) => node.children?.[0])) === JSON.stringify(['两声（经典）', '三声上扬', '上升琶音', '圆润三角波', '自定义']), JSON.stringify(soundSegmentedButtons.map((node) => node.children?.[0])));
 check('默认选中第一种音效', soundSegmentedButtons[0]?.props['aria-pressed'] === true);
 const stepperGroups = sectionNodes.filter((node) => node.type === 'div' && node.props?.role === 'group'
 	&& kidsOf(node).some((child) => child.props?.['aria-label'] === '减小'));
@@ -1340,6 +1445,141 @@ resetAudioLog();
 windowStub.__dshTaskReminder.sound();
 check('sound() 只放音不发弹窗', audioLog.oscillators.length === 2 && notificationLog.created.length === 3, String(audioLog.oscillators.length));
 
+// ---------------------------------------------------------------------------
+// 自定义音效：上传本机音频（IndexedDB 存字节 + decodeAudioData 解码 + 播放）
+// ---------------------------------------------------------------------------
+
+console.log('');
+console.log('自定义音效');
+
+/** 桩里的「本机音频文件」：只带插件用到的那四个字段。 */
+const makeAudioFile = (name, size) => ({
+	name,
+	size,
+	type: 'audio/mpeg',
+	arrayBuffer: async () => new ArrayBuffer(16),
+});
+/** 让自定义音效的异步链路（IndexedDB → 解码 → 试听）全部落地。 */
+const settle = async (rounds = 4) => {
+	for (let i = 0; i < rounds; i += 1) await tick();
+};
+const customState = () => windowStub.__dshTaskReminder.state().customSound;
+const storedRecord = () => idbBacking.records.get('custom');
+
+face.setVolume(80);
+resetAudioLog();
+face.setCustomSound(makeAudioFile('ding.mp3', 120 * 1024));
+await settle();
+check('选文件即存进 IndexedDB（唯一那条记录带音频字节）', storedRecord()?.name === 'ding.mp3' && typeof storedRecord()?.blob?.arrayBuffer === 'function', JSON.stringify(Object.keys(storedRecord() ?? {})));
+check('元数据落持久 store（文件名 / 字节数）', face.customMetaStore.getSnapshot()?.name === 'ding.mp3' && face.customMetaStore.getSnapshot()?.size === 122880, JSON.stringify(face.customMetaStore.getSnapshot()));
+check('选完文件即切到自定义档', face.soundChoiceStore.getSnapshot() === CUSTOM_SOUND_CHOICE, String(face.soundChoiceStore.getSnapshot()));
+check('解码成功后状态就绪、音频在内存里', customState().status === 'ready' && customState().decoded === true, JSON.stringify(customState()));
+check('解码成功后当场试听一次（显示 80 → master 1.0）', audioLog.bufferSources.length === 1 && closeTo(audioLog.gains[0]?.peak, 1), `${audioLog.bufferSources.length} / ${JSON.stringify(audioLog.gains.map((gain) => gain.peak))}`);
+
+// 完成边沿：自定义档播解码好的音频，不再排合成音；音量同样整档 +20。
+resetAudioLog();
+played = await playOnce();
+check('完成时自定义档播的是音频（不排合成音）', audioLog.bufferSources.length === 1 && audioLog.oscillators.length === 0, `${audioLog.bufferSources.length} / ${audioLog.oscillators.length}`);
+check('自定义音效按当前音量给增益（80 → 1.0）', closeTo(audioLog.gains[0]?.peak, 1), JSON.stringify(audioLog.gains.map((gain) => gain.peak)));
+check('排障状态标明这次放的是自定义音效', windowStub.__dshTaskReminder.state().stats.lastSound?.custom === true, JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastSound));
+
+// 音量作用在同一处：显示 50 → master 0.7。
+face.setVolume(50);
+resetAudioLog();
+played = await playOnce();
+check('自定义音效同样受音量控制（50 → master 0.7）', closeTo(audioLog.gains[0]?.peak, 0.7), JSON.stringify(audioLog.gains.map((gain) => gain.peak)));
+face.setVolume(80);
+
+// 换文件：记录被覆盖，旧解码结果不残留。
+resetAudioLog();
+face.setCustomSound(makeAudioFile('second.wav', 64 * 1024));
+await settle();
+check('换文件覆盖同一条记录（后一个生效）', storedRecord()?.name === 'second.wav' && face.customMetaStore.getSnapshot()?.name === 'second.wav', String(storedRecord()?.name));
+check('换文件后状态仍就绪', customState().status === 'ready' && customState().decoded === true, JSON.stringify(customState()));
+
+// 清除：删记录、元数据回空、正在用自定义档时回落第一种合成音效。
+face.clearCustomSound();
+await settle();
+check('清除后 IndexedDB 记录被删掉', storedRecord() === undefined, JSON.stringify(storedRecord()));
+check('清除后元数据回空、状态回 idle', face.customMetaStore.getSnapshot() === null && customState().status === 'idle', JSON.stringify(customState()));
+check('清除时正在用自定义档：音效档回落第一种', face.soundChoiceStore.getSnapshot() === 0, String(face.soundChoiceStore.getSnapshot()));
+resetAudioLog();
+played = await playOnce();
+check('清除后完成回到合成音效（两声、不排 buffer）', audioLog.oscillators.length === 2 && audioLog.bufferSources.length === 0, `${audioLog.oscillators.length} / ${audioLog.bufferSources.length}`);
+
+// 解码失败（编码不支持 / 文件损坏）：状态如实写，播放在自定义档回落合成音。
+audioLog.decodeFails = true;
+face.setCustomSound(makeAudioFile('broken.ogg', 32 * 1024));
+await settle();
+check('解码失败状态如实写 decode-failed、没有可播的音频', customState().status === 'decode-failed' && customState().decoded === false, JSON.stringify(customState()));
+check('解码失败仍记着文件名（用户可以重选或清除）', face.customMetaStore.getSnapshot()?.name === 'broken.ogg', JSON.stringify(face.customMetaStore.getSnapshot()));
+audioLog.decodeFails = false;
+resetAudioLog();
+played = await playOnce();
+check('自定义档但没有可播音频：完成时回落第一种合成音效', audioLog.oscillators.length === 2 && audioLog.bufferSources.length === 0 && windowStub.__dshTaskReminder.state().stats.lastSound?.customFallback === true, JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastSound));
+
+// 超过 5MB 上限：直接挡下，不写本地存储、不动已有元数据。
+const recordBeforeLarge = storedRecord();
+face.setCustomSound(makeAudioFile('huge.wav', CUSTOM_SOUND_MAX_BYTES + 1));
+await settle();
+check('超过上限的文件被挡下、不写存储、不改元数据', customState().status === 'too-large' && storedRecord() === recordBeforeLarge && face.customMetaStore.getSnapshot()?.name === 'broken.ogg', JSON.stringify(customState()));
+
+// 写不进去（配额满 / 隐私模式）：状态如实写 store-failed，元数据不动。
+idbBacking.failPut = true;
+face.setCustomSound(makeAudioFile('quota.mp3', 8 * 1024));
+await settle();
+idbBacking.failPut = false;
+check('本地存储写不进去时如实提示、不假装保存', customState().status === 'store-failed' && face.customMetaStore.getSnapshot()?.name === 'broken.ogg', JSON.stringify(customState()));
+
+// 浏览器没有 IndexedDB：如实提示不支持。
+const savedIndexedDb = windowStub.indexedDB;
+delete windowStub.indexedDB;
+face.setCustomSound(makeAudioFile('nodb.mp3', 8 * 1024));
+await settle();
+check('浏览器没有 IndexedDB 时提示不支持', customState().status === 'unsupported', JSON.stringify(customState()));
+windowStub.indexedDB = savedIndexedDb;
+
+// 设置页：第五档 + 隐藏文件选择框 + 选择/清除按钮 + 状态说明。
+face.setCustomSound(makeAudioFile('ding.mp3', 120 * 1024));
+await settle();
+sectionNodes = renderSection();
+const soundButtons = kidsOf(sectionNodes.find((node) => node.type === 'div' && node.props?.['aria-label'] === '提示音音效')).filter((node) => node.type === 'button');
+const fileInput = sectionNodes.find((node) => node.type === 'input' && node.props?.type === 'file');
+const pickButton = sectionNodes.find((node) => node.type === 'button' && node.children?.[0] === '选择文件');
+const clearButton = sectionNodes.find((node) => node.type === 'button' && node.children?.[0] === '清除');
+check('第五档「自定义」当前选中', soundButtons.length === 5 && soundButtons[4]?.children?.[0] === '自定义' && soundButtons[4]?.props['aria-pressed'] === true, JSON.stringify(soundButtons.map((node) => [node.children?.[0], node.props['aria-pressed']])));
+// 五档控件比描述还宽：这一行必须是上下排（stacked），否则描述会被挤成一列单字。
+const soundChoiceRow = sectionNodes.find((node) => {
+	const kids = kidsOf(node);
+	const hasTitle = kids.some((child) => kidsOf(child).some((grand) => grand.children?.[0] === '提示音音效'));
+	const hasGroup = kids.some((child) => kidsOf(child).some((grand) => grand.props?.role === 'group' && grand.props?.['aria-label'] === '提示音音效'));
+	return hasTitle && hasGroup;
+});
+check('音效行改成上下排：描述拿整行宽度、分段控件另起一行', soundChoiceRow?.props?.style?.flexDirection === 'column', JSON.stringify(soundChoiceRow?.props?.style));
+check('分段控件可折行、按钮文字不折行（窄窗口也不会挤压描述）', soundGroup?.props?.style?.flexWrap === 'wrap' && soundButtons.every((node) => node.props?.style?.whiteSpace === 'nowrap'), JSON.stringify({ wrap: soundGroup?.props?.style?.flexWrap, buttons: soundButtons.map((node) => node.props?.style?.whiteSpace) }));
+check('自定义音效行有隐藏文件选择框（accept=audio/*）', fileInput?.props?.accept === 'audio/*' && fileInput?.props?.style?.display === 'none', JSON.stringify(fileInput?.props));
+check('有文件时同时给出「选择文件」与「清除」', pickButton !== undefined && clearButton !== undefined);
+check('说明文案显示当前文件名与大小', sectionNodes.some((node) => typeof node.children?.[0] === 'string' && node.children[0].includes('ding.mp3') && node.children[0].includes('120 KB')), JSON.stringify(sectionNodes.map((node) => node.children?.[0]).filter((text) => typeof text === 'string' && text.includes('当前文件'))));
+
+// 点「选择文件」：打开文件选择框并清掉旧值（允许连续选同一个文件）。
+let fileDialogOpened = 0;
+fileInput.props.ref.current = { value: 'stale', click: () => { fileDialogOpened += 1; } };
+pickButton.props.onClick();
+check('点「选择文件」打开文件选择框并清掉旧值', fileDialogOpened === 1 && fileInput.props.ref.current.value === '', `${fileDialogOpened} / ${fileInput.props.ref.current.value}`);
+
+// 文件选择框的 onChange：直接把 File 交给写回链路。
+fileInput.props.onChange({ target: { files: [makeAudioFile('picked.mp3', 4096)] } });
+await settle();
+check('文件选择框选中文件后写回生效', face.customMetaStore.getSnapshot()?.name === 'picked.mp3' && customState().status === 'ready', JSON.stringify(customState()));
+
+// 点「清除」：删文件、回落合成音效；没有文件时不再显示「清除」。
+clearButton.props.onClick();
+await settle();
+sectionNodes = renderSection();
+check('点「清除」删掉文件并回落合成音效', storedRecord() === undefined && face.customMetaStore.getSnapshot() === null && face.soundChoiceStore.getSnapshot() === 0, JSON.stringify(customState()));
+check('没有文件时只显示「选择文件」，不显示「清除」', sectionNodes.some((node) => node.type === 'button' && node.children?.[0] === '选择文件') && !sectionNodes.some((node) => node.type === 'button' && node.children?.[0] === '清除'));
+check('没有文件时说明是「选择本机音频文件…」', sectionNodes.some((node) => typeof node.children?.[0] === 'string' && node.children[0].startsWith('选择本机音频文件')));
+
 /** 再造一次干净装载：证明装载期完全不碰音频硬件。 */
 const audioLog2 = { contexts: 0, oscillators: 0, gains: 0 };
 class FakeAudioContext2 {
@@ -1353,10 +1593,13 @@ class FakeAudioContext2 {
 	close() { return Promise.resolve(); }
 	createOscillator() { audioLog2.oscillators += 1; return { type: '', frequency: { setValueAtTime: () => {} }, connect: (node) => node, start: () => {}, stop: () => {} }; }
 	createGain() { audioLog2.gains += 1; return { gain: { setValueAtTime: () => {}, exponentialRampToValueAtTime: () => {} }, connect: (node) => node }; }
+	createBufferSource() { return { buffer: null, connect: (node) => node, start: () => {} }; }
+	decodeAudioData(data, onSuccess) { if (typeof onSuccess === 'function') onSuccess({ duration: 0.4 }); }
 }
 const windowStub2 = {
 	__ModuleLoader__: { load: (loaded) => { definition2 = loaded; } },
 	AudioContext: FakeAudioContext2,
+	indexedDB: FakeIndexedDB,
 	addEventListener: () => {},
 	removeEventListener: () => {},
 };
@@ -1369,6 +1612,9 @@ const documentStub2 = {
 	addEventListener: () => {},
 	removeEventListener: () => {},
 };
+// 冷启动恢复：先在 IndexedDB 里放一条「上次上传过」的记录，第二次装载应当
+// 自动恢复（元数据 + 解码），不需要用户重新选文件。
+idbBacking.records.set('custom', { name: 'boot.mp3', size: 2048, type: 'audio/mpeg', at: 1, blob: makeAudioFile('boot.mp3', 2048) });
 new Function('window', 'document', source)(windowStub2, documentStub2);
 if (definition2 === undefined) throw new Error('verify-client: 第二次装载没有捕获到工厂');
 const plugin2 = definition2.factory(requireStub);
@@ -1383,6 +1629,10 @@ plugin2.apply({
 	timer: { timeout: () => () => {} },
 });
 check('第二次装载同样只建 context 与预热音，不排可闻提示音', audioLog2.contexts === 1 && audioLog2.oscillators === 1 && audioLog2.gains === 1, JSON.stringify(audioLog2));
+await settle();
+check('冷启动自动从 IndexedDB 恢复自定义音效（就绪 + 已解码）', windowStub2.__dshTaskReminder.state().customSound.status === 'ready' && windowStub2.__dshTaskReminder.state().customSound.decoded === true, JSON.stringify(windowStub2.__dshTaskReminder.state().customSound));
+check('冷启动恢复的文件名取自 IndexedDB 记录', windowStub2.__dshTaskReminder.state().customSound.meta?.name === 'boot.mp3', JSON.stringify(windowStub2.__dshTaskReminder.state().customSound.meta));
+check('恢复解码不额外建音频节点（仍只一条预热音）', audioLog2.contexts === 1 && audioLog2.oscillators === 1 && audioLog2.gains === 1, JSON.stringify(audioLog2));
 
 // ---------------------------------------------------------------------------
 // 回收：effects 逆序销毁

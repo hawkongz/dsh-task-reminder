@@ -103,11 +103,17 @@ answer 501.
   reminds you. A **Subagent reminders** switch on the settings page turns the
   reminders for subagents back on, completions, pending questions and errors
   alike — it is off out of the box and Restore defaults turns it off again.
-* **Four synthesized chimes:** two-tone (classic), rising three-tone, rising
-  arpeggio, and soft triangle — generated live with Web Audio, so no audio
-  files are shipped. Picking an effect plays it immediately at the current
-  volume; there is no separate preview button. The chime sounds on every stop,
-  whatever the toast timing mode.
+* **Four synthesized chimes, plus your own audio file:** two-tone (classic),
+  rising three-tone, rising arpeggio, and soft triangle — generated live with
+  Web Audio, so no audio files are shipped. The fifth option, **Custom**, plays
+  an audio file you pick from this machine: the bytes go into the browser's
+  IndexedDB (not local storage), are decoded with `decodeAudioData` and played
+  through the same volume gain, so nothing is uploaded and nothing enters the
+  package. Picking an effect plays it immediately at the current volume; there
+  is no separate preview button. If IndexedDB, the file or the decoder is
+  unavailable, the reminder falls back to the first synthesized chime instead
+  of going silent. The chime sounds on every stop, whatever the toast timing
+  mode.
 * **Dedicated settings page:** `Settings → Task reminder` (no more rows in
   `Settings → General`), with one-click restore defaults.
 * **Three-channel completion detection with deduplication:** the host-forwarded
@@ -248,20 +254,42 @@ changed `client.js`.
 | Toast timing (Always / Only when unfocused) | Always | `dsh.task-reminder.notify-mode` |
 | Subagent reminders | Off | `dsh.task-reminder.subagent` |
 | Completion sound | On | `dsh.task-reminder.sound` |
-| Chime effect (four options) | Two-tone (classic) | `dsh.task-reminder.sound-choice` |
+| Chime effect (four synthesized + Custom) | Two-tone (classic) | `dsh.task-reminder.sound-choice` |
+| Custom chime file | none | `dsh.task-reminder.custom-sound` (metadata; audio bytes in IndexedDB) |
 | Chime volume (0–100) | 80 | `dsh.task-reminder.volume` |
 
 A restore-defaults button writes back: toast on (Always), subagent reminders
-off, sound on, first effect, volume 80.
+off, sound on, first effect, volume 80. An uploaded custom chime file is kept —
+use **Clear** in the Custom chime row to delete it.
+
+### Custom chime (your own audio)
+
+`Settings → Task reminder → Custom chime → Choose file` accepts an audio file
+(mp3 / wav / ogg / m4a — anything the browser can decode, up to 5 MB). The
+plugin stores it in the **IndexedDB** database `dsh.task-reminder` (local
+storage is far too small for audio and is written synchronously), decodes it
+once into an `AudioBuffer`, switches the effect to Custom and plays it right
+away as a preview at the current volume. Every later reminder plays that file
+through the same volume gain, with 10 ms fades at both ends so a hard-cut file
+cannot pop.
+
+The audio never leaves the machine: nothing is uploaded, nothing is added to
+the npm package, and the host half is not involved. It lives per browser
+origin, so it survives restarts but not "clear site data" or a different
+browser — pick the file again there, and the row says the file is gone.
+**Clear** deletes the stored bytes and puts the effect back on the first
+synthesized chime. If the file cannot be stored or decoded (private mode,
+quota, unsupported codec), the row says so plainly and reminders fall back to a
+synthesized chime.
 
 ### Browser console helpers
 
 In the browser DevTools console:
 
 ```js
-// Window focus state, the six settings, toast timing, notification
-// permission, per-session running records, channel counters, duplicate
-// suppressions, recent stops and the last stop of each kind
+// Window focus state, the seven settings, toast timing, notification
+// permission, the custom chime state, per-session running records, channel
+// counters, duplicate suppressions, recent stops and the last stop of each kind
 __dshTaskReminder.state()
 
 // Send a task-complete toast right away and play the chime (does not wait for a task)
@@ -306,9 +334,11 @@ classification (including the unclosed-turn retry that keeps a cancel from
 being misreported) and late-error retraction for one stop, the chime
 sounding on every stop regardless of window state, the subagent filter (silent
 for all three stop reasons while the switch is off, all three back when it is
-on, forked sessions unaffected), the six settings'
+on, forked sessions unaffected), the seven settings'
 defaults / read / write / restore, the oscillator parameters for every effect
-and volume, all notification permission paths plus the in-page
+and volume, the custom chime path (IndexedDB store, `decodeAudioData` playback
+at the chime volume, fallback when decoding or storing fails, and restore from
+IndexedDB on the next load), all notification permission paths plus the in-page
 permission-request button, the desktop window-activation request (only from DSH
 Desktop and only while the window is not in the foreground), the
 suspended-AudioContext revival on a user gesture, and disposal.
