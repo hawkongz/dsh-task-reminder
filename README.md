@@ -160,6 +160,15 @@ other DSH plugin is installed. (The unscoped name
 to the existing package `dsh-taskreminder`, so the scoped name is the only
 registry form.)
 
+> **Installing on release day.** pnpm 11 enables `minimumReleaseAge` by default
+> (1440 minutes — one day), so a version published today cannot be resolved
+> yet: the bare command reports `… 1.4.6 (1.5.0 is available)` and installs the
+> previous release. To get today's version, pin it —
+> `dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.5.0` (pnpm then
+> exempts that exact version) — or set `minimumReleaseAge: 0` in the profile's
+> `pnpm-workspace.yaml`, or install a day later. See
+> [Troubleshooting](#-troubleshooting) for the same symptom.
+
 To install from the GitHub repository instead — the default branch, or a
 pinned release tag — use the `github:` spec:
 
@@ -210,6 +219,22 @@ itself carries the id `task-reminder`); the loader then applies the bundle's
 GitHub instead, use `github:hawkongz/dsh-task-reminder[#<tag>]`. The package ships no
 build scripts, so pnpm never blocks the install (unlike git-hosted packages
 that need an `allowBuilds` entry in the profile's `pnpm-workspace.yaml`).
+
+To install one exact release instead of whatever the registry resolves today
+(needed while a new version is younger than pnpm 11's one-day
+`minimumReleaseAge` cooldown — see above), pin the version:
+
+```powershell
+dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.5.0
+```
+
+pnpm records that exemption in the profile's `pnpm-workspace.yaml`
+(`minimumReleaseAgeExclude`) and installs it right away. Verify what a profile
+actually has with:
+
+```powershell
+(Get-Content $env:USERPROFILE\.dsh\profiles\web\node_modules\@hawkongz\dsh-task-reminder\package.json | ConvertFrom-Json).version
+```
 
 The package contains everything the plugin needs: `index.js` (host half),
 `client.js` (browser half), `cordis.patch.yml` (the bundle row), and the
@@ -350,6 +375,12 @@ suspended-AudioContext revival on a user gesture, and disposal.
   installation completed, then restart `dsh web` and hard-refresh. If the page
   still does not appear, re-run
   `dsh plugin --profile web add @hawkongz/dsh-task-reminder`.
+* **A freshly published version will not install.** pnpm 11 defaults
+  `minimumReleaseAge` to 1440 minutes (one day), so a release younger than that
+  is not resolvable: `dsh plugin … add @hawkongz/dsh-task-reminder` prints
+  `… 1.4.6 (1.5.0 is available)` and installs the previous version. Pin the
+  release (`… add @hawkongz/dsh-task-reminder@1.5.0`), set
+  `minimumReleaseAge: 0` in the profile's `pnpm-workspace.yaml`, or wait a day.
 * **Code changes have no effect.** The host reads client plugins only at
   process start and the browser caches the old bundle. Restart `dsh web`,
   then hard-refresh (`Ctrl + F5`).

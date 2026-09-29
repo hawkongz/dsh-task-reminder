@@ -116,6 +116,13 @@ dsh plugin --profile web add @hawkongz/dsh-task-reminder
 装的是 npm registry 上的已发布包——和其他 DSH 插件的装法完全一样。（裸名 `dsh-task-reminder` 已确定拿不到：npm 判定它与现存包
 `dsh-taskreminder` 过于相似、永久拒发，所以 registry 形式只能带 scope。）
 
+> **发版当天安装注意。** pnpm 11 默认打开 `minimumReleaseAge`（1440 分钟，即 1 天），
+> 所以今天刚发的版本还解析不到：上面这条裸命令会打出 `… 1.4.6 (1.5.0 is available)`
+> 并装上上一版。想当天就装到新版，就钉版本 ——
+> `dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.5.0`（pnpm 会把这个
+> 具体版本加进豁免名单）—— 或者在 profile 的 `pnpm-workspace.yaml` 里设
+> `minimumReleaseAge: 0`，再或者等满一天。同样的现象见「常见问题」一节。
+
 想改从 GitHub 仓库装（默认分支，或钉某个发布标签），用 `github:` 形式：
 
 ```powershell
@@ -160,6 +167,20 @@ dsh plugin --profile web add @hawkongz/dsh-task-reminder
 `cordis.patch.yml`，插入 `task-reminder` 行。本包不带任何构建脚本，pnpm 不会
 拦住安装（那类需要在 profile 的 `pnpm-workspace.yaml` 里加 `allowBuilds`
 的情况只发生在带 prepare 脚本的 git 托管包上）。
+
+想装**指定的那一个版本**（而不是 registry 今天解析出来的那个）——新版还没满
+pnpm 11 的「一天冷静期」时就必须这样做，见上一节——把版本钉上：
+
+```powershell
+dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.5.0
+```
+
+pnpm 会把这条豁免写进 profile 的 `pnpm-workspace.yaml`（`minimumReleaseAgeExclude`）
+并立刻装上。想确认某个 profile 实际装的是哪版：
+
+```powershell
+(Get-Content $env:USERPROFILE\.dsh\profiles\web\node_modules\@hawkongz\dsh-task-reminder\package.json | ConvertFrom-Json).version
+```
 
 包里带着插件需要的全部文件：`index.js`（宿主半侧）、`client.js`（浏览器半侧）、
 `cordis.patch.yml`（bundle 行），以及 `test/` 下的自检脚本。
@@ -276,6 +297,12 @@ node test/verify-client.mjs
   `@deepseek-ai/dsh-client-ui-settings`；确认安装完整后重启 `dsh web` 并硬刷新。
   还是没有，就把安装命令原样再跑一遍：
   `dsh plugin --profile web add @hawkongz/dsh-task-reminder`。
+* **刚发的版本装不上（装完还是上一版）。** pnpm 11 默认 `minimumReleaseAge`
+  为 1440 分钟（1 天），比它更年轻的版本解析不到：
+  `dsh plugin … add @hawkongz/dsh-task-reminder` 会打出
+  `… 1.4.6 (1.5.0 is available)` 并装上上一版。钉版本
+  （`… add @hawkongz/dsh-task-reminder@1.5.0`）、在 profile 的
+  `pnpm-workspace.yaml` 里设 `minimumReleaseAge: 0`，或者等满一天，都能解决。
 * **改了代码没生效。** 宿主只在进程启动时读客户端产物，浏览器又会缓存旧 bundle。
   重启 `dsh web`，再硬刷新（`Ctrl + F5`）。
 * **系统弹窗不弹。** 按顺序查链路：
