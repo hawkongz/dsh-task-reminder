@@ -5,6 +5,8 @@
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
   [![Platform](https://img.shields.io/badge/Platform-DeepSeek%20Harness-lightgrey)](https://github.com/deepseek-ai)
   [![Stars](https://img.shields.io/github/stars/hawkongz/dsh-task-reminder)](https://github.com/hawkongz/dsh-task-reminder/stargazers)
+  [![npm](https://img.shields.io/npm/v/@hawkongz/dsh-task-reminder)](https://www.npmjs.com/package/@hawkongz/dsh-task-reminder)
+  [![下载量](https://img.shields.io/npm/dt/@hawkongz/dsh-task-reminder?label=%E4%B8%8B%E8%BD%BD%E9%87%8F)](https://www.npmjs.com/package/@hawkongz/dsh-task-reminder)
 
   <p><strong>语言：</strong> <a href="../README.md">English</a> | <a href="README.md">简体中文</a></p>
 </div>
