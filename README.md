@@ -170,9 +170,9 @@ registry form.)
 
 > **Installing on release day.** pnpm 11 enables `minimumReleaseAge` by default
 > (1440 minutes — one day), so a version published today cannot be resolved
-> yet: the bare command reports `… 1.4.6 (1.5.0 is available)` and installs the
+> yet: the bare command reports `… 1.5.1 (1.5.3 is available)` and installs the
 > previous release. To get today's version, pin it —
-> `dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.5.0` (pnpm then
+> `dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.5.3` (pnpm then
 > exempts that exact version) — or set `minimumReleaseAge: 0` in the profile's
 > `pnpm-workspace.yaml`, or install a day later. See
 > [Troubleshooting](#-troubleshooting) for the same symptom.
@@ -233,7 +233,7 @@ To install one exact release instead of whatever the registry resolves today
 `minimumReleaseAge` cooldown — see above), pin the version:
 
 ```powershell
-dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.5.0
+dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.5.3
 ```
 
 pnpm records that exemption in the profile's `pnpm-workspace.yaml`
@@ -388,8 +388,8 @@ the suspended-AudioContext revival on a user gesture, and disposal.
 * **A freshly published version will not install.** pnpm 11 defaults
   `minimumReleaseAge` to 1440 minutes (one day), so a release younger than that
   is not resolvable: `dsh plugin … add @hawkongz/dsh-task-reminder` prints
-  `… 1.4.6 (1.5.0 is available)` and installs the previous version. Pin the
-  release (`… add @hawkongz/dsh-task-reminder@1.5.0`), set
+  `… 1.5.1 (1.5.3 is available)` and installs the previous version. Pin the
+  release (`… add @hawkongz/dsh-task-reminder@1.5.3`), set
   `minimumReleaseAge: 0` in the profile's `pnpm-workspace.yaml`, or wait a day.
 * **Code changes have no effect.** The host reads client plugins only at
   process start and the browser caches the old bundle. Restart `dsh web`,
@@ -435,7 +435,7 @@ the suspended-AudioContext revival on a user gesture, and disposal.
 * **DSH Desktop: the toast opens the session but the window stays minimized.**
   Raising the window is host-half work added in 1.4.4, and the host reads
   plugins only at process start — a running app still holds the old `index.js`.
-  Check the profile shows 1.4.4
+  Check the profile shows 1.5.3 or newer (1.4.4 is the minimum that has the route)
   (`dsh --profile desktop --dump-config | Select-String task-reminder`), then
   quit the app completely and open it again. A missing route is silent by
   design: the session still opens, only the window is not raised.
