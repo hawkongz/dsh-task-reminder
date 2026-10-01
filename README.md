@@ -434,6 +434,20 @@ the suspended-AudioContext revival on a user gesture, and disposal.
   4. Ten-second isolation test — run `new Notification('DSH test', { body: 'can
      you see me' })` in the page console. If that toast is invisible too, the
      suppression is on the Windows/browser side and no plugin code can fix it.
+* **Watching video or playing a game fullscreen? No banner, and leaving
+  fullscreen does not bring it back.** That is Windows, and there is a switch:
+  Windows hides toast banners while a fullscreen app is in the foreground —
+  **priority notifications included** — so the reminder only lands in the
+  notification center (`Win + N`), and a suppressed banner is never replayed
+  when you exit fullscreen. The switch is Settings → System → Notifications →
+  **Do not disturb** → *"When using an app in fullscreen mode (priority
+  banners are hidden too)"*: turn it off and banners appear over the
+  fullscreen window. Verified on Windows 11 (build 26200): with the switch on,
+  the fullscreen rule is bound to the *Alarms only* profile, which silences
+  even the apps you put on the priority list; with it off the binding is gone
+  and the toast shows. The plugin cannot work around this — a Web
+  Notification has no way to bypass Do not disturb — but the chime keeps
+  sounding, and the toast is waiting in the notification center.
 * **The chime is silent.** The volume may be `0`, the browser tab may be muted,
   or the autoplay policy keeps the AudioContext suspended until your first
   interaction — click or type anywhere in the page once, then it plays.
