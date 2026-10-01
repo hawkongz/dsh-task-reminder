@@ -48,7 +48,10 @@
  *    停止的重复边沿（分类在途时列表陈旧回放）由在途守卫与完成→完成
  *    去重双兜底，只报一次。
  *    询问（pendingInteraction 出现边沿）单独弹「等待你的回答」；回答后
- *    紧随的那次完成不报（一次交互一次提醒）。
+ *    紧随的那次完成不报（一次交互一次提醒）——但这个豁免有 45 秒窗口，
+ *    且会话再次跑起来（任一通道的 running 位转 true）立刻作废：回答之后
+ *    Agent 又接着干活的那些回合，结束照常提醒（否则一次提问会把整轮完成
+ *    静音 —— 1.5.2 修的就是这个）。
  * 4. 「窗口是否在前台」只看两个信号：标签页可见（document.hidden === false）
  *    且窗口有焦点（document.hasFocus()）。切走标签页、窗口失焦（人在别的
  *    应用里）都算非前台；拿不到这两个信号时按「在前台」处理（宁可少弹，
@@ -110,7 +113,7 @@ window.__ModuleLoader__.load({
 		 * 版本号，随排障钩子暴露。必须与 package.json 的 version 一致：
 		 * 自检里有一条断言直接比这两处，版本漂了就会红。
 		 */
-		const PLUGIN_VERSION = '1.5.1';
+		const PLUGIN_VERSION = '1.5.2';
 
 		/** 六个可配置项的本地持久化键（createSnapshotStore 的 persist.name）。 */
 		const NOTIFY_PERSIST_KEY = 'dsh.task-reminder.notify';
@@ -240,6 +243,13 @@ window.__ModuleLoader__.load({
 		const NOTIFICATION_TAG = 'dsh-task-reminder';
 		/** 「已经替用户申请过通知权限」的记账键（localStorage）：只问一次。 */
 		const PERMISSION_ASKED_KEY = 'dsh.task-reminder.permission-asked';
+		/**
+		 * 询问回答后的完成豁免窗口（见 apply 里的 questionGrace + 文件头要点 3）：
+		 * 只豁免「回答完紧随」的那次完成。回答之后 Agent 常常还要跑几分钟，
+		 * 那时候的回合结束是一次新的停止，必须照常提醒 —— 窗口太短只会多弹
+		 * 一条（用户就坐在屏幕前），太长就会把真正的完成静音。
+		 */
+		const QUESTION_GRACE_MS = 45000;
 
 		/**
 		 * 「点弹窗回到底部」用的定位参数（见文件头要点 8）。DSH 没有对外暴露滚动
@@ -1335,8 +1345,11 @@ window.__ModuleLoader__.load({
 			const CLASSIFY_RETRIES = 3;
 			const CLASSIFY_RETRY_MS = 120;
 			const recentReports = new Map(); // sessionId → { kind, notification, at, cancel }
-			// 一次性 grace：询问回答后紧随的那次完成不报（一次交互一次提醒）。
-			const questionGrace = new Set(); // sessionId
+			// 询问回答后的完成豁免：一次交互一次提醒 —— 回答完紧接着的那次完成
+			// 不弹（用户刚在屏幕前点完）。它有 45 秒窗口，且会话再次跑起来
+			// （任一通道 running 位转 true）立刻作废：回答后 Agent 接着干活的
+			// 回合结束必须照常提醒（1.5.2 修的就是「豁免挂太久把完成静音」）。
+			const questionGrace = new Map(); // sessionId → 豁免截止时刻（ms）
 			// 同一次停止的分类在途标记（token）：分类是异步的（RPC 读持久日志），
 			// 窗口期内列表陈旧回放把边沿表冲回 true 再翻 false 会产生第二次边沿，
 			// 此时直接忽略——同一次停止只走一次分类。
@@ -1618,7 +1631,31 @@ window.__ModuleLoader__.load({
 			const noteRunning = (sessionId, running) => {
 				const wasRunning = runningSessions.get(sessionId) === true;
 				runningSessions.set(sessionId, running === true);
+				// 又跑起来了 = 上一轮交互之后的「紧随完成」豁免作废。三条通道都要
+				// 作废：1.5.1 只在转发事件那条通道里清，桌面端 0 条转发事件时豁免
+				// 会一直挂到会话结束，把真正的回合完成静音（1.5.2 修的就是这里）。
+				if (running === true) questionGrace.delete(sessionId);
 				return running !== true && wasRunning;
+			};
+
+			/**
+			 * 记一次「询问已回答」：开启一小段完成豁免窗口（见 QUESTION_GRACE_MS）。
+			 * @param sessionId - 会话 id。
+			 */
+			const markQuestionSettled = (sessionId) => {
+				questionGrace.set(sessionId, Date.now() + QUESTION_GRACE_MS);
+			};
+
+			/**
+			 * 取用该会话的完成豁免：窗口外的（Agent 回答后又干了一会儿活）不算，
+			 * 顺带把条目删掉（一次交互只豁免一次）。
+			 * @param sessionId - 会话 id。
+			 * @returns 这次完成是否该被豁免。
+			 */
+			const takeQuestionGrace = (sessionId) => {
+				const deadline = questionGrace.get(sessionId);
+				questionGrace.delete(sessionId);
+				return typeof deadline === 'number' && Date.now() < deadline;
 			};
 
 			/**
@@ -1754,7 +1791,7 @@ window.__ModuleLoader__.load({
 				if (!shouldRemindFor(sessionId)) return; // 子智能体（默认关）：整条流程不参与
 				if (pendingQuestions.has(sessionId)) return; // 询问待答：那次停止由询问弹窗负责
 				if (completing.has(sessionId)) return; // 同一次停止的分类已在途（重复边沿）
-				const grace = questionGrace.delete(sessionId);
+				const grace = takeQuestionGrace(sessionId);
 				let settled = false;
 				const token = {};
 				completing.set(sessionId, token);
@@ -1856,7 +1893,7 @@ window.__ModuleLoader__.load({
 					if (pending === undefined || pending === null) {
 						// 这一轮挂起消散（用户已回答 / 交互关闭）：紧随的那次完成
 						// 不报——一次交互一次提醒。
-						if (pendingQuestions.delete(sessionId)) questionGrace.add(sessionId);
+						if (pendingQuestions.delete(sessionId)) markQuestionSettled(sessionId);
 						continue;
 					}
 					if (pendingQuestions.has(sessionId)) continue; // 已提醒过这一轮
@@ -2089,6 +2126,7 @@ window.__ModuleLoader__.load({
 				NOTIFICATION_TAG,
 				NS,
 				PLUGIN_VERSION,
+				QUESTION_GRACE_MS,
 				RETURN_TO_BOTTOM_CLASS_HINT,
 				RETURN_TO_BOTTOM_LABEL_KEY,
 				RETURN_TO_BOTTOM_LABEL_NS,

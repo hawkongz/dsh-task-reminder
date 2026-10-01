@@ -339,6 +339,7 @@ const {
 	NOTIFICATION_TAG,
 	NS,
 	PLUGIN_VERSION,
+	QUESTION_GRACE_MS,
 	RETURN_TO_BOTTOM_CLASS_HINT,
 	RETURN_TO_BOTTOM_LABEL_KEY,
 	RETURN_TO_BOTTOM_LABEL_NS,
@@ -1134,7 +1135,8 @@ statusListener('s2', false);
 await tick();
 check('询问待答时到达的停止边沿不报完成', notificationLog.created.length === 0 && audioLog.oscillators.length === 0, `${notificationLog.created.length} / ${audioLog.oscillators.length}`);
 
-// ⑫ 回答后紧随的完成不报（一次交互一次提醒）；grace 消费后下一次照报。
+// ⑫ 回答后紧随的完成不报（一次交互一次提醒）；豁免有界 + 会话再跑起来即作废。
+check('完成豁免窗口有界（不会把整轮完成静音）', QUESTION_GRACE_MS > 0 && QUESTION_GRACE_MS <= 120000, String(QUESTION_GRACE_MS));
 statusListener('s2', true);
 setPendingInteraction('s2', null);
 resetNotificationLog();
@@ -1147,6 +1149,43 @@ resetAudioLog();
 completeOnce();
 await tick();
 check('grace 消费后：下一次完成照常报', notificationLog.created.length === 1, String(notificationLog.created.length));
+
+// ⑫-b 回答完 Agent 又干了一会儿活（超过豁免窗口）：回合结束照报。
+// 1.5.1 的静音 bug：豁免只由「转发事件」那条通道清理，桌面端收不到转发
+// 事件时它会一直挂到会话结束，把真正的回合完成吞掉。
+resetNotificationLog();
+resetAudioLog();
+setPendingInteraction('s2', { sessionId: 's2', kind: 'question', key: 'question:grace-window', questions: [{ id: 'q1', question: '继续吗？' }] });
+resetNotificationLog(); // 上面这条提问自己会弹「等待你的回答」，不计入本节断言
+resetAudioLog();
+setPendingInteraction('s2', null); // 回答 → 开启豁免窗口
+const realDateNow = Date.now;
+try {
+	Date.now = () => realDateNow() + QUESTION_GRACE_MS + 1000; // 快进过窗口
+	statusListener('s2', false);
+	await tick();
+} finally {
+	Date.now = realDateNow;
+}
+check('回答后超过豁免窗口的完成照报', notificationLog.created.length === 1, String(notificationLog.created.length));
+// 快进期间记下的对账票据带着未来时间戳：用一次 running=true 把它清掉，
+// 免得后面的用例被去重窗口挡住。
+statusListener('s2', true);
+resetNotificationLog();
+resetAudioLog();
+
+// ⑫-c 回答后（会话仍算在跑）又观测到 running=true：豁免立刻作废 → 本轮结束提醒。
+// 桌面端 0 条转发事件，第三通道（sessionStatus）的持续观测就是作废时机。
+resetNotificationLog();
+resetAudioLog();
+setPendingInteraction('s2', { sessionId: 's2', kind: 'question', key: 'question:grace-resume', questions: [{ id: 'q1', question: '还继续吗？' }] });
+resetNotificationLog();
+resetAudioLog();
+setPendingInteraction('s2', null); // 回答 → 开启豁免窗口（running 一直为 true）
+setStatusRunning('s2', true);      // 会话又跑起来（第三通道看到 running=true）→ 豁免作废
+statusListener('s2', false);       // 这一轮结束 → 必须提醒
+await tick();
+check('会话再跑起来后豁免作废：本轮完成照报', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '对话任务已完成', JSON.stringify(notificationLog.created.map((item) => item.title)));
 
 // ⑬ 同一会话的待答不重复提醒；回答后（interaction 消失）再次挂起才再提醒。
 resetNotificationLog();
