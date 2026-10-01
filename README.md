@@ -87,9 +87,21 @@ answer 501.
   lands — pressing Stop is never misreported as a completion. The chime and
   the toast go out together in the same pass. If classification is
   unavailable, the completion toast goes out at once and a same-stop error
-  arriving within 5 s retracts it — error first, one reminder per stop. A
-  repeated edge while classification is in flight (a stale list replay) is
-  held back by the in-flight guard and the completion→completion dedupe.
+  arriving within 5 s retracts it — error first, one reminder per stop.
+  "The same stop" is decided by **turn number**, not by a clock: the
+  classification also returns the `turn/end`'s `data.turn` and each session
+  remembers the last turn it settled, so a repeated edge for that turn (a
+  duplicate channel, a stale list replay) is dropped deterministically, while
+  a *new* turn that completes within 5 s of the previous stop still reminds
+  you — the old time window alone muted exactly that case on DSH Desktop,
+  where the host-forwarded event channel is sparse and nothing clears the
+  last ticket. The 5 s window is kept only for the error-first directions
+  (`error → completion` suppressed, `completion → error` retraction) and as
+  the fallback when no turn number can be read (`api-session/error` carries
+  none, and neither does a stop the fallback path had to report on its own —
+  a replay of that stop is still window-guarded on purpose: missing a new turn
+  inside those 5 s is the cheaper mistake than a duplicate toast). A repeated edge while classification is in flight is held back by
+  the in-flight guard and the turn-number check.
   Two timing modes — **Always** (every stop) or **Only when unfocused**
   (tab switched away or window unfocused) — pick one on the settings page. The
   browser asks for notification permission once on the first load — the
@@ -130,8 +142,9 @@ answer 501.
   source as the sidebar's running light — the reliable path when a forked
   session's list projection is stale) share one edge table, so one completion
   never fires twice; a repeated edge while classification is in flight is
-  additionally held back by the in-flight guard and the completion→completion
-  dedupe.
+  additionally held back by the in-flight guard and, once classified, by the
+  turn-number check (the same turn is never reported twice, and a new turn is
+  never mistaken for a duplicate).
 * **All values persist in browser local storage** and survive restarts, so the
   host half needs no settings namespace.
 
@@ -364,7 +377,12 @@ the module identity, the wiring, the edge detection, the three deduplication
 channels with repeated-edge suppression, the two toast timing modes, the
 three stop reasons (completion, pending question, error) with the turn/end
 classification (including the unclosed-turn retry that keeps a cancel from
-being misreported) and late-error retraction for one stop, the chime
+being misreported), the turn-number deduplication (a repeated edge for one
+turn reports once even after the 5 s window expired or a stale replay cleared
+the ticket, a new turn completing within 5 s still reports, and a same-turn
+error and completion never each report), late-error retraction for one stop,
+and an adversarial edge storm that must produce exactly one toast per turn,
+the chime
 sounding on every stop regardless of window state, the subagent filter (silent
 for all three stop reasons while the switch is off, all three back when it is
 on, forked sessions unaffected), the seven settings'

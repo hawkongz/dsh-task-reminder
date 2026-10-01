@@ -44,9 +44,18 @@
  *    最新回合还没闭合（start 比 end 新）说明手里是上一个回合的 turn/end，
  *    当次读不到、重试等它落盘——否则点停止会误报「完成」。分类读不到才
  *    退回完成弹窗，此时 5 秒内后到的 api-session/error 撤回完成弹窗只留
- *    错误（错误优先，不重复响音）；后到的同类报告也按窗口去重。同一次
- *    停止的重复边沿（分类在途时列表陈旧回放）由在途守卫与完成→完成
- *    去重双兜底，只报一次。
+ *    错误（错误优先，不重复响音）。
+ *    「同一次停止」的判据是**回合号**（1.5.4）：分类把 turn/end 的
+ *    `data.turn` 一并带出，与每个会话记下的「最近一次结清的回合号」相等
+ *    就丢掉——确定性去重，不再看 5 秒窗口。5 秒窗口只留给「错误优先」
+ *    两个方向（error→completion 不报、completion→error 撤回）和读不到
+ *    回合号时的兜底：api-session/error 事件本身不带回合号，只能靠时间窗
+ *    加语义。同一次停止的重复边沿（分类在途时列表陈旧回放）由在途守卫与
+ *    回合号判据双兜底，只报一次；新回合在上一轮停止 5 秒内完成照报
+ *    （桌面端通道一稀疏、上一轮的完成票据没人清，用 5 秒窗口会把新回合
+ *    整条吞掉——1.5.4 修的就是这个）。兜底报的停止没有回合号可记，它的
+ *    重复边沿仍只能靠这 5 秒窗口：这是有意保守的一侧——宁可漏掉「兜底
+ *    报告之后 5 秒内的新回合」，也不为它冒重复弹窗的风险。
  *    询问（pendingInteraction 出现边沿）单独弹「等待你的回答」；回答后
  *    紧随的那次完成不报（一次交互一次提醒）——但这个豁免有 45 秒窗口，
  *    且会话再次跑起来（任一通道的 running 位转 true）立刻作废：回答之后
@@ -113,7 +122,7 @@ window.__ModuleLoader__.load({
 		 * 版本号，随排障钩子暴露。必须与 package.json 的 version 一致：
 		 * 自检里有一条断言直接比这两处，版本漂了就会红。
 		 */
-		const PLUGIN_VERSION = '1.5.3';
+		const PLUGIN_VERSION = '1.5.4';
 
 		/** 六个可配置项的本地持久化键（createSnapshotStore 的 persist.name）。 */
 		const NOTIFY_PERSIST_KEY = 'dsh.task-reminder.notify';
@@ -250,6 +259,14 @@ window.__ModuleLoader__.load({
 		 * 一条（用户就坐在屏幕前），太长就会把真正的完成静音。
 		 */
 		const QUESTION_GRACE_MS = 45000;
+		/**
+		 * 对账窗口（见 apply 里的 recentReports + 文件头要点 3）：只留给
+		 * 「错误优先」两个方向（error→completion 不报、completion→error 撤回）
+		 * 与读不到回合号时的完成→完成兜底 —— api-session/error 事件本身不带
+		 * 回合号，只能靠时间窗加语义。「同一次停止」的完成→完成去重已改由
+		 * 回合号判据（lastReportedTurn）接管，不再受这个窗口影响。
+		 */
+		const REPORT_GRACE_MS = 5000;
 
 		/**
 		 * 「点弹窗回到底部」用的定位参数（见文件头要点 8）。DSH 没有对外暴露滚动
@@ -1337,14 +1354,28 @@ window.__ModuleLoader__.load({
 			// turn/end 的 reason 分类（completed / max-tokens → 完成，error →
 			// 错误且不出现完成弹窗，aborted / blocked / interrupted → 不报）。
 			// 分类读不到时退回完成弹窗，用对账窗口兜底：5 秒内后到的
-			// api-session/error 撤回完成弹窗只留错误、不重响提示音。
-			const REPORT_GRACE_MS = 5000;
+			// api-session/error 撤回完成弹窗只留错误、不重响提示音；读不到
+			// 回合号的完成→完成重复边沿也退回这张窗口去重（无号边沿不能变得
+			// 可重复），有回合号的完成→完成去重见 lastReportedTurn。
 			// 分类时限放宽到 700ms、重试加到 3 次：turn/end 落盘不在回合边界
 			// 同步 flush，取消（aborted）的 turn/end 常要再等一两拍才读得到。
 			const CLASSIFY_TIMEOUT_MS = 700;
 			const CLASSIFY_RETRIES = 3;
 			const CLASSIFY_RETRY_MS = 120;
-			const recentReports = new Map(); // sessionId → { kind, notification, at, cancel }
+			const recentReports = new Map(); // sessionId → { kind, notification, at, turn, cancel }
+			// 每个会话「最近一次结清的停止边沿」所属回合号：
+			//   分类读得 turn/end 的 data.turn 且与这里相等 → 同一次停止（通道重复 /
+			//   列表陈旧回放），确定性丢掉，不再靠 5 秒窗口 —— 桌面端通道一稀疏，
+			//   5 秒窗口会把「上一轮刚停 → 新任务开始 → 5 秒内又完成」的新回合
+			//   当成重复边沿整条吞掉（1.5.4 修的就是这个）。
+			//   有意不报的停止（aborted / blocked / interrupted、询问豁免）也记：
+			//   它们同样只该处理一次，否则重复边沿会当成一次新停止再弹一条。
+			//   读不到回合号的停止（兜底路径）没有号可记，它的重复边沿仍只由
+			//   5 秒窗口兜着；同一会话的回合号假定单调递增（官方按 turn+1 记账），
+			//   号真重复时那次停止会被永久当成已结清——不比误双弹更坏。
+			//   不做清理：判据就是这个号，清掉等于把重复弹窗放回来；每条一个数字，
+			//   没有定时器也没有别的资源，会话再多的量级也可以忽略。
+			const lastReportedTurn = new Map(); // sessionId → turn
 			// 询问回答后的完成豁免：一次交互一次提醒 —— 回答完紧接着的那次完成
 			// 不弹（用户刚在屏幕前点完）。它有 45 秒窗口，且会话再次跑起来
 			// （任一通道 running 位转 true）立刻作废：回答后 Agent 接着干活的
@@ -1659,21 +1690,23 @@ window.__ModuleLoader__.load({
 			};
 
 			/**
-			 * 读会话持久日志最后一条 turn/end 的原因。turn/end 落盘不在回合
-			 * 边界同步 flush，RPC 读存储会强制 flush；读不到就重试几次，
+			 * 读会话持久日志最后一条 turn/end 的原因与所属回合号。turn/end 落盘
+			 * 不在回合边界同步 flush，RPC 读存储会强制 flush；读不到就重试几次，
 			 * 仍读不到返回 null（调用方走兜底）。
 			 * 同时取最后一条 `turn/start`：最新回合还没闭合（start 比 end 新）时，
 			 * 最后一条 turn/end 属于上一个回合（停止场景常是上一个回合的
 			 * completed）——此时当次读不到，交给重试等本次回合的 turn/end 落盘，
 			 * 避免把取消误报成「完成」。
+			 * 回合号（`turn/end` 的 data.turn）一并带出：调用方用它做「同一次停止」
+			 * 的确定性去重；老日志没有号时 turn 为 null，调用方退回 5 秒窗口。
 			 * @param sessionId - 会话 id。
-			 * @returns turn/end 的 reason，或 null。
+			 * @returns `{ reason, turn }`（turn 读不到号时为 null），或 null。
 			 */
 			const readTurnEndReason = async (sessionId) => {
 				for (let attempt = 0; ; attempt += 1) {
-					let reason = null;
+					let classified = null;
 					try {
-						reason = await ctx.sessions.using(sessionId, { source: 'task-reminder' }, async (reference) => {
+						classified = await ctx.sessions.using(sessionId, { source: 'task-reminder' }, async (reference) => {
 							const binding = await reference.ready;
 							const entries = binding.eventSource.getSnapshot().entries ?? [];
 							let lastEnd = null; // 最后一条 turn/end
@@ -1690,12 +1723,14 @@ window.__ModuleLoader__.load({
 							const endTurn = lastEnd.data?.turn;
 							const startTurn = lastStart?.data?.turn;
 							if (typeof endTurn === 'number' && typeof startTurn === 'number' && endTurn < startTurn) return null;
-							return lastEnd.data?.reason ?? null;
+							const reason = lastEnd.data?.reason;
+							if (reason === null || reason === undefined) return null;
+							return { reason, turn: typeof endTurn === 'number' ? endTurn : null };
 						});
 					} catch {
 						// retain / open 失败（会话不在册、Host 侧拒绝等）：当次读不到。
 					}
-					if (reason !== null && reason !== undefined) return reason;
+					if (classified !== null && classified !== undefined) return classified;
 					if (attempt >= CLASSIFY_RETRIES) return null;
 					await new Promise((resolve) => { setTimeout(resolve, CLASSIFY_RETRY_MS); });
 				}
@@ -1710,9 +1745,10 @@ window.__ModuleLoader__.load({
 			 * @param sessionId - 会话 id。
 			 * @param kind - 'completion' | 'error'。
 			 * @param notification - 实际发出的通知（被开关挡下时为 null）。
+			 * @param turn - 这次报告所属的回合号（读不到号时为 null）。
 			 */
-			const trackReport = (sessionId, kind, notification) => {
-				const entry = { kind, notification, at: Date.now(), cancel: null };
+			const trackReport = (sessionId, kind, notification, turn) => {
+				const entry = { kind, notification, at: Date.now(), turn: typeof turn === 'number' ? turn : null, cancel: null };
 				recentReports.set(sessionId, entry);
 				// 排障轨迹：最近几条停止报告（复现双弹时看 sessionId 是否相同）。
 				stats.recentStops.push({ kind, sessionId, at: entry.at });
@@ -1732,12 +1768,22 @@ window.__ModuleLoader__.load({
 				return entry;
 			};
 
-			/** 报一次完成：提示音 + 弹窗（均受各自开关门控），记入对账窗口。 */
-			const reportCompletion = (sessionId, source) => {
+			/**
+			 * 报一次完成：提示音 + 弹窗（均受各自开关门控），记入对账窗口。
+			 * @param sessionId - 会话 id。
+			 * @param source - 触发来源（event / list / status），仅用于排障。
+			 * @param turn - 这次停止所属的回合号（兜底路径读不到时为 null/undefined）。
+			 */
+			const reportCompletion = (sessionId, source, turn) => {
+				const knownTurn = typeof turn === 'number' ? turn : null;
 				const prior = freshReport(sessionId);
-				if (prior?.kind === 'error') return; // 本停止已按错误报过
-				if (prior?.kind === 'completion') {
-					// 同一次停止的重复边沿（通道重复触发 / 列表陈旧回放）：只报一次。
+				if (prior?.kind === 'error') return; // 本停止已按错误报过（错误优先，不区分回合号）
+				// 完成→完成去重：只挡「这次读不到回合号 / 票据读不到回合号 / 两边同号」
+				// 的重复。票据与本次是两个不同的回合号＝新回合，照报——桌面端通道一
+				// 稀疏，上一轮的完成票据没人清，用 5 秒窗口会把 5 秒内的新回合吞掉
+				// （1.5.4 修的就是这个）；同号重复边沿已由 complete() 的回合号判据
+				// 挡在更前面，这里只是无号边沿的兜底。
+				if (prior?.kind === 'completion' && (knownTurn === null || prior.turn === null || prior.turn === knownTurn)) {
 					stats.stopDuplicates += 1;
 					return;
 				}
@@ -1747,7 +1793,7 @@ window.__ModuleLoader__.load({
 				// 票据与「弹窗发不发得出去」无关：门控关掉时也要记，否则同一次停止晚到
 				// 的错误会被当成一次新停止、再响一声（关掉弹窗 / 仅非前台时会双响）。
 				const canNotify = shouldNotify();
-				trackReport(sessionId, 'completion', canNotify ? notify(t('toast.completed.title'), titleOf(ctx, sessionId), sessionId) : null);
+				trackReport(sessionId, 'completion', canNotify ? notify(t('toast.completed.title'), titleOf(ctx, sessionId), sessionId) : null, knownTurn);
 			};
 
 			/**
@@ -1784,6 +1830,9 @@ window.__ModuleLoader__.load({
 			 * 紧随的那次完成不报（一次交互一次提醒）。
 			 * 分类是异步的：在途期间（completing 里有本会话的 token）到达的重复
 			 * 边沿直接忽略——同一次停止只走一次分类、只报一次。
+			 * 「同一次停止」的判据是回合号（1.5.4）：分类读得的 turn 与
+			 * lastReportedTurn 相等就丢掉，不再靠 5 秒窗口——时间窗会把「上一轮
+			 * 刚停、新任务开始、5 秒内又完成」的新回合当成重复边沿整条吞掉。
 			 * @param sessionId - 会话 id。
 			 * @param source - 触发来源（event / list / status），仅用于排障。
 			 */
@@ -1799,14 +1848,27 @@ window.__ModuleLoader__.load({
 					if (settled) return;
 					settled = true;
 					if (completing.get(sessionId) === token) completing.delete(sessionId);
-					reportCompletion(sessionId, source); // 兜底：读不到原因就按完成报
+					reportCompletion(sessionId, source); // 兜底：读不到原因（也就读不到回合号）→ 退回 5 秒完成→完成去重
 				}, CLASSIFY_TIMEOUT_MS);
 				void (async () => {
 					try {
-						const reason = await readTurnEndReason(sessionId);
+						const classified = await readTurnEndReason(sessionId);
+						// 兜底已经按完成报过：这次分类的结果不再补报，也不补记回合号
+						// （此刻日志可能又往前走了，补记会把下一个回合误当成已结清）。
 						if (settled) return;
 						settled = true;
 						fallbackCancel();
+						const reason = classified?.reason ?? null;
+						const turn = typeof classified?.turn === 'number' ? classified.turn : null;
+						if (turn !== null && lastReportedTurn.get(sessionId) === turn) {
+							// 同一个回合＝同一次停止（通道重复触发 / 列表陈旧回放）：
+							// 确定性丢掉，和 5 秒窗口无关。
+							stats.stopDuplicates += 1;
+							return;
+						}
+						// 这次停止边沿到此结清：报过的、按分类有意不报的（取消 / 询问已报 /
+						// 崩溃孤儿 / 询问豁免）都记下回合号，重复边沿不会再弹第二条。
+						if (turn !== null) lastReportedTurn.set(sessionId, turn);
 						if (reason?.kind === 'error') {
 							const failure = reason.error;
 							reportError(sessionId, typeof failure?.message === 'string' ? failure.message : '');
@@ -1815,7 +1877,7 @@ window.__ModuleLoader__.load({
 						// aborted（取消）/ blocked（询问已报）/ interrupted（崩溃孤儿）：不报。
 						if (reason?.kind === 'aborted' || reason?.kind === 'blocked' || reason?.kind === 'interrupted') return;
 						// completed / max-tokens / 读不到：按完成报（grace 期内不报）。
-						if (!grace) reportCompletion(sessionId, source);
+						if (!grace) reportCompletion(sessionId, source, turn);
 					} finally {
 						if (completing.get(sessionId) === token) completing.delete(sessionId);
 					}
@@ -2007,7 +2069,8 @@ window.__ModuleLoader__.load({
 				});
 				return () => { cancelled = true; };
 			}, 'dsh-task-reminder: custom sound restore');
-			// 回收对账票据与它们的遗忘定时器、grace 标记（卸载时不再有延迟回调落地）。
+			// 回收对账票据与它们的遗忘定时器、grace 标记、结清回合号（卸载时不再有
+			// 延迟回调落地）。
 			ctx.effect(() => () => {
 				for (const entry of recentReports.values()) {
 					if (entry.cancel !== null) entry.cancel();
@@ -2015,6 +2078,7 @@ window.__ModuleLoader__.load({
 				recentReports.clear();
 				questionGrace.clear();
 				completing.clear();
+				lastReportedTurn.clear();
 			}, 'dsh-task-reminder: report reconciliation');
 
 			// 独立设置页：设置面板左侧导航里的「任务提醒」（order 避开 chat-locator 41）。
@@ -2069,6 +2133,9 @@ window.__ModuleLoader__.load({
 					notificationPermission: permissionStore.getSnapshot(),
 					notificationSupported: notifier.supported,
 					running: [...runningSessions.entries()],
+					// 每个会话已结清的停止回合号（1.5.4 的确定性去重账本）：探针看这里
+					// 就知道某次完成被当成重复边沿丢掉时，挡下它的是不是同一个回合。
+					lastReportedTurn: [...lastReportedTurn.entries()],
 					stats: { ...stats },
 				}),
 			};
@@ -2127,6 +2194,7 @@ window.__ModuleLoader__.load({
 				NS,
 				PLUGIN_VERSION,
 				QUESTION_GRACE_MS,
+				REPORT_GRACE_MS,
 				RETURN_TO_BOTTOM_CLASS_HINT,
 				RETURN_TO_BOTTOM_LABEL_KEY,
 				RETURN_TO_BOTTOM_LABEL_NS,

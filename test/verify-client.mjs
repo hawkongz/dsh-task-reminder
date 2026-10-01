@@ -340,6 +340,7 @@ const {
 	NS,
 	PLUGIN_VERSION,
 	QUESTION_GRACE_MS,
+	REPORT_GRACE_MS,
 	RETURN_TO_BOTTOM_CLASS_HINT,
 	RETURN_TO_BOTTOM_LABEL_KEY,
 	RETURN_TO_BOTTOM_LABEL_NS,
@@ -490,6 +491,7 @@ const fireList = () => {
 	for (const listener of [...listListeners]) listener();
 };
 const setRunning = (id, running) => {
+	if (running === true) nextTurn(); // running=true 的观测 = 新回合开始（见 fakeTurn 注释）
 	hostList.byId = { ...hostList.byId, [id]: { ...hostList.byId[id], running } };
 	fireList();
 };
@@ -505,8 +507,18 @@ let fakeTurnEndReason = { kind: 'completed' };
 let fakeUsingThrows = false;
 let fakeEventEntries = null;
 let fakeUsingGate = null;
+/**
+ * 合成持久日志里「最新回合」的回合号（1.5.4 起停止去重按回合号判「同一次停止」）。
+ * 凡是代表「会话开始了一个新回合」的测试动作，这里就 +1：
+ *   - 任一通道观测到 running=true（转发事件 / 列表 / sessionStatus 快照）；
+ *   - 用户回答了问题（pendingInteraction 消失 = Agent 接着干活的新回合）。
+ * 要演练「同一次停止的重复边沿」时不要把号往前推：直接调 rawStatusListener 制造
+ * 假的 true→false，或用 fakeEventEntries 把这个窗口钉在固定的回合号上。
+ */
+let fakeTurn = 1;
+const nextTurn = () => { fakeTurn += 1; };
 const fakeEventWindow = () => ({
-	entries: fakeEventEntries ?? [{ type: 'event', event: { type: 'turn/end', seq: 1, time: 1, data: { turn: 1, reason: fakeTurnEndReason } } }],
+	entries: fakeEventEntries ?? [{ type: 'event', event: { type: 'turn/end', seq: 1, time: 1, data: { turn: fakeTurn, reason: fakeTurnEndReason } } }],
 });
 
 const sessionsStub = {
@@ -539,14 +551,19 @@ const uiSessionStub = {
 };
 /** 改某个会话的 pendingInteraction 并通知订阅者（null = 已回答，条目仍在、值为空）。 */
 const setPendingInteraction = (sessionId, interaction) => {
+	const previous = sessionStatusMap.get(sessionId);
 	const next = new Map(sessionStatusMap);
-	if (interaction === null || interaction === undefined) next.set(sessionId, { running: next.get(sessionId)?.running ?? false, pendingInteraction: undefined, completionUnread: false });
-	else next.set(sessionId, { running: true, pendingInteraction: interaction, completionUnread: false });
+	if (interaction === null || interaction === undefined) {
+		// 回答 / 交互关闭 = 用户放行，Agent 接着干活的那个新回合开始（回合号 +1）。
+		nextTurn();
+		next.set(sessionId, { running: previous?.running ?? false, pendingInteraction: undefined, completionUnread: false });
+	} else next.set(sessionId, { running: true, pendingInteraction: interaction, completionUnread: false });
 	sessionStatusMap = next;
 	for (const listener of [...statusSubscribers]) listener();
 };
 /** 只改某个会话的 running 位并通知订阅者（第三完成通道专用，不动 pendingInteraction）。 */
 const setStatusRunning = (sessionId, running) => {
+	if (running === true) nextTurn(); // running=true 的观测 = 新回合开始（见 fakeTurn 注释）
 	const next = new Map(sessionStatusMap);
 	next.set(sessionId, { running: running === true, pendingInteraction: next.get(sessionId)?.pendingInteraction, completionUnread: false });
 	sessionStatusMap = next;
@@ -708,7 +725,16 @@ check('第一次用户手势只做 resume/兜底，不再建 context、不再加
 // 完成事件驱动：边沿、两条通道、去重、两种弹窗时机
 // ---------------------------------------------------------------------------
 
-const statusListener = listeners.find((entry) => entry.name === 'api-session/status').fn;
+/**
+ * 宿主转发事件 api-session/status 的插件回调。raw 版本原样转给插件（演练「同一次
+ * 停止的重复边沿」时用它制造假的 running=true→false，回合号不动）；statusListener
+ * 是常规入口：running=true 代表新回合开始，先把合成日志的回合号 +1 再转给插件。
+ */
+const rawStatusListener = listeners.find((entry) => entry.name === 'api-session/status').fn;
+const statusListener = (sessionId, running) => {
+	if (running === true) nextTurn();
+	rawStatusListener(sessionId, running);
+};
 const resetAudioLog = () => {
 	audioLog.oscillators.length = 0;
 	audioLog.gains.length = 0;
@@ -1117,6 +1143,43 @@ statusListener('s3', false);
 await tick();
 check('新 running 冲掉票据后：错误与完成各自播报', notificationLog.created.length === 2, JSON.stringify(notificationLog.created.map((item) => item.title)));
 
+// ---------------------------------------------------------------------------
+// 回合号判据（1.5.4）：同一个 turn 的重复停止边沿只报一条
+// ---------------------------------------------------------------------------
+
+console.log('');
+console.log('回合号判据（同一次停止）');
+
+const statsNow = () => windowStub.__dshTaskReminder.state().stats;
+
+// ⑨-b 把合成日志钉在固定回合号上（fakeEventEntries），先经事件通道报一次；再把
+//      5 秒对账窗口快进过期，用**列表通道**回放「假的 running=true → 再翻回 false」
+//      制造第二次边沿 —— 桌面端正是通道一稀疏、上一轮的完成票据没人清的情形，
+//      此时只有回合号判据挡得住（现行实现会再弹一条）。
+resetNotificationLog();
+resetAudioLog();
+hostList = { ids: [...hostList.ids, 's5'], byId: { ...hostList.byId, s5: { title: '第五个会话', displayTitle: '第五个会话', running: false } } };
+const dupBeforeTurn = statsNow().stopDuplicates;
+const completedBeforeTurn = statsNow().completed;
+fakeEventEntries = [{ type: 'event', event: { type: 'turn/end', seq: 1, time: 1, data: { turn: 501, reason: { kind: 'completed' } } } }];
+statusListener('s5', true);
+statusListener('s5', false); // 边沿 #1 → 分类读到回合 501 → 报一条
+await tick();
+check('回合号判据：第一次停止边沿照报一条', notificationLog.created.length === 1 && notificationLog.created[0]?.options?.body === '第五个会话', JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
+const realNowDup = Date.now;
+try {
+	Date.now = () => realNowDup() + REPORT_GRACE_MS + 1000; // 5 秒对账窗口已过期
+	setRunning('s5', true);  // 列表陈旧回放：假的 running=true（不清账本、不动日志）
+	setRunning('s5', false); // 边沿 #2 → 分类读到的还是回合 501
+	await tick();
+} finally {
+	Date.now = realNowDup;
+}
+check('回合号判据：同回合的第二次边沿不再报（5 秒窗口过期也挡得住）', notificationLog.created.length === 1, JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
+check('回合号判据：被丢掉的重复边沿记进 stats.stopDuplicates', statsNow().stopDuplicates === dupBeforeTurn + 1, `${statsNow().stopDuplicates} vs ${dupBeforeTurn + 1}`);
+check('回合号判据：同回合不重复计入 completed', statsNow().completed === completedBeforeTurn + 1, `${statsNow().completed} vs ${completedBeforeTurn + 1}`);
+fakeEventEntries = null;
+
 // ⑩ 等你回答：pendingInteraction 出现边沿（只读 sessionStatus，不碰应答链）。
 resetNotificationLog();
 resetAudioLog();
@@ -1209,6 +1272,171 @@ check('仅非前台窗口时：有焦点不弹待答窗', notificationLog.create
 check('被门控的待答记进 skippedFocused', windowStub.__dshTaskReminder.state().stats.skippedFocused === skippedBefore + 1, String(windowStub.__dshTaskReminder.state().stats.skippedFocused));
 face.setNotifyMode('always');
 setPendingInteraction('s3', null);
+
+// ---------------------------------------------------------------------------
+// 回合号判据（1.5.4）：新回合照报、错误优先保留、同回合的 error 与 completion 不各报
+// ---------------------------------------------------------------------------
+
+console.log('');
+console.log('回合号判据（新回合 / 错误优先 / 同回合两种原因）');
+
+// 本节新增几个专用会话（避开前面用例的账本残留）。s5 已在「同一次停止」那节登记。
+hostList = {
+	ids: [...hostList.ids, 's6', 's7', 's8', 's9'],
+	byId: {
+		...hostList.byId,
+		...Object.fromEntries([['s6', '第六个会话'], ['s7', '第七个会话'], ['s8', '第八个会话'], ['s9', '第九个会话']]
+			.map(([id, title]) => [id, { title, displayTitle: title, running: false }])),
+	},
+};
+
+// ⑮ 新回合在上一轮停止后 **5 秒内**完成 → 照报（本次回归点；现行实现按完成票据吞掉）。
+//    只用第三通道（sessionStatus 快照）启动新回合：桌面端通道一稀疏，账本里上一轮
+//    的完成票据没人清；时钟冻结，票据一定还在 5 秒窗口内。
+resetNotificationLog();
+resetAudioLog();
+const freshBeforeTurn = statsNow().completed;
+const realNowFresh = Date.now;
+const frozenNow = realNowFresh();
+try {
+	Date.now = () => frozenNow; // 冻结时钟：上一轮的完成票据不会自然过期
+	fakeEventEntries = [{ type: 'event', event: { type: 'turn/end', seq: 1, time: 1, data: { turn: 601, reason: { kind: 'completed' } } } }];
+	setStatusRunning('s6', true);
+	statusListener('s6', false); // 回合 601 完成 → 报一条
+	await tick();
+	// 紧接着的新回合（601 → 602），距上一次停止远不到 5 秒
+	fakeEventEntries = [{ type: 'event', event: { type: 'turn/end', seq: 2, time: 2, data: { turn: 602, reason: { kind: 'completed' } } } }];
+	setStatusRunning('s6', true); // 第三通道启动新回合：不清账本
+	statusListener('s6', false); // 回合 602 完成 → 必须照报
+	await tick();
+} finally {
+	Date.now = realNowFresh;
+}
+check('回合号判据：新回合在上一轮停止后 5 秒内完成照报（回归点）', notificationLog.created.length === 2 && notificationLog.created[1]?.options?.body === '第六个会话', JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
+check('回合号判据：两次完成都计入 completed（新回合没被当成重复边沿）', statsNow().completed === freshBeforeTurn + 2, `${statsNow().completed} vs ${freshBeforeTurn + 2}`);
+check('回合号判据：两次完成各响一次提示音', audioLog.oscillators.length === 4, String(audioLog.oscillators.length));
+fakeEventEntries = null;
+
+// ⑯ 错误优先（5 秒窗口保留给这个方向）：错误先报，随后 5 秒内到达的完成不报。
+//    用第三通道观测 running（不清账本），时钟冻结保证错误票据仍在窗口内。
+resetNotificationLog();
+resetAudioLog();
+const errorsBeforePriority = statsNow().errors;
+const completedBeforePriority = statsNow().completed;
+const realNowPriority = Date.now;
+const frozenPriority = realNowPriority();
+try {
+	Date.now = () => frozenPriority;
+	errorListener('s7', 'boom-first'); // 错误先到（api-session/error 不带回合号）
+	setStatusRunning('s7', true);      // 新回合开始（第三通道，不清账本）
+	statusListener('s7', false);       // 停止边沿 → 分类读到回合 701 completed
+	await tick();
+} finally {
+	Date.now = realNowPriority;
+}
+check('错误优先：错误先报（标题 / 网关原文正文）', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '任务出错已停止' && notificationLog.created[0]?.options?.body === 'boom-first', JSON.stringify(notificationLog.created.map((item) => [item.title, item.options?.body])));
+check('错误优先：5 秒内到达的完成不再报一条', statsNow().completed === completedBeforePriority && notificationLog.created.length === 1, `${statsNow().completed} vs ${completedBeforePriority}`);
+check('错误优先：这次停止只响一次提示音', audioLog.oscillators.length === 2, String(audioLog.oscillators.length));
+check('错误优先：错误计入 stats.errors', statsNow().errors === errorsBeforePriority + 1, `${statsNow().errors} vs ${errorsBeforePriority + 1}`);
+fakeEventEntries = null;
+
+// ⑰ 完成 → 错误：完成弹窗被撤回、只留错误、不重响提示音（回合号已知的完成路径）。
+resetNotificationLog();
+resetAudioLog();
+fakeEventEntries = [{ type: 'event', event: { type: 'turn/end', seq: 1, time: 1, data: { turn: 801, reason: { kind: 'completed' } } } }];
+setStatusRunning('s8', true);
+statusListener('s8', false);
+await tick();
+check('完成 → 错误：完成弹窗先发出', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '对话任务已完成', JSON.stringify(notificationLog.created.map((item) => item.title)));
+errorListener('s8', 'boom-after');
+check('完成 → 错误：完成弹窗被撤回、错误弹窗补上', notificationLog.created.length === 2 && notificationLog.created[1]?.title === '任务出错已停止' && notificationLog.closed === 1, JSON.stringify({ titles: notificationLog.created.map((item) => item.title), closed: notificationLog.closed }));
+check('完成 → 错误：不重响提示音（一次停止一次音）', audioLog.oscillators.length === 2, String(audioLog.oscillators.length));
+fakeEventEntries = null;
+
+// ⑱ 同一个回合的 error 与 completion 不会各报一次。两种顺序都用回合号挡下：
+//    日志里这一回合的 turn/end 在两次边沿之间「抖动」（陈旧读 / 投影回放），
+//    第二次边沿分类出的 reason 与第一次不同，但它是同一次停止。
+resetNotificationLog();
+resetAudioLog();
+const dupBeforeSameTurn = statsNow().stopDuplicates;
+fakeEventEntries = [{ type: 'event', event: { type: 'turn/end', seq: 1, time: 1, data: { turn: 901, reason: { kind: 'error', error: { message: 'same-turn boom' } } } } }];
+statusListener('s9', true);
+statusListener('s9', false);
+await tick();
+check('同回合 (a)：先按错误报一条', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '任务出错已停止' && notificationLog.created[0]?.options?.body === 'same-turn boom', JSON.stringify(notificationLog.created.map((item) => [item.title, item.options?.body])));
+resetNotificationLog();
+resetAudioLog();
+const completedBeforeSameTurn = statsNow().completed;
+fakeEventEntries = [{ type: 'event', event: { type: 'turn/end', seq: 2, time: 2, data: { turn: 901, reason: { kind: 'completed' } } } }];
+statusListener('s9', true);  // 通道一的假 running=true 清掉旧票据：只剩回合号判据
+statusListener('s9', false);
+await tick();
+check('同回合 (a)：完成不再另报一条（不弹窗也不响音）', notificationLog.created.length === 0 && audioLog.oscillators.length === 0, `${notificationLog.created.length} / ${audioLog.oscillators.length}`);
+check('同回合 (a)：重复边沿记进 stats.stopDuplicates', statsNow().stopDuplicates === dupBeforeSameTurn + 1, `${statsNow().stopDuplicates} vs ${dupBeforeSameTurn + 1}`);
+check('同回合 (a)：不重复计入 completed', statsNow().completed === completedBeforeSameTurn, `${statsNow().completed} vs ${completedBeforeSameTurn}`);
+// 反序：先按完成报（回合 902），同回合的错误分类边沿不再另报一条。
+resetNotificationLog();
+resetAudioLog();
+const errorsBeforeSameTurn = statsNow().errors;
+fakeEventEntries = [{ type: 'event', event: { type: 'turn/end', seq: 1, time: 1, data: { turn: 902, reason: { kind: 'completed' } } } }];
+statusListener('s9', true);
+statusListener('s9', false);
+await tick();
+check('同回合 (b)：先按完成报一条', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '对话任务已完成', JSON.stringify(notificationLog.created.map((item) => item.title)));
+resetNotificationLog();
+resetAudioLog();
+fakeEventEntries = [{ type: 'event', event: { type: 'turn/end', seq: 2, time: 2, data: { turn: 902, reason: { kind: 'error', error: { message: 'same-turn late boom' } } } } }];
+statusListener('s9', true);
+statusListener('s9', false);
+await tick();
+check('同回合 (b)：错误不再另报一条、也不重响', notificationLog.created.length === 0 && audioLog.oscillators.length === 0, `${notificationLog.created.length} / ${audioLog.oscillators.length}`);
+check('同回合 (b)：错误计数不变', statsNow().errors === errorsBeforeSameTurn, `${statsNow().errors} vs ${errorsBeforeSameTurn}`);
+
+// ⑲ 对抗：同一个回合的边沿风暴只报一条；换一个回合再刮一轮只多报一条。
+//    rawStatusListener 连发 3 组「假 running=true → false」，每组之间让分类落地：
+//    通道一每次都会清掉在途守卫与时间票据，旧实现（5 秒窗口）在这里会把同一次
+//    停止弹成两条 —— 新判据是回合号，弹窗数必须正好等于不同回合数（重复弹窗是
+//    本次加固的红线）。
+resetNotificationLog();
+resetAudioLog();
+const stormSession = 's10';
+hostList = { ids: [...hostList.ids, stormSession], byId: { ...hostList.byId, [stormSession]: { title: '第十个会话', displayTitle: '第十个会话', running: false } } };
+const stormBefore = statsNow().completed;
+const stormEdges = async () => {
+	for (let i = 0; i < 3; i += 1) {
+		rawStatusListener(stormSession, true);  // 假的 running=true：清在途守卫与时间票据
+		rawStatusListener(stormSession, false); // 边沿
+		await tick();                           // 这一次的分类先落地，再接下一组
+	}
+};
+fakeEventEntries = [{ type: 'event', event: { type: 'turn/end', seq: 1, time: 1, data: { turn: 1001, reason: { kind: 'completed' } } } }];
+await stormEdges();
+check('边沿风暴：同一个回合的 3 组边沿只报一条', notificationLog.created.length === 1 && statsNow().completed === stormBefore + 1, `${notificationLog.created.length} / completed ${statsNow().completed} vs ${stormBefore + 1}`);
+fakeEventEntries = [{ type: 'event', event: { type: 'turn/end', seq: 2, time: 2, data: { turn: 1002, reason: { kind: 'completed' } } } }];
+await stormEdges();
+check('边沿风暴：换一个回合后再刮一轮只多报一条', notificationLog.created.length === 2 && statsNow().completed === stormBefore + 2, `${notificationLog.created.length} / completed ${statsNow().completed} vs ${stormBefore + 2}`);
+check('边沿风暴：两次弹窗分别属于两个回合（正文同会话）', notificationLog.created.every((item) => item.options?.body === '第十个会话'), JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
+fakeEventEntries = null;
+
+// ⑳ 兜底路径（读不到原因 = 也就读不到回合号）：兜底报过完成之后，同一次停止的
+//    重复边沿仍由 5 秒窗口挡下。无号边沿不能变得可重复 —— 这是有意保守的一侧：
+//    宁可漏掉「兜底报告后 5 秒内的新回合」，也不为它冒重复弹窗的风险。
+resetNotificationLog();
+resetAudioLog();
+const fallbackSession = 's11';
+hostList = { ids: [...hostList.ids, fallbackSession], byId: { ...hostList.byId, [fallbackSession]: { title: '第十一个会话', displayTitle: '第十一个会话', running: false } } };
+const dupBeforeFallback = statsNow().stopDuplicates;
+fakeUsingThrows = true; // 分类读不到（retain 失败）→ 走兜底
+statusListener(fallbackSession, true);
+statusListener(fallbackSession, false);
+flushTimers(); // 兜底定时器到点 → 报一条完成（回合号未知）
+check('兜底路径：读不到原因时按完成报一条', notificationLog.created.length === 1, JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
+setStatusRunning(fallbackSession, true);  // 快照通道的重复观测（不清账本）
+statusListener(fallbackSession, false);   // 同一次停止的第二条边沿
+flushTimers();                            // 这次分类也读不到 → 同样走兜底
+check('兜底路径：无号边沿的重复仍由 5 秒窗口挡下（只一条）', notificationLog.created.length === 1, JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
+check('兜底路径：重复被记进 stats.stopDuplicates', statsNow().stopDuplicates === dupBeforeFallback + 1, `${statsNow().stopDuplicates} vs ${dupBeforeFallback + 1}`);
+fakeUsingThrows = false;
 
 // ---------------------------------------------------------------------------
 // 系统弹窗（Web Notification）：权限路径 + 不支持 + 竞态
