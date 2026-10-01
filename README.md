@@ -32,7 +32,7 @@ browser surface you already use.
 When a conversation task stops, the plugin sends a **Windows system
 toast** (Web Notification — the native notification in the bottom-right corner
 of your OS, visible while the browser is in the background; click it to return
-to that session) and plays a synthesized chime. Three stop reasons are
+to that session at the bottom of the conversation) and plays a synthesized chime. Three stop reasons are
 covered: **task complete**, **the agent is waiting for your answer**
 (`ask_user_question` pending), and **an error stop** (any failed turn — a
 gateway HTTP error such as 400 / 401 / 429 / 500 / 502, a provider outage, or
@@ -59,10 +59,18 @@ answer 501.
 
 * **Windows system toast as the single visual channel:** Web Notification API,
   an OS toast you can see while the app is in the background. Clicking it
-  brings the window forward and opens the session — `window.focus()` in a
-  browser, and in DSH Desktop the host half raises the minimized or tray-hidden
-  app window (see
-  [DSH Desktop](#dsh-desktop-clicking-a-toast-raises-the-app-window)). Three stop reasons are
+  brings the window forward, opens the session **and lands at the bottom of the
+  conversation** — `window.focus()` in a browser, and in DSH Desktop the host
+  half raises the minimized or tray-hidden app window (see
+  [DSH Desktop](#dsh-desktop-clicking-a-toast-raises-the-app-window)). DSH
+  exposes no scroll API (`openSession(target)` takes no options and
+  `ctx.uiConversation` has no navigation surface), so the plugin does what a
+  user would: right after opening, it polls for the built-in
+  **back-to-bottom** button (rendered only while the reader is off the tail)
+  and clicks it, which runs the app's own `returnToBottom()`. If the button
+  never shows up the reader was already at the bottom and nothing happens;
+  a changed DOM can only lose this extra step, never the session opening.
+  Three stop reasons are
   covered: **task complete**, **waiting for your answer** (the agent blocked
   in `ask_user_question` / plan review — detected by reading the read-only
   `uiSession.sessionStatus` snapshot, never by joining the question waterfall),
@@ -366,7 +374,9 @@ at the chime volume, fallback when decoding or storing fails, and restore from
 IndexedDB on the next load), all notification permission paths plus the in-page
 permission-request button, the desktop window-activation request (only from DSH
 Desktop and only while the window is not in the foreground), the
-suspended-AudioContext revival on a user gesture, and disposal.
+back-to-bottom click after a toast click (label match first, class-suffix
+fallback, bounded polling, and nothing clicked when the button never appears),
+the suspended-AudioContext revival on a user gesture, and disposal.
 
 ## 🔧 Troubleshooting
 

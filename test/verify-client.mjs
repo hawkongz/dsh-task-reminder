@@ -115,6 +115,19 @@ const setFocus = ({ hidden, focused }) => {
 	fireDom('blur');
 };
 
+/**
+ * 「回到底部」按钮桩：插件按 aria-label / CSS module 类名后缀找它，测试里手动增删。
+ * getAttribute 只认 aria-label，click 记账，便于断言「点了几次」。
+ */
+const domButtons = [];
+const makeDomButton = (className, label) => ({
+	className,
+	label,
+	clicks: 0,
+	getAttribute: (name) => (name === 'aria-label' ? label : null),
+	click() { this.clicks += 1; },
+});
+
 const documentStub = {
 	head: { appendChild: () => {} },
 	createElement: (tag) => ({
@@ -126,6 +139,7 @@ const documentStub = {
 			this.removed = true;
 		},
 	}),
+	querySelectorAll: (selector) => (selector === 'button' ? [...domButtons] : []),
 	get hidden() {
 		return focusState.hidden;
 	},
@@ -325,6 +339,11 @@ const {
 	NOTIFICATION_TAG,
 	NS,
 	PLUGIN_VERSION,
+	RETURN_TO_BOTTOM_CLASS_HINT,
+	RETURN_TO_BOTTOM_LABEL_KEY,
+	RETURN_TO_BOTTOM_LABEL_NS,
+	RETURN_TO_BOTTOM_MAX_ATTEMPTS,
+	RETURN_TO_BOTTOM_POLL_MS,
 	SOUND_CHOICES,
 	SOUND_CHOICE_PERSIST_KEY,
 	SOUND_PERSIST_KEY,
@@ -337,6 +356,7 @@ const {
 	clampVolume,
 	createNotifier,
 	en,
+	findReturnToBottomButton,
 	isSubagentSession,
 	normalizeCustomMeta,
 	resolveDoNotifySubagent,
@@ -539,6 +559,9 @@ const dropSessionFromStatus = (sessionId) => {
 	for (const listener of [...statusSubscribers]) listener();
 };
 
+/** ui-chat 的 chat 命名空间字典桩：只用得到「回到底部」按钮的 aria-label。 */
+const chatDictionary = { 'chat.toBottom': '回到底部' };
+
 const ctxStub = {
 	effect(fn, label) {
 		const disposer = fn();
@@ -550,7 +573,9 @@ const ctxStub = {
 			dictionaries.push({ ns, dicts });
 			return () => {};
 		},
-		bind: () => t,
+		// 命名空间感知：插件自己的文案走 task-reminder 字典，「回到底部」的
+		// aria-label 走 ui-chat 的 chat 字典（真实环境里两者是独立命名空间）。
+		bind: (ns) => (key, params) => (ns === 'chat' ? chatDictionary[key] ?? key : t(key, params)),
 	},
 	slots: {
 		inject(name, callback) {
@@ -1444,6 +1469,57 @@ check("test('question') 当场发一条「等待你的回答」弹窗", notifica
 resetAudioLog();
 windowStub.__dshTaskReminder.sound();
 check('sound() 只放音不发弹窗', audioLog.oscillators.length === 2 && notificationLog.created.length === 3, String(audioLog.oscillators.length));
+
+// ---------------------------------------------------------------------------
+// 点弹窗回到底部（DSH 没有滚动 API → 替用户点应用自带的「回到底部」按钮）
+// ---------------------------------------------------------------------------
+
+console.log('');
+console.log('点弹窗回到底部');
+
+check('回到底部按钮的定位参数取自 DSH 界面（命名空间 / 文案键 / 类名后缀）', RETURN_TO_BOTTOM_LABEL_NS === 'chat' && RETURN_TO_BOTTOM_LABEL_KEY === 'chat.toBottom'
+	&& RETURN_TO_BOTTOM_CLASS_HINT === '_toBottom' && RETURN_TO_BOTTOM_POLL_MS > 0 && RETURN_TO_BOTTOM_MAX_ATTEMPTS >= 2,
+	JSON.stringify({ RETURN_TO_BOTTOM_LABEL_NS, RETURN_TO_BOTTOM_LABEL_KEY, RETURN_TO_BOTTOM_CLASS_HINT, RETURN_TO_BOTTOM_POLL_MS, RETURN_TO_BOTTOM_MAX_ATTEMPTS }));
+
+// 选择器：aria-label 精确命中优先，类名后缀兜底，都没有就给 null。
+domButtons.length = 0;
+const byLabel = makeDomButton('hash_other', '回到底部');
+const byClass = makeDomButton('xz4KEq_toBottom', 'Back to bottom');
+domButtons.push(byClass, byLabel);
+check('findReturnToBottomButton 按 aria-label 精确命中', findReturnToBottomButton('回到底部') === byLabel);
+check('findReturnToBottomButton 类名后缀兜底（构建哈希变了也找得到）', findReturnToBottomButton('') === byClass);
+domButtons.length = 0;
+check('没有按钮时返回 null（＝本来就在底部）', findReturnToBottomButton('回到底部') === null);
+
+// 点弹窗：打开会话后轮询等按钮出现 → 点一次。
+FakeNotification.permission = 'granted';
+face.setNotifyMode('always');
+face.setNotify(true);
+domButtons.length = 0;
+resetNotificationLog();
+resetAudioLog();
+completeOnce();
+await tick();
+check('完成先弹一条通知（准备点它）', notificationLog.created.length === 1, String(notificationLog.created.length));
+const timersBeforeFirstClick = timerEntries.length;
+notificationLog.created[0].onclick();
+check('点弹窗仍然打开对应会话', opened.at(-1) === 's2', String(opened.at(-1)));
+check('点弹窗后先排一次轮询（此刻按钮还没出现）', timerEntries.length === timersBeforeFirstClick + 1, String(timerEntries.length - timersBeforeFirstClick));
+domButtons.push(makeDomButton('xz4KEq_toBottom', '回到底部'));
+flushTimers();
+check('按钮出现后替用户点一次（等于手动回到底部）', domButtons[0].clicks === 1, String(domButtons[0].clicks));
+check('点中之后不再继续轮询', timerEntries.length === timersBeforeFirstClick + 1, String(timerEntries.length - timersBeforeFirstClick));
+
+// 等不到按钮（本来就在底部）：轮询到上限自己停下，不点、不抛。
+domButtons.length = 0;
+resetNotificationLog();
+completeOnce();
+await tick();
+const timersBeforeTimeout = timerEntries.length;
+notificationLog.created[0].onclick();
+for (let i = 0; i < RETURN_TO_BOTTOM_MAX_ATTEMPTS + 2; i += 1) flushTimers();
+check('一直找不到按钮：轮询到上限自动停止', timerEntries.length === timersBeforeTimeout + RETURN_TO_BOTTOM_MAX_ATTEMPTS, String(timerEntries.length - timersBeforeTimeout));
+check('等不到按钮时什么也不点（静默收工）', domButtons.length === 0 && timerEntries.slice(timersBeforeTimeout).every((entry) => entry.fired), JSON.stringify(timerEntries.slice(timersBeforeTimeout).map((entry) => [entry.fired, entry.cancelled])));
 
 // ---------------------------------------------------------------------------
 // 自定义音效：上传本机音频（IndexedDB 存字节 + decodeAudioData 解码 + 播放）

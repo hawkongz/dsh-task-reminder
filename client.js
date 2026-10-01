@@ -3,7 +3,7 @@
  *
  * 目标：对话任务（Agent 回合）停止时发送 Windows 系统弹窗，并播放提示音 ——
  *   1. 系统弹窗走 Web Notification API（操作系统右下角原生通知，浏览器退到
- *      后台也看得到；点击回到该会话）。三种停止原因都提醒：任务完成、
+ *      后台也看得到；点击回到该会话并落到对话底部）。三种停止原因都提醒：任务完成、
  *      Agent 抛出问题等你回答（ask_user_question 挂起）、出错停止（如 400
  *      的红色错误）；同一次停止的错误与完成只报一次；
  *   2. 播放一声提示音（三种停止都响，不管在不在对话窗口；四种合成音效
@@ -20,7 +20,7 @@
  * 连响好几次，因此默认挡掉。要连子智能体一起提醒，在设置页把「子智能体提醒」
  * 打开即可（值同样落本地存储，恢复默认会关回去）。
  *
- * 七条实现要点：
+ * 十条实现要点：
  *
  * 1. 「任务完成」的信号有三条通道，共用一张 running 边沿表，天然去重：
  *    通道一：宿主转发事件 `api-session/status`（`API_REMOTE_FORWARDED_EVENTS`
@@ -77,9 +77,19 @@
  *    LocatorSection），order 避开 chat-locator(41)；页面自行渲染全部控件
  *    与恢复默认。值用 `createSnapshotStore(value, { persist: { name } })`
  *    落浏览器本地存储，因此不需要宿主半侧注册设置命名空间。
- * 8. 所有资源（字典、$on 订阅、sessionStatus 订阅、定时器、排障钩子）都挂
+ * 8. 「点弹窗回到底部」：DSH 打开会话时会恢复上次的阅读位置，所以点弹窗常常
+ *    停在历史中间。DSH 没对外暴露滚动接口 —— `openSession(target)` 不收参数，
+ *    `ctx.uiConversation` 只有 binding / events / groups / imageUrl /
+ *    inspectRequestPrompt / inspectSystemPrompt / views。于是这里退一步：
+ *    打开会话后轮询应用自带的「回到底部」按钮（只在未跟随底部时渲染，文案是
+ *    `chat` 命名空间的 `chat.toBottom`，CSS module 类名后缀 `_toBottom`），
+ *    出现就替用户点一下 —— 走应用自己的 `returnToBottom()`
+ *    （`navigation.cancel(); reading.followTail()`），滚动状态机保持一致。
+ *    等不到按钮就是本来就在底部，静默收工；轮询定时器挂 ctx.timer，卸载即取消。
+ *    类名与文案都属 DSH 内部实现，匹配失败只影响这一步，不影响「打开会话」。
+ * 9. 所有资源（字典、$on 订阅、sessionStatus 订阅、定时器、排障钩子）都挂
  *    ctx.effect，插件卸载时整体回收。
- * 9. 子智能体过滤只认列表行上的 `origin === 'subagent'`（官方侧边栏判定子会话
+ * 10. 子智能体过滤只认列表行上的 `origin === 'subagent'`（官方侧边栏判定子会话
  *    可见性用的就是这一个字段）：fork 出来的会话带 `parentId` 但 origin 不是
  *    'subagent'，照旧提醒。行还没进列表时读不到 origin，按「不是子智能体」
  *    处理 —— 宁可多提醒一条，也不把用户的真实回合静音。子智能体与父会话各自
@@ -100,7 +110,7 @@ window.__ModuleLoader__.load({
 		 * 版本号，随排障钩子暴露。必须与 package.json 的 version 一致：
 		 * 自检里有一条断言直接比这两处，版本漂了就会红。
 		 */
-		const PLUGIN_VERSION = '1.5.0';
+		const PLUGIN_VERSION = '1.5.1';
 
 		/** 六个可配置项的本地持久化键（createSnapshotStore 的 persist.name）。 */
 		const NOTIFY_PERSIST_KEY = 'dsh.task-reminder.notify';
@@ -231,9 +241,48 @@ window.__ModuleLoader__.load({
 		/** 「已经替用户申请过通知权限」的记账键（localStorage）：只问一次。 */
 		const PERMISSION_ASKED_KEY = 'dsh.task-reminder.permission-asked';
 
+		/**
+		 * 「点弹窗回到底部」用的定位参数（见文件头要点 8）。DSH 没有对外暴露滚动
+		 * 接口，只能认应用自带的「回到底部」按钮：文案在 `chat` 命名空间的
+		 * `chat.toBottom`，CSS module 类名后缀是 `_toBottom`（构建哈希会变，
+		 * 源名后缀不变）。打开会话后按下面的节奏轮询等它出现。
+		 */
+		const RETURN_TO_BOTTOM_LABEL_NS = 'chat';
+		const RETURN_TO_BOTTOM_LABEL_KEY = 'chat.toBottom';
+		const RETURN_TO_BOTTOM_CLASS_HINT = '_toBottom';
+		/** 轮询间隔与次数（约 1.4 秒）：会话历史挂上来的时间足够，又不至于拖太久。 */
+		const RETURN_TO_BOTTOM_POLL_MS = 120;
+		const RETURN_TO_BOTTOM_MAX_ATTEMPTS = 12;
+
+		/**
+		 * 找会话视图里应用自带的「回到底部」按钮。先按 aria-label 精确匹配
+		 * （文案随界面语言变化），再按 CSS module 类名后缀兜底（构建哈希会变）。
+		 * @param label - 期望的 aria-label；解析不到时传空串，只走类名兜底。
+		 * @returns 按钮元素；没有（＝本来就在底部）或读不到 DOM 时返回 null。
+		 */
+		function findReturnToBottomButton(label) {
+			try {
+				if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return null;
+				const buttons = Array.from(document.querySelectorAll('button')).filter((button) => button !== null && button !== undefined);
+				// 1) 先整体按 aria-label 精确匹配：文案随界面语言变化，与构建无关。
+				if (typeof label === 'string' && label !== '') {
+					for (const button of buttons) {
+						if (typeof button.getAttribute === 'function' && button.getAttribute('aria-label') === label) return button;
+					}
+				}
+				// 2) 再按 CSS module 类名后缀兜底：文案取不到时靠它。
+				for (const button of buttons) {
+					if (typeof button.className === 'string' && button.className.includes(RETURN_TO_BOTTOM_CLASS_HINT)) return button;
+				}
+				return null;
+			} catch {
+				return null;
+			}
+		}
+
 		const zh = {
 			'nav': '任务提醒',
-			'intro': '对话任务（Agent 回合）停止时发送 Windows 系统弹窗（Web Notification，操作系统右下角原生通知，浏览器退到后台也看得到；点击弹窗回到该会话），并播放提示音。三种停止都会提醒：任务完成、Agent 抛出问题等你回答（ask_user_question 挂起）、出错停止（任何让回合失败的错误：网关 HTTP 错误如 400 / 401 / 429 / 500 / 502、服务商故障、连接失败）；同一次停止只报一次（错误优先）。弹窗时机二选一：「任何情况都弹」不管窗口是否在前台；「仅非前台窗口」在切走标签页或浏览器窗口失焦（人在别的应用）时才弹。首次装载时代码会替您申请一次浏览器通知权限（按 Origin 生效，授权一次本站点全部通用，已授权则不会再问）；所有设置写入浏览器本地存储，重启后仍在，「恢复默认」一键回到出厂值。',
+			'intro': '对话任务（Agent 回合）停止时发送 Windows 系统弹窗（Web Notification，操作系统右下角原生通知，浏览器退到后台也看得到；点击弹窗回到该会话并直接落到对话底部），并播放提示音。三种停止都会提醒：任务完成、Agent 抛出问题等你回答（ask_user_question 挂起）、出错停止（任何让回合失败的错误：网关 HTTP 错误如 400 / 401 / 429 / 500 / 502、服务商故障、连接失败）；同一次停止只报一次（错误优先）。弹窗时机二选一：「任何情况都弹」不管窗口是否在前台；「仅非前台窗口」在切走标签页或浏览器窗口失焦（人在别的应用）时才弹。首次装载时代码会替您申请一次浏览器通知权限（按 Origin 生效，授权一次本站点全部通用，已授权则不会再问）；所有设置写入浏览器本地存储，重启后仍在，「恢复默认」一键回到出厂值。',
 			'settings.notify.title': '系统弹窗',
 			'toast.completed.title': '对话任务已完成',
 			'toast.question.title': '等待你的回答',
@@ -282,7 +331,7 @@ window.__ModuleLoader__.load({
 		};
 		const en = {
 			'nav': 'Task reminder',
-			'intro': 'When a conversation task (agent turn) stops, a Windows system toast goes out (Web Notification, the native notification in the bottom-right corner of your OS, visible while the browser is in the background; click it to return to that session) and a chime plays. Three stop reasons are covered: task complete, the agent is waiting for your answer (ask_user_question pending), and an error stop (any failed turn — a gateway HTTP error such as 400 / 401 / 429 / 500 / 502, a provider outage, or a connection failure) — one stop is reported once, with the error taking precedence. The toast timing has two modes: Always, no matter whether the browser window is in the foreground, or Only when unfocused, which fires when you switch the tab away or the browser window loses focus (you are in another app). On the first load the code asks for browser notification permission once (per origin, shared by every plugin on this site; never asked again once granted); all settings are stored in browser local storage and survive restarts, and Restore defaults puts everything back in one click.',
+			'intro': 'When a conversation task (agent turn) stops, a Windows system toast goes out (Web Notification, the native notification in the bottom-right corner of your OS, visible while the browser is in the background; click it to return to that session at the bottom of the conversation) and a chime plays. Three stop reasons are covered: task complete, the agent is waiting for your answer (ask_user_question pending), and an error stop (any failed turn — a gateway HTTP error such as 400 / 401 / 429 / 500 / 502, a provider outage, or a connection failure) — one stop is reported once, with the error taking precedence. The toast timing has two modes: Always, no matter whether the browser window is in the foreground, or Only when unfocused, which fires when you switch the tab away or the browser window loses focus (you are in another app). On the first load the code asks for browser notification permission once (per origin, shared by every plugin on this site; never asked again once granted); all settings are stored in browser local storage and survive restarts, and Restore defaults puts everything back in one click.',
 			'settings.notify.title': 'System toast',
 			'toast.completed.title': 'Task complete',
 			'toast.question.title': 'Waiting for your answer',
@@ -1453,6 +1502,57 @@ window.__ModuleLoader__.load({
 			};
 
 			/**
+			 * 「回到底部」按钮的当前文案（随界面语言变化）。取不到就返回空串 ——
+			 * 这时只按 CSS module 类名后缀匹配。
+			 * @returns 本地化后的 aria-label，或空串。
+			 */
+			const returnToBottomLabel = () => {
+				try {
+					const label = ctx.locale.bind(RETURN_TO_BOTTOM_LABEL_NS)(RETURN_TO_BOTTOM_LABEL_KEY);
+					return typeof label === 'string' && label !== '' && label !== RETURN_TO_BOTTOM_LABEL_KEY ? label : '';
+				} catch {
+					return '';
+				}
+			};
+			// 在途的「回到底部」轮询定时器：卸载时统一取消，不让回调落地。
+			const returnToBottomTimers = new Set();
+			ctx.effect(() => () => {
+				for (const cancel of returnToBottomTimers) cancel();
+				returnToBottomTimers.clear();
+			}, 'dsh-task-reminder: return to bottom');
+			/**
+			 * 点弹窗后把阅读位置拉回对话底部（见文件头要点 8）。打开会话是同步的，
+			 * 但历史挂上来要几拍，所以轮询等应用自带的「回到底部」按钮出现；它只在
+			 * 「当前未跟随底部」时渲染，出现就替用户点一下（走应用自己的
+			 * returnToBottom()，滚动状态机保持一致）。等不到就是本来就在底部。
+			 */
+			const returnToBottom = () => {
+				let attempts = 0;
+				const schedule = () => {
+					const cancel = ctx.timer.timeout(() => {
+						returnToBottomTimers.delete(cancel);
+						step();
+					}, RETURN_TO_BOTTOM_POLL_MS);
+					returnToBottomTimers.add(cancel);
+				};
+				const step = () => {
+					attempts += 1;
+					const button = findReturnToBottomButton(returnToBottomLabel());
+					if (button !== null) {
+						try {
+							button.click();
+						} catch {
+							// 点不动就算了：打开会话这条主路径已经完成。
+						}
+						return;
+					}
+					if (attempts >= RETURN_TO_BOTTOM_MAX_ATTEMPTS) return;
+					schedule();
+				};
+				schedule();
+			};
+
+			/**
 			 * 发一条系统弹窗：点击时窗口回前台并打开对应会话。
 			 * @param title - 弹窗标题（按停止原因选）。
 			 * @param body - 弹窗正文（会话名 / 问题 / 错误信息）。
@@ -1462,6 +1562,7 @@ window.__ModuleLoader__.load({
 				const notification = notifier.show(title, body, () => {
 					try {
 						ctx.uiWorkspace.openSession(sessionId);
+						returnToBottom(); // 打开会话后再把阅读位置拉回底部（要点 8）
 					} catch {
 						// 会话打开失败也不影响弹窗本身。
 					}
@@ -1988,6 +2089,11 @@ window.__ModuleLoader__.load({
 				NOTIFICATION_TAG,
 				NS,
 				PLUGIN_VERSION,
+				RETURN_TO_BOTTOM_CLASS_HINT,
+				RETURN_TO_BOTTOM_LABEL_KEY,
+				RETURN_TO_BOTTOM_LABEL_NS,
+				RETURN_TO_BOTTOM_MAX_ATTEMPTS,
+				RETURN_TO_BOTTOM_POLL_MS,
 				SOUND_CHOICES,
 				SOUND_CHOICE_PERSIST_KEY,
 				SOUND_PERSIST_KEY,
@@ -2000,6 +2106,7 @@ window.__ModuleLoader__.load({
 				clampVolume,
 				createNotifier,
 				en,
+				findReturnToBottomButton,
 				isSubagentSession,
 				normalizeCustomMeta,
 				resolveDoNotifySubagent,
