@@ -123,9 +123,9 @@ dsh plugin --profile web add @hawkongz/dsh-task-reminder
 `dsh-taskreminder` 过于相似、永久拒发，所以 registry 形式只能带 scope。）
 
 > **发版当天安装注意。** pnpm 11 默认打开 `minimumReleaseAge`（1440 分钟，即 1 天），
-> 所以今天刚发的版本还解析不到：上面这条裸命令会打出 `… 1.5.1 (1.5.3 is available)`
+> 所以今天刚发的版本还解析不到：上面这条裸命令会打出 `… 1.5.2 (1.5.4 is available)`
 > 并装上上一版。想当天就装到新版，就钉版本 ——
-> `dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.5.3`（pnpm 会把这个
+> `dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.5.4`（pnpm 会把这个
 > 具体版本加进豁免名单）—— 或者在 profile 的 `pnpm-workspace.yaml` 里设
 > `minimumReleaseAge: 0`，再或者等满一天。同样的现象见「常见问题」一节。
 
@@ -178,7 +178,7 @@ dsh plugin --profile web add @hawkongz/dsh-task-reminder
 pnpm 11 的「一天冷静期」时就必须这样做，见上一节——把版本钉上：
 
 ```powershell
-dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.5.3
+dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.5.4
 ```
 
 pnpm 会把这条豁免写进 profile 的 `pnpm-workspace.yaml`（`minimumReleaseAgeExclude`）
@@ -311,8 +311,8 @@ node test/verify-client.mjs
 * **刚发的版本装不上（装完还是上一版）。** pnpm 11 默认 `minimumReleaseAge`
   为 1440 分钟（1 天），比它更年轻的版本解析不到：
   `dsh plugin … add @hawkongz/dsh-task-reminder` 会打出
-  `… 1.5.1 (1.5.3 is available)` 并装上上一版。钉版本
-  （`… add @hawkongz/dsh-task-reminder@1.5.3`）、在 profile 的
+  `… 1.5.2 (1.5.4 is available)` 并装上上一版。钉版本
+  （`… add @hawkongz/dsh-task-reminder@1.5.4`）、在 profile 的
   `pnpm-workspace.yaml` 里设 `minimumReleaseAge: 0`，或者等满一天，都能解决。
 * **改了代码没生效。** 宿主只在进程启动时读客户端产物，浏览器又会缓存旧 bundle。
   重启 `dsh web`，再硬刷新（`Ctrl + F5`）。
@@ -344,7 +344,7 @@ node test/verify-client.mjs
   时机」切到「仅非前台窗口」，就只在切走标签页或浏览器窗口失焦时才弹。
 * **DSH 桌面端：点了弹窗会话开了，但窗口没自己回来。** 「拉窗口回前台」是 1.4.4
   才加的宿主半侧行为，而宿主只在进程启动时读插件——还在跑的应用拿的是旧
-  `index.js`。先确认 profile 里是 1.5.3 或更新（有这条路由的最低版本是 1.4.4）
+  `index.js`。先确认 profile 里是 1.5.4 或更新（有这条路由的最低版本是 1.4.4）
   （`dsh --profile desktop --dump-config | Select-String task-reminder`），然后
   彻底退出应用再打开。路由不存在时静默跳过是设计如此：会话照样打开，只是窗口
   不会被拉起。
