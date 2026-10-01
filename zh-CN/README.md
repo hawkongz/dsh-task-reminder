@@ -122,7 +122,9 @@ dsh plugin --profile web add @hawkongz/dsh-task-reminder
 ```
 
 装的是 npm registry 上的已发布包——和其他 DSH 插件的装法完全一样。（裸名 `dsh-task-reminder` 已确定拿不到：npm 判定它与现存包
-`dsh-taskreminder` 过于相似、永久拒发，所以 registry 形式只能带 scope。）
+`dsh-taskreminder` 过于相似、永久拒发，所以 registry 形式只能带 scope。）桌面端
+（DSH Desktop）用同一条命令、把 `--profile web` 换成 `--profile desktop`，装完重启
+桌面端即可，细节见[安装](#-安装)一节。
 
 > **发版当天安装注意。** pnpm 11 默认打开 `minimumReleaseAge`（1440 分钟，即 1 天），
 > 所以今天刚发的版本还解析不到：上面这条裸命令会打出 `… 1.5.2 (1.5.4 is available)`
@@ -189,6 +191,17 @@ pnpm 会把这条豁免写进 profile 的 `pnpm-workspace.yaml`（`minimumReleas
 ```powershell
 (Get-Content $env:USERPROFILE\.dsh\profiles\web\node_modules\@hawkongz\dsh-task-reminder\package.json | ConvertFrom-Json).version
 ```
+
+桌面端（DSH Desktop，Electron）跑的是同一个包，只是装在**它自己的 profile** 里
+——把 `web` 换成 `desktop`，装完重启桌面端即可（桌面端不存在浏览器缓存那一步，
+不用硬刷新）：
+
+```powershell
+dsh plugin --profile desktop add @hawkongz/dsh-task-reminder
+```
+
+提醒行为与 Web 端完全一致，只多一步桌面端独有的「点弹窗把窗口拉回前台」，
+见[桌面端（DSH Desktop）](#桌面端dsh-desktop点弹窗把窗口拉回前台)。
 
 包里带着插件需要的全部文件：`index.js`（宿主半侧）、`client.js`（浏览器半侧）、
 `cordis.patch.yml`（bundle 行），以及 `test/` 下的自检脚本。
@@ -271,6 +284,8 @@ __dshTaskReminder.sound()
 ### 桌面端（DSH Desktop）：点弹窗把窗口拉回前台
 
 桌面端（Electron）里弹窗行为完全一样，只多一步「只有宿主半侧做得到」的动作。
+安装命令见[安装](#-安装)：`dsh plugin --profile desktop add @hawkongz/dsh-task-reminder`，
+其余提醒行为与 Web 端一致。
 渲染进程拉不起被 Windows 最小化、或被 DSH 收进托盘的窗口：`window.focus()` 对
 这种窗口无效，只有主进程的 `focusPrimaryWindow()`（`restore()` → `show()` →
 `focus()`）能拉起来——它能被托盘点击和「再启动一份应用」（`dsh://open`，走

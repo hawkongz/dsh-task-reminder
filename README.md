@@ -181,7 +181,9 @@ This installs the published package from the npm registry — the same way every
 other DSH plugin is installed. (The unscoped name
 `dsh-task-reminder` is permanently unavailable: npm rejects it as too similar
 to the existing package `dsh-taskreminder`, so the scoped name is the only
-registry form.)
+registry form.) On DSH Desktop, run the same command with
+`--profile desktop` and restart the app — details under
+[Installation](#install-with-dsh-plugin).
 
 > **Installing on release day.** pnpm 11 enables `minimumReleaseAge` by default
 > (1440 minutes — one day), so a version published today cannot be resolved
@@ -258,6 +260,18 @@ actually has with:
 ```powershell
 (Get-Content $env:USERPROFILE\.dsh\profiles\web\node_modules\@hawkongz\dsh-task-reminder\package.json | ConvertFrom-Json).version
 ```
+
+DSH Desktop (the Electron app) runs the same package from its **own** profile —
+swap `web` for `desktop`, then restart the desktop app (there is no browser
+hard-refresh step there):
+
+```powershell
+dsh plugin --profile desktop add @hawkongz/dsh-task-reminder
+```
+
+The reminders behave exactly as they do in the browser; the only extra is the
+desktop-only window activation described under
+[DSH Desktop](#dsh-desktop-clicking-a-toast-raises-the-app-window).
 
 The package contains everything the plugin needs: `index.js` (host half),
 `client.js` (browser half), `cordis.patch.yml` (the bundle row), and the
@@ -348,6 +362,10 @@ __dshTaskReminder.sound()
 ```
 
 ### DSH Desktop: clicking a toast raises the app window
+
+Installed with `dsh plugin --profile desktop add @hawkongz/dsh-task-reminder`
+(see [Installation](#install-with-dsh-plugin)); every reminder works the same
+as in the browser.
 
 In the Electron desktop app the toast behaves the same, plus one step only the
 host half can perform. A renderer process cannot pull back a window that
