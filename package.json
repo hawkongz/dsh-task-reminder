@@ -1,6 +1,6 @@
 {
   "name": "@hawkongz/dsh-task-reminder",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "description": "Conversation task-completion reminder for DeepSeek Harness (Web UI and DSH Desktop): a Windows system toast (Web Notification) on every stop — task complete, the agent waiting on you (approval request / question / plan review, each with its own title, and Approve / Reject buttons right on an approval toast), or an error stop (any failed turn — a gateway HTTP error such as 400/401/429/500/502, a provider outage, or a connection failure) — with subagent sessions (a lead's or any other agent's spawned agents) muted by default behind its own switch, two timing modes (always / only when the window is unfocused), a notification language of its own (follow interface / Chinese / English), clicking a toast opens that session at your last question (so you read the answer top-down) and, in DSH Desktop, raises the minimized or tray-hidden app window, plus a completion chime with four synthesized effects or your own uploaded audio file (stored locally in IndexedDB, never uploaded) that play instantly on switch — all in a dedicated Settings → Task reminder page with one-click restore defaults and a Check for updates entry at the bottom that reads npm (official registry plus the mainland mirror) and upgrades the plugin in place through DSH's own plugin manager, so updating is one click instead of a reinstall.",
   "keywords": [
     "dsh",

@@ -85,9 +85,11 @@
  *    默认开启；权限还是 default 时首次装载替用户申请一次（localStorage
  *    记账只问一次），设置页另有「申请通知权限」按钮；被拒绝 / 不支持时在
  *    设置页给出对应提示，不假装生效。权限按 Origin 生效，授权一次本站点
- *    全部通用。通知 tag 按类型固定（等待你操作 / 完成 / 出错各一个）：同类型
- *    的新通知在系统通知中心里替换上一条，不再逐条堆积；`silent: true` 关掉
- *    浏览器自带的提示音，声音只由插件自己那套负责（设置页的提示音开关说了算）。
+ *    全部通用。通知 tag 回到「每条独立」（1.5.5 的行为）：后一条不顶掉前一条 ——
+ *    「按类型固定 tag + renotify」那版在 Windows 上会把上一条横幅替换掉，而被替换
+ *    的那条在系统通知中心里点不动（Electron 在 Windows 上「通知中心里的条目」不投递
+ *    click，electron#29461），现场表现就是「点了通知窗口抬不起来」。`silent: true`
+ *    关掉浏览器自带的提示音，声音只由插件自己那套负责（设置页的提示音开关说了算）。
  *    点击弹窗：打开对应会话 + 关闭弹窗；
  *    拉回前台分两路 —— 普通浏览器 `window.focus()` 就够，桌面壳（DSH Desktop）
  *    的渲染进程拉不起最小化 / 托盘窗口，改由 `requestDesktopActivation()`
@@ -392,7 +394,7 @@ function installNotificationClickRelay(scope) {
 		 * 版本号，随排障钩子暴露。必须与 package.json 的 version 一致：
 		 * 自检里有一条断言直接比这两处，版本漂了就会红。
 		 */
-		const PLUGIN_VERSION = '1.6.1';
+		const PLUGIN_VERSION = '1.6.2';
 
 		/**
 		 * 这份客户端代码的「排障代号」：改了留痕 / 跳转逻辑就 +1。
@@ -1578,8 +1580,8 @@ function installNotificationClickRelay(scope) {
 				},
 				/**
 				 * 弹一条系统通知；点击时把窗口拉回前台并打开对应会话。
-				 * tag 按类型固定（等待 / 完成 / 出错）：同类型的新通知在系统通知
-				 * 中心里替换上一条，不逐条堆积；不同类型各占一个槽位、互不干扰。
+				 * tag 每条独立（1.5.5 的行为）：后一条不顶掉前一条 —— 固定 tag 的
+				 * 「同类型替换」会让被替换的那条在通知中心里点不动（见文件头要点 5）。
 				 * `silent: true` 关掉浏览器自带的提示音——声音只由插件自己那套
 				 * 负责（设置页的提示音开关与音量说了算），也避免和合成音效叠成两声。
 				 * `requireInteraction` 由设置页的「弹窗一直挂着」开关决定（默认关）：
@@ -1589,18 +1591,20 @@ function installNotificationClickRelay(scope) {
 				 * @param title - 通知标题。
 				 * @param body - 通知正文（会话名 / 问题 / 错误信息）。
 				 * @param onClick - 点击通知时的回调。
-				 * @param kind - 通知类型（NOTIFY_KIND_*），决定 tag。
 				 * @param requireInteraction - 横幅是否不自动收（设置页那个开关，5 类通用）。
 				 * @returns 通知对象；没发出去时返回 null。
 				 */
-				show(title, body, onClick, kind, requireInteraction = false) {
+				show(title, body, onClick, requireInteraction = false) {
 					try {
 						if (!granted()) return null;
-						const suffix = typeof kind === 'string' && kind !== '' ? kind : NOTIFY_KIND_COMPLETED;
 						const notification = new window.Notification(title, {
 							body,
-							tag: `${NOTIFICATION_TAG}-${suffix}`,
-							renotify: true,
+							// 每条通知独立 tag（1.5.5 的行为）：后一条不顶掉前一条。
+							// 回到这一版是因为「按类型固定 tag + renotify」在 Windows 上
+							// 会把上一条横幅替换掉 —— 被替换掉的那条在通知中心里点不动
+							// （Electron 在 Windows 上「通知中心里的条目」不投递 click，
+							// electron#29461），现场表现就是「点了通知窗口抬不起来」。
+							tag: `${NOTIFICATION_TAG}-${Date.now()}`,
 							silent: true,
 							// 由设置页的「弹窗一直挂着」开关决定（默认关），5 类通用。
 							requireInteraction: requireInteraction === true,
@@ -2715,10 +2719,6 @@ function installNotificationClickRelay(scope) {
 			const completing = new Map(); // sessionId → token
 			// 有待答交互（ask_user_question / plan-review）的会话集合，按出现边沿提醒。
 			const pendingQuestions = new Set();
-			// 「完成未读」电平已补报过的会话（见 sessionStatus 通道里的补漏通道）：
-			// 电平不会自己翻回 false 之前一直为 true，没有这张锁就会每个 tick 重报。
-			// 电平消失（打开会话 / 再次跑起来 / 会话没了）即解锁，等下一次未读。
-			const doneUnreadReported = new Set();
 			// 排障计数：三条通道各收到多少、三种停止各报了多少、重复抑制多少。
 			const stats = {
 				events: 0,
@@ -2730,8 +2730,6 @@ function installNotificationClickRelay(scope) {
 				sounds: 0,
 				notifications: 0,
 				stopDuplicates: 0,
-				// 「完成未读」电平补报的次数（页面刷新 / 插件热重载期间跑完的会话）。
-				unreadRecovered: 0,
 				// 在通知上直接裁决的次数（审批快捷按钮）。
 				decisions: 0,
 				// 点通知正文「打开会话」成功的次数（失败只记 lastJump，不计数）。
@@ -3228,7 +3226,8 @@ function installNotificationClickRelay(scope) {
 			 * @param title - 弹窗标题（按停止原因选）。
 			 * @param body - 弹窗正文（会话名 / 问题 / 错误信息）。
 			 * @param sessionId - 相关会话。
-			 * @param kind - 通知类型（NOTIFY_KIND_*），决定系统通知中心里的 tag。
+			 * @param kind - 通知类型（NOTIFY_KIND_*）：只用于留痕与保活表的键，不再决定 tag
+			 *   （tag 已回到「每条独立」，见 notifier.show）。
 			 */
 			const notify = (title, body, sessionId, kind) => {
 				const suffix = typeof kind === 'string' && kind !== '' ? kind : NOTIFY_KIND_COMPLETED;
@@ -3257,7 +3256,7 @@ function installNotificationClickRelay(scope) {
 					} catch {
 						// 会话打开失败也不影响弹窗本身。
 					}
-				}, kind, stickyStore.getSnapshot() === true);
+				}, stickyStore.getSnapshot() === true);
 				if (notification !== null) {
 					stats.notifications += 1;
 					// 保活（见 toastRegistryOf）：同类只留最近一条，点击/卸载时释放。
@@ -3285,14 +3284,18 @@ function installNotificationClickRelay(scope) {
 			 */
 			const showApprovalToast = (key, sessionId, title, body) => {
 				if (!actionBridge.active || notifier.permission() !== 'granted') return false;
+				// 桌面壳（dsh-app://）：这一版明确不让审批通知走 worker 转信那条点击链路
+				// —— 桌面端「点通知把窗口拉回前台」是命脉，普通 onclick 那条路才是验证过
+				// 的；worker 弹出的通知点正文要先经转信再回页面，抬窗还会被「谁该 navigate」
+				// 的调度影响。这里直接退回普通通知。
+				if (typeof location !== 'undefined' && location !== null && location.protocol === 'dsh-app:') return false;
 				// 带按钮的通知自己占一个 tag 槽位：它的 tag 要是被别的等待顶掉，
-				// 按钮就跟着消失了。
+				// 按钮就跟着消失了（这条是 Service Worker 弹的持久通知，不是普通横幅）。
 				const tag = `${NOTIFICATION_TAG}-${NOTIFY_KIND_WAITING}-${key}`;
 				approvalToasts.set(key, { sessionId, tag });
 				const shown = actionBridge.show(title, {
 					body,
 					tag,
-					renotify: true,
 					silent: true,
 					// 同上：由「弹窗一直挂着」开关决定（默认关，带按钮的审批也走它）。
 					requireInteraction: stickyStore.getSnapshot() === true,
@@ -3798,24 +3801,6 @@ function installNotificationClickRelay(scope) {
 					if (noteRunning(sessionId, status?.running === true)) complete(sessionId, 'status');
 					const pending = status?.pendingInteraction;
 
-					// 完成补漏：「完成未读」电平（宿主在后台会话跑完且用户还没打开
-					// 时点亮，打开 / 再跑 / 会话消失即清零）。边沿路径只认「本插件
-					// 亲眼看到的 running → 非 running」，页面刷新、插件热重载期间
-					// 跑完的后台会话是它的盲区 —— 那种情况下提示音和弹窗都会静默
-					// 丢掉，电平补报正好把这一个缺口补上。挂起的等待不算完成
-					// （宿主在有待答交互时也会点亮这个标志，跳过）。
-					// 同一次完成若边沿路径已经报过，complete() 的回合号判据会挡下，
-					// 不会双弹。
-					if (status?.completionUnread === true && (pending === undefined || pending === null)) {
-						if (!doneUnreadReported.has(sessionId)) {
-							doneUnreadReported.add(sessionId);
-							stats.unreadRecovered += 1;
-							complete(sessionId, 'unread');
-						}
-					} else {
-						doneUnreadReported.delete(sessionId);
-					}
-
 					if (pending === undefined || pending === null) {
 						// 这一轮挂起消散（用户已回答 / 交互关闭）：紧随的那次完成
 						// 不报——一次交互一次提醒。还没结清的审批通知也一并收掉，
@@ -4058,8 +4043,6 @@ function installNotificationClickRelay(scope) {
 					// 消散即收，这里不该有常驻条目；有就说明有通知没收掉。
 					waitingToasts: [...waitingToasts.keys()],
 					running: [...runningSessions.entries()],
-					// 已经用「完成未读」电平补报过、还在等电平消失的会话。
-					completionUnreadReported: [...doneUnreadReported],
 					// 每个会话已结清的停止回合号（1.5.4 的确定性去重账本）：探针看这里
 					// 就知道某次完成被当成重复边沿丢掉时，挡下它的是不是同一个回合。
 					lastReportedTurn: [...lastReportedTurn.entries()],

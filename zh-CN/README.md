@@ -74,9 +74,7 @@ Agent 回合在 DeepSeek Harness 里跑着，你却切到别的窗口看别的�
   `uiSession.sessionStatus` 快照的出现边沿，绝不参与 user-questions
   应答链）、**出错停止**（`api-session/error`——任何让回合失败的错误：网关 HTTP 错误如 400 / 401 / 429 / 500 / 502、服务商故障、连接失败）。**审批的通知上直接带「同意 / 拒绝」两个按钮**：点一下就是审批卡片的
   「允许一次 / 拒绝」（调审批对象自己的 `answer('allowed-once' | 'rejected')`），
-  不用切回页面（见[在通知上直接裁决](#在通知上直接裁决)）。审批弹窗的正文是**「工具名：理由」**——本地化的 `displayReason` 按通知语言取，退回未本地化的 `reason`，两者都空才退回会话名（1.6.1 起；此前的 bug 是正文恒等于会话名，通知上带着「同意 / 拒绝」却看不出要批准什么）。通知 tag 按类型固定（等待 /
-  完成 / 出错各一个）：同类型的新通知在系统通知中心替换上一条，不再逐条堆积，
-  三种类型之间互不顶替。同一次停止
+  不用切回页面（见[在通知上直接裁决](#在通知上直接裁决)）。审批弹窗的正文是**「工具名：理由」**——本地化的 `displayReason` 按通知语言取，退回未本地化的 `reason`，两者都空才退回会话名（1.6.1 起；此前的 bug 是正文恒等于会话名，通知上带着「同意 / 拒绝」却看不出要批准什么）。通知 tag **每条独立**（1.5.5 的行为，1.6.2 改回来）：后一条不顶掉前一条，通知中心里逐条留着。「按类型固定 tag + renotify」看着更清爽，但 Windows 会把上一条横幅替换掉，**被替换的那条在通知中心里点不动**（Electron 在 Windows 上不投递通知中心条目的 click，electron#29461），现场表现就是「点了通知窗口抬不起来」。同一次停止
   只报一次、错误优先：停止到达时读会话持久日志最后一条 `turn/end` 的 reason 分类——completed / max-tokens 报完成，error 只报错误（正文取网关原文），aborted / blocked / interrupted 不报；读时同时取最后一条 turn/start，最新回合未闭合时重试等本次回合的 turn/end 落盘（取消不误报完成）；提示音与弹窗同轮发出。分类读不到才退回完成弹窗，5 秒内后到的同停止错误会撤回它只留错误（一次停止一次提醒）。**「同一次停止」按回合号判定（1.5.4）**：分类同时带出 turn/end 的 `data.turn`，与每个会话记下的「最近一次结清的回合号」相等就确定性丢掉，不再看 5 秒窗口；5 秒窗口只留给「错误优先」两个方向（error→completion 不报、completion→error 撤回）与读不到回合号时的兜底（`api-session/error` 事件本身不带回合号；兜底路径自己报的那次停止也没有号可记，它的重复边沿仍由窗口兜着——这里有意保守：宁可漏掉这 5 秒内的新回合，也不冒重复弹窗的风险）。重复边沿（分类在途时列表陈旧回放）由在途守卫与回合号判据双兜底，只报一次；新回合在上一轮停止 5 秒内完成照报——否则桌面端通道一稀疏时那次完成会被整条吞掉。
   时机有两种：**任何情况都弹**（每次停止都弹，不管窗口在不在前台）与
   **仅非前台窗口**（切走标签页或浏览器窗口失焦时才弹），设置页里切换。首次
@@ -401,7 +399,14 @@ __dshTaskReminder.state().update
 所以点击弹窗时页面会 `POST api/task-reminder/window-activation`（宿主半侧注册的
 Connection 精确 Fetch 路由，与普通 RPC 共用 `/api` 通道和 cookie 认证），宿主半侧
 随即再启动一份应用：新进程拿不到单实例锁、立刻退出，正在跑的那份把窗口拉到前台。
-只有页面确实在桌面端（`'dshDesktop' in window`）**且**窗口不在前台时才发这个请求；
+页面只认「确实在桌面端」（`'dshDesktop' in window`）这一个前提，**每次点击都发**：
+不按 `document.hasFocus()` 短路——Electron 里窗口只是被挡住 / 藏起来时它仍可能报
+true，按它跳过就等于永远唤不起。宿主那边按 0 / 700 / 2200ms 补发，在「直起 exe」
+与「PowerShell 强抢前台」（`AttachThreadInput` + `SetForegroundWindow`，绕开 Windows
+的前台锁）之间轮换，但**确认窗口已在前台就立刻收手**：助手退出码 0 就是「收尾时目标
+窗口已经是前台」，拿到这个信号剩下的补发全部作废；助手动手前也会自己先看一眼，已经
+在前台就不抢（最小化的不算，照样 restore）。所以成功的那次点击最多打扰 0.7 秒，而不是在
+4 秒里抢五次前台——上一版那条无条件的补发梯子会把已经切去别的应用的用户一遍遍拽回来。
 普通浏览器、没有这张路由表的 DSH 组合、或请求失败，都是安静的空操作——「打开对应
 会话」这条主路径永远不受影响。macOS 走 `open dsh://open`，其他平台跳过。
 
@@ -412,7 +417,7 @@ Connection 精确 Fetch 路由，与普通 RPC 共用 `/api` 通道和 cookie �
 
 ```js
 // { at, route, reason, status?, error? }
-// reason: no-desktop / no-fetch / already-focused / sent / answered / failed / error
+// reason: no-desktop / no-fetch / sent / answered / failed / error
 __dshTaskReminder.state().stats.lastActivation
 ```
 

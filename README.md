@@ -100,10 +100,13 @@ registered.
   in-page approval card uses — so you never switch back to the page to decide.
   Its body is **tool: reason** — the host's localized `displayReason` resolved in the notification language, falling back to the raw `reason`; only an approval with neither falls back to the session name (since 1.6.1; before that the body always showed the session name and said nothing about what was being approved).
   Buttons need a Service Worker; see
-  [Quick decisions](#quick-decisions-from-the-toast). Toast tags are fixed per
-  kind (waiting / completed / error), so a newer toast of the same kind replaces
-  the previous one in the Action Center instead of piling up, while the three
-  kinds never evict each other.
+  [Quick decisions](#quick-decisions-from-the-toast). Toast tags are independent
+  per notification (the 1.5.5 behaviour, restored in 1.6.2): a newer toast never
+  replaces an older one. Fixed-per-kind tags with `renotify` looked tidier, but
+  Windows then replaces the previous banner — and the replaced entry cannot be
+  clicked any more in the Action Center (Electron on Windows does not deliver a
+  click for a notification-center entry, electron#29461), which showed up as
+  "clicking the toast does not raise the window".
   One stop is
   reported once, error first: when a stop arrives, the plugin classifies it
   from the session's durable log (the `turn/end` reason) — a completed turn
@@ -527,11 +530,23 @@ So on a toast click the page sends `POST api/task-reminder/window-activation`
 (a Connection exact-Fetch route registered by the host half, sharing the normal
 `/api` channel and cookie auth), and the host half relaunches the app once: the
 new process cannot take the single-instance lock, exits immediately, and the
-running instance raises its window. The request goes out only when the page is
-in DSH Desktop (`'dshDesktop' in window`) **and** the window is not in the
-foreground. In a plain browser, on a DSH build where the route is absent, or
-when the request fails, it is a silent no-op: opening the right session is
-never affected. macOS uses `open dsh://open`; other platforms skip it.
+running instance raises its window. The page sends that request on every click
+whenever the page is in DSH Desktop (`'dshDesktop' in window`) — it never
+short-circuits on `document.hasFocus()`, because in Electron that still reports
+true when the window is merely covered or hidden, which would silently swallow
+the click. The host half retries the launch (0 / 700 / 2200 ms: relaunch the exe, a
+PowerShell helper that forces the foreground past Windows' foreground lock, then
+explorer via the protocol) — but **it stops the moment the window is confirmed to be
+in the foreground**: the helper exits 0 only when its target window is already (or
+now) the foreground window, and on that signal every pending retry is dropped. The
+helper also checks first and does not force anything when the window is already in
+front (a minimized window does not count). A successful click therefore costs at
+most ~0.7 s of attempts instead of stealing the foreground five times over 4 s — the
+earlier unconditional ladder would pull you back out of whatever app you had
+switched to. In a plain browser, on a DSH build where
+the route is absent, or when the request fails, it is a silent no-op: opening
+the right session is never affected. macOS uses `open dsh://open`; other
+platforms skip it.
 
 Two related behaviours: waiting-class toasts (question / plan review /
 buttonless approval) are closed as soon as their wait clears (answered /
@@ -542,7 +557,7 @@ shows exactly where it broke:
 
 ```js
 // { at, route, reason, status?, error? }
-// reason: no-desktop / no-fetch / already-focused / sent / answered / failed / error
+// reason: no-desktop / no-fetch / sent / answered / failed / error
 __dshTaskReminder.state().stats.lastActivation
 ```
 

@@ -248,13 +248,17 @@ const noManagerApply = await applyUpdate(makeCtx({ dir: cleanDir }), body({ vers
 check('没有 pluginManager 时拒绝并说清原因', noManagerApply.ok === false && noManagerApply.error.includes('pluginManager'), JSON.stringify(noManagerApply));
 
 // ---------------------------------------------------------------------------
-// 桌面壳唤醒：首发 + 四次补发，两种启动方式轮换。实测「spawn 成功（页面留痕
+// 桌面壳唤醒：首发 + 两次补发（0 / 700 / 2200ms），三种启动方式轮换，
+// **确认窗口已在前台就收手**。实测「spawn 成功（页面留痕
 // answered/204）但窗口没抬起来」反复出现，而且**第一次点击最容易输**
 // （2026-10-07：点弹窗第一下没抬起来、后续点击都抬起来；同一天又实测到
 // 「成功的与失败的宿主日志逐项一致」—— 5 次 spawn 全成功、退出码相同、204，
 // 窗口却时好时坏 → 差别只在前台抢占被不被 Windows 放行，于是补上强抢前台那条）。
 // 三条路轮换：直起 exe（second-instance）/ PowerShell 强抢前台 / explorer 走协议；
 // 代价是每次唤醒多起几个撞锁即退的短命进程。
+// 2026-10-07 现场日志（46 次点击）表明助手那一发**46/46 都是 exit 0**（窗口已经在
+// 前台），后面三次却照旧无条件执行 → 每次点击白抢三次前台。所以补发改成条件性的，
+// 梯子也收短（尾巴 2.2 秒），下面专门有一节测「成功就停」。
 // ---------------------------------------------------------------------------
 
 console.log('');
@@ -300,6 +304,12 @@ check('助手把「我起来了 / 选了哪个窗口 / 抢到没有 / 报什么�
 	&& helperScript.includes('foreground = $raised') && helperScript.includes('title = [DshRaise.Native]::Title($handle)')
 	&& helperScript.includes('} catch {'),
 	helperScript.split('\r\n').filter((line) => line.includes('Add-Content')).join(' | '));
+// 1.6.2：动手抢之前先看一眼。窗口已经在前台就别再 AttachThreadInput ——
+// 那是硬抢，发生在「用户刚切去别的应用」时就是把人家拽回来。
+check('助手动手前先看是不是已经在前台（最小化的不算，还得 restore）',
+	helperScript.includes('$already = (([DshRaise.Native]::IsIconic($handle) -eq $false) -and ([DshRaise.Native]::GetForegroundWindow() -eq $handle))')
+	&& helperScript.includes('if (-not $already) {') && helperScript.includes('alreadyForeground = $already'),
+	helperScript.split('\r\n').filter((line) => line.includes('$already') || line.includes('AttachThreadInput')).join(' | '));
 check('raise 日志路径：%USERPROFILE%\\.dsh\\task-reminder-raise.log',
 	foregroundRaiseLogPath('C:/Users/x') === join('C:/Users/x', '.dsh', 'task-reminder-raise.log'), foregroundRaiseLogPath('C:/Users/x'));
 check('三种启动方式轮换：直起 exe → PowerShell 强抢前台 → explorer 走协议',
@@ -321,15 +331,14 @@ check('encodePowerShellCommand 就是 UTF-16LE 的 base64（-EncodedCommand 的�
 
 const winIssued = launchDesktopWindow('win32', { spawn: stubSpawn, schedule: fakeSchedule, environment: desktopEnv });
 check('桌面壳（win32）：首发一次、返回已发出', winIssued === true && spawnCalls.length === 1 && spawnCalls[0].args[0] === 'dsh://open', JSON.stringify(spawnCalls));
-check('首发之外补发四次（第一次点击最容易输，尾巴拉到 4 秒）', scheduled.length === ACTIVATION_SCHEDULE_MS.length - 1, JSON.stringify(scheduled.map((entry) => entry.delay)));
-check('补发时刻按常量表排（0 / 700 / 1400 / 2400 / 4000ms）', scheduled.every((entry, index) => entry.delay === ACTIVATION_SCHEDULE_MS[index + 1]), JSON.stringify(scheduled.map((entry) => entry.delay)));
+check('首发之外补发两次（第一次点击最容易输，但补发只在没抬起来时才真的动手抢）', scheduled.length === ACTIVATION_SCHEDULE_MS.length - 1, JSON.stringify(scheduled.map((entry) => entry.delay)));
+check('补发时刻按常量表排（0 / 700 / 2200ms）', scheduled.every((entry, index) => entry.delay === ACTIVATION_SCHEDULE_MS[index + 1]), JSON.stringify(scheduled.map((entry) => entry.delay)));
 scheduled.forEach((entry) => entry.fn());
 check('补发真的会再起进程（短命：撞单实例锁即退）', spawnCalls.length === ACTIVATION_SCHEDULE_MS.length, String(spawnCalls.length));
-check('三条路按 0/700/1400/2400/4000ms 轮换（强抢前台在第二次尝试就上）',
+check('三条路按 0/700/2200ms 轮换（强抢前台的助手是第二发，兼作判决发）',
 	spawnCalls[0].file !== 'explorer.exe' && spawnCalls[0].args[0] === 'dsh://open'
 	&& spawnCalls[1].file === 'powershell.exe'
-	&& spawnCalls[2].file === 'explorer.exe' && spawnCalls[2].args[0] === 'dsh://open'
-	&& spawnCalls[3].file === spawnCalls[0].file && spawnCalls[4].file === 'powershell.exe',
+	&& spawnCalls[2].file === 'explorer.exe' && spawnCalls[2].args[0] === 'dsh://open',
 	JSON.stringify(spawnCalls.map((entry) => entry.file)));
 check('子进程 error 有监听（不冒泡成未捕获异常）', typeof stubChild.errorHandler === 'function', String(typeof stubChild.errorHandler));
 // 实测教训（2026-10-07）：助手 `powershell.exe` 是**控制台程序**，跟着 exe/explorer
@@ -340,6 +349,72 @@ check('助手不 detach、并且用管道收它的输出（exe / explorer 维持
 	&& spawnCalls[1].options.detached === false
 	&& Array.isArray(spawnCalls[1].options.stdio) && spawnCalls[1].options.stdio[2] === 'pipe',
 	JSON.stringify(spawnCalls.map((entry) => ({ file: entry.file, detached: entry.options?.detached, stdio: entry.options?.stdio }))));
+
+// ---------------------------------------------------------------------------
+// 「成功就停」（1.6.2 修的那个 bug）。助手退出码 0 = 收尾时目标窗口已在前台，
+// 这是宿主唯一看得见的达成信号。现场日志（46 次点击）：助手那一发**全部 exit 0**，
+// 后面三发却照旧在 1400 / 2400 / 4000ms 执行 —— 每次点击都白抢三次前台，用户
+// 那边就是「已经切到别的应用，又被拽回来，很频繁」。现在拿到 0 就把补发作废。
+// ---------------------------------------------------------------------------
+
+/** 能按事件派发 handler 的子进程桩（要手动触发 exit，才能测「成功就停」）。 */
+const spawnRecorder = (calls) => (file, args) => {
+	const child = {
+		pid: 9000 + calls.length,
+		handlers: {},
+		stdout: { on: (event, handler) => { child.handlers[`stdout:${event}`] = handler; } },
+		stderr: { on: (event, handler) => { child.handlers[`stderr:${event}`] = handler; } },
+		unref: () => {},
+		on: (event, handler) => { (child.handlers[event] ??= []).push(handler); },
+	};
+	calls.push({ file, args, child });
+	return child;
+};
+const runActivation = (calls) => {
+	const timers = [];
+	const trace = [];
+	launchDesktopWindow('win32', {
+		spawn: spawnRecorder(calls),
+		schedule: (fn, delay) => { timers.push({ fn, delay }); return timers.length; },
+		environment: desktopEnv,
+		executable: 'C:/App/dsh.exe',
+		record: (entry) => trace.push(entry),
+	});
+	return { timers, trace };
+};
+const exitOf = (call, code) => call.child.handlers.exit?.forEach((handler) => handler(code, null));
+
+const settledCalls = [];
+const settledRun = runActivation(settledCalls);
+settledRun.timers[0].fn(); // 第二次尝试：前台助手
+exitOf(settledCalls[1], 0); // 助手：收尾时窗口已在前台
+const spawnsAtSettle = settledCalls.length;
+settledRun.timers[1].fn(); // 第三次尝试：不该再起进程
+check('助手报「已在前台」（exit 0）之后：剩下的补发不再起进程',
+	spawnsAtSettle === 2 && settledCalls.length === 2,
+	JSON.stringify(settledCalls.map((call) => call.file)));
+check('「成功就停」写进唤醒日志（settled + 原因，事后能复盘这次为什么只抢了两下）',
+	settledRun.trace.some((entry) => entry.event === 'settled' && entry.reason === 'foreground'),
+	JSON.stringify(settledRun.trace.map((entry) => entry.event)));
+
+const retryCalls = [];
+const retryRun = runActivation(retryCalls);
+retryRun.timers[0].fn();
+exitOf(retryCalls[1], 1); // 助手：调完了但窗口仍不在前台
+retryRun.timers[1].fn();
+check('助手没抢到（exit 1）时照旧补发最后一发（没成功就不收手）',
+	retryCalls.length === 3 && retryCalls[2].file === 'explorer.exe'
+	&& retryRun.trace.some((entry) => entry.event === 'exit' && entry.code === 1)
+	&& retryRun.trace.every((entry) => entry.event !== 'settled'),
+	JSON.stringify(retryCalls.map((call) => call.file)));
+
+const appLinkCalls = [];
+const appLinkRun = runActivation(appLinkCalls);
+exitOf(appLinkCalls[0], 0); // 直起 exe 的 0 只是「进程正常退出」，不代表窗口到了前台
+appLinkRun.timers[0].fn();
+check('直起 exe 的退出码 0 不被当成「已在前台」（它的 0 只是进程正常退出）',
+	appLinkCalls.length === 2,
+	JSON.stringify(appLinkCalls.map((call) => call.file)));
 
 // 助手往 stderr 说的话要进唤醒日志；PowerShell 那段 CLIXML 进度噪音要摘掉，
 // 但**不能连带把后面真正的报错删掉**。

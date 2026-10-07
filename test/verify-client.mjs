@@ -840,21 +840,9 @@ const setStatusRunning = (sessionId, running) => {
 	for (const listener of [...statusSubscribers]) listener();
 };
 /**
- * 只改某个会话的「完成未读」电平并通知订阅者（补漏通道专用）：
- * 宿主在后台会话跑完且用户还没打开时点亮它，打开 / 再跑 / 会话消失即清零。
+ * 整个会话从快照里消失（被删除 / 归档）。
  */
-const setCompletionUnread = (sessionId, unread) => {
-	const next = new Map(sessionStatusMap);
-	next.set(sessionId, {
-		running: false,
-		pendingInteraction: next.get(sessionId)?.pendingInteraction,
-		completionUnread: unread === true,
-	});
-	sessionStatusMap = next;
-	for (const listener of [...statusSubscribers]) listener();
-};
-
-/** 整个会话从快照里消失（被删除 / 归档）。 */const dropSessionFromStatus = (sessionId) => {
+const dropSessionFromStatus = (sessionId) => {
 	const next = new Map(sessionStatusMap);
 	next.delete(sessionId);
 	sessionStatusMap = next;
@@ -1120,8 +1108,9 @@ await tick();
 check('完成边沿：分类读得 completed → 提示音与弹窗同轮发出', notificationLog.created.length === 1 && audioLog.oscillators.length === 2, `${notificationLog.created.length} / ${audioLog.oscillators.length}`);
 check('任务完成即发一条系统弹窗（默认任何情况都弹）', notificationLog.created.length === 1, String(notificationLog.created.length));
 check('弹窗标题/正文', notificationLog.created[0]?.title === '对话任务已完成' && notificationLog.created[0]?.options?.body === '另一个会话', JSON.stringify(notificationLog.created[0]));
-check('tag 按类型固定（等待 / 完成 / 出错各一个槽位，同类型替换上一条）', notificationLog.created[0]?.options?.tag === `${NOTIFICATION_TAG}-${NOTIFY_KIND_COMPLETED}`
-	&& notificationLog.created[0]?.options?.renotify === true, String(notificationLog.created[0]?.options?.tag));
+check('tag 每条独立（后一条不顶掉前一条，回到 1.5.5 的行为）', String(notificationLog.created[0]?.options?.tag).startsWith(`${NOTIFICATION_TAG}-`)
+	&& notificationLog.created[0]?.options?.tag !== `${NOTIFICATION_TAG}-${NOTIFY_KIND_COMPLETED}`
+	&& notificationLog.created[0]?.options?.renotify === undefined, String(notificationLog.created[0]?.options?.tag));
 check('通知标记 silent：声音只由插件自己那套负责（不叠系统提示音）', notificationLog.created[0]?.options?.silent === true, JSON.stringify(notificationLog.created[0]?.options));
 // 「弹窗一直挂着」（requireInteraction）默认关：横幅收进通知中心之后再点，
 // Electron 在 Windows 上不投递 click（electron#29461），打开后横幅不走、点击
@@ -1707,7 +1696,7 @@ setPendingInteraction('s2', { sessionId: 's2', kind: 'question', key: 'question:
 check('出现问题即发「提问」弹窗（正文是首个问题）', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '提问' && notificationLog.created[0]?.options?.body === '要用哪个数据库？', JSON.stringify(notificationLog.created[0]));
 check('默认关闭：等待类也不设 requireInteraction', notificationLog.created[0]?.options?.requireInteraction === false, JSON.stringify(notificationLog.created[0]?.options));
 check('等待类弹窗按类型选标题：提问 → 提问、plan-review → 方案待确认', WAIT_TITLE_KEYS.question === 'toast.question.title' && WAIT_TITLE_KEYS['plan-review'] === 'toast.plan.title' && WAIT_TITLE_KEYS.approval === 'toast.approval.title', JSON.stringify(WAIT_TITLE_KEYS));
-check('等待类弹窗共用 waiting 槽位', notificationLog.created[0]?.options?.tag === `${NOTIFICATION_TAG}-${NOTIFY_KIND_WAITING}`, String(notificationLog.created[0]?.options?.tag));
+check('等待类弹窗的 tag 也是每条独立', String(notificationLog.created[0]?.options?.tag).startsWith(`${NOTIFICATION_TAG}-`) && notificationLog.created[0]?.options?.tag !== `${NOTIFICATION_TAG}-${NOTIFY_KIND_WAITING}`, String(notificationLog.created[0]?.options?.tag));
 check('待答记进 stats.questions', windowStub.__dshTaskReminder.state().stats.questions === questionsBeforeClassify + 1, String(windowStub.__dshTaskReminder.state().stats.questions));
 check('待答也响提示音', audioLog.oscillators.length === 2, String(audioLog.oscillators.length));
 
@@ -2311,7 +2300,7 @@ check("test('question') 当场发一条「提问」弹窗", notificationLog.crea
 resetAudioLog();
 windowStub.__dshTaskReminder.test('plan-review');
 check("test('plan-review') 当场发一条「方案待确认」弹窗（也接受简写 'plan'）", notificationLog.created.length === 4
-	&& notificationLog.created[3]?.title === zh['toast.plan.title'] && notificationLog.created[3]?.options?.tag === `${NOTIFICATION_TAG}-${NOTIFY_KIND_WAITING}`, JSON.stringify(notificationLog.created[3]));
+	&& notificationLog.created[3]?.title === zh['toast.plan.title'] && String(notificationLog.created[3]?.options?.tag).startsWith(`${NOTIFICATION_TAG}-`), JSON.stringify(notificationLog.created[3]));
 resetAudioLog();
 swShown.length = 0;
 windowStub.__dshTaskReminder.test('approval');
@@ -2396,52 +2385,8 @@ check('认不出的原文原样透传（只做逐字对照，不猜着翻）', n
 setPendingInteraction('s4', null);
 resetNotificationLog();
 face.setNotifyLanguage('auto');
-
-// ---------------------------------------------------------------------------
-// 完成未读补漏（页面刷新 / 插件热重载期间跑完的后台会话）
-// ---------------------------------------------------------------------------
-
-console.log('');
-console.log('完成未读补漏');
-
-// s9 是这一节新引入的会话：插件本次装载从没见过它的 running 边沿，
-// 正好模拟「页面刷新前就跑完了」——只有宿主的「完成未读」电平能救回来。
-hostList = { ids: [...hostList.ids, 's9'], byId: { ...hostList.byId, s9: { title: '第九个会话', displayTitle: '第九个会话', running: false } } };
-resetNotificationLog();
-resetAudioLog();
-const completedBeforeUnread = statsNow().completed;
-const unreadBefore = statsNow().unreadRecovered;
-fakeEventEntries = [{ type: 'event', event: { type: 'turn/end', seq: 1, time: 1, data: { turn: 601, reason: { kind: 'completed' } } } }];
-setCompletionUnread('s9', true);
-await tick();
-check('「完成未读」电平补报一条完成（边沿是盲区的那种）', notificationLog.created.length === 1 && notificationLog.created[0]?.options?.body === '第九个会话', JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
-check('补报计入 stats.unreadRecovered 与 completed', statsNow().unreadRecovered === unreadBefore + 1 && statsNow().completed === completedBeforeUnread + 1, JSON.stringify({ unread: statsNow().unreadRecovered, completed: statsNow().completed }));
-check('排障状态记着已补报的会话', windowStub.__dshTaskReminder.state().completionUnreadReported.includes('s9'), JSON.stringify(windowStub.__dshTaskReminder.state().completionUnreadReported));
-const unreadAfterFirst = statsNow().unreadRecovered;
-setCompletionUnread('s9', true);
-await tick();
-check('同一段未读只补一次（电平没熄灭就不重复弹）', notificationLog.created.length === 1 && statsNow().unreadRecovered === unreadAfterFirst, JSON.stringify({ created: notificationLog.created.length, unread: statsNow().unreadRecovered }));
-setCompletionUnread('s9', false);
-await tick();
-check('电平熄灭（打开会话 / 再跑 / 会话消失）即解锁', !windowStub.__dshTaskReminder.state().completionUnreadReported.includes('s9'), JSON.stringify(windowStub.__dshTaskReminder.state().completionUnreadReported));
-// 新的一段未读（新回合）照常补报：锁是按「未读实例」算的。
-resetNotificationLog();
-fakeEventEntries = [{ type: 'event', event: { type: 'turn/end', seq: 1, time: 1, data: { turn: 602, reason: { kind: 'completed' } } } }];
-setCompletionUnread('s9', true);
-await tick();
-check('新的一段未读照常补报', notificationLog.created.length === 1 && statsNow().unreadRecovered === unreadAfterFirst + 1, JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
-setCompletionUnread('s9', false);
-await tick();
-// 挂起的等待不算完成：宿主在有待答交互时也会点亮这个电平，不能被当成完成。
-hostList = { ids: [...hostList.ids, 's10'], byId: { ...hostList.byId, s10: { title: '第十个会话', displayTitle: '第十个会话', running: false } } };
-resetNotificationLog();
-setPendingInteraction('s10', { sessionId: 's10', kind: 'question', key: 'question:unread', questions: [{ id: 'q1', question: '未读电平也跟着亮？' }] });
-resetNotificationLog();
-setCompletionUnread('s10', true);
-await tick();
-check('有 pendingInteraction 时电平补漏让位给等待提醒（不额外报完成）', notificationLog.created.every((item) => item.title !== zh['toast.completed.title']), JSON.stringify(notificationLog.created.map((item) => item.title)));
-setPendingInteraction('s10', null);
-setCompletionUnread('s10', false);
+// 「完成未读」电平补漏（宿主 completionUnread）已按用户要求整段撤回：它正是「代际兼容」那一类
+// 宿主字段依赖 + 完成补报，1.6.2 回到纯 running 边沿 + 回合号判据。
 fakeEventEntries = null;
 
 // ---------------------------------------------------------------------------
@@ -2537,7 +2482,7 @@ check('审批通知：标题是「审批请求」+ 两个按钮（同意 / 拒�
 	&& swShown[0]?.options?.actions?.[0]?.title === zh['toast.approve']
 	&& swShown[0]?.options?.actions?.[1]?.title === zh['toast.reject'], JSON.stringify(swShown[0]));
 check('审批通知带 data.key / sessionId，并且 silent（声音只由插件负责）', swShown[0]?.options?.data?.key === 'approval:7' && swShown[0]?.options?.data?.sessionId === 's3'
-	&& swShown[0]?.options?.silent === true && swShown[0]?.options?.renotify === true, JSON.stringify(swShown[0]?.options));
+	&& swShown[0]?.options?.silent === true && swShown[0]?.options?.renotify === undefined, JSON.stringify(swShown[0]?.options));
 check('带按钮的通知自己占 tag 槽位（不会被别的等待顶掉）', String(swShown[0]?.options?.tag).includes('approval:7'), String(swShown[0]?.options?.tag));
 check('默认关闭：带按钮的审批通知也不设 requireInteraction', swShown[0]?.options?.requireInteraction === false, JSON.stringify(swShown[0]?.options));
 check('排障状态列着这条未结清的审批通知', windowStub.__dshTaskReminder.state().approvalToasts.includes('approval:7'), JSON.stringify(windowStub.__dshTaskReminder.state().approvalToasts));
@@ -2583,7 +2528,7 @@ resetNotificationLog();
 swShown.length = 0;
 setPendingInteraction('s3', { sessionId: 's3', kind: 'approval', key: 'approval:11' });
 check('没有 answer 的审批：退回普通通知（不假装有按钮）', swShown.length === 0 && notificationLog.created.length === 1
-	&& notificationLog.created[0]?.options?.tag === `${NOTIFICATION_TAG}-${NOTIFY_KIND_WAITING}`, JSON.stringify({ swShown: swShown.length, plain: notificationLog.created[0]?.options?.tag }));
+	&& String(notificationLog.created[0]?.options?.tag).startsWith(`${NOTIFICATION_TAG}-`), JSON.stringify({ swShown: swShown.length, plain: notificationLog.created[0]?.options?.tag }));
 setPendingInteraction('s3', null);
 
 // 审批通知的正文：工具名 + 理由（displayReason 按通知语言取）。宿主侧审批

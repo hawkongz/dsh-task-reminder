@@ -12,7 +12,9 @@
  * （`dsh://open` 深度链接，second-instance → focusPrimaryWindow）触发；插件在
  * 渲染进程里既没有这条 IPC，也发不出外部协议（渲染进程导航到 `dsh:` 会被拦），
  * 所以由宿主进程代跑一次「再启动一份应用」：第二份拿不到单实例锁会立刻退出，
- * 第一份随即把窗口拉回前台，用户无感。
+ * 第一份随即把窗口拉回前台，用户无感。**抢前台是竞速，所以有几次补发，但补发
+ * 一旦确认窗口已在前台（助手退出码 0）就立刻停** —— 目的达成之后再抢，就是把
+ * 已经从别处切走的用户拽回来（见 `ACTIVATION_SCHEDULE_MS`）。
  *
  * 为什么更新也必须由宿主来做：升级要跑包管理器、要写 profile 的 package.json /
  * 锁文件，这两件事只有宿主进程有能力也有资格做。渲染进程一共发三条 POST：
@@ -122,10 +124,12 @@ function executableProcessName(executable) {
  * 所以这里自己枚举：只认**无主**、**可见或最小化**的顶层窗口，**排除 DevTools**，
  * 再取面积最大的那个；标题只用来排除，不用来选主窗口（标题随会话变）。
  *
- * 退出码即结论（进唤醒日志的 `exit.code`）：0 = 收尾时目标窗口已是前台，
- * 1 = 调完了但仍不是前台，2 = 没找到可用窗口。
+ * 退出码即结论（进唤醒日志的 `exit.code`）：0 = 收尾时目标窗口已是前台
+ * （本来就在，或刚抢到），1 = 调完了但仍不是前台，2 = 没找到可用窗口。
+ * 宿主只认这个 0：它说明「窗口已经在用户眼前」，后面的补发一律撤掉。
  * 另外每次都会往 `%USERPROFILE%\.dsh\task-reminder-raise.log` 追加一行 JSON
- * （选了哪个 hwnd / 标题 / 是否抢到）：退出码只有三个数，复盘不够用。
+ * （选了哪个 hwnd / 标题 / 是否最小化 / 是本来就前台还是刚抢到）：退出码只有三个
+ * 数，复盘不够用。
  * @param processName - 目标进程名（`executableProcessName` 的产物）。
  * @param logPath - 结果日志路径。
  * @returns 可直接跑的一段 PowerShell。
@@ -183,6 +187,13 @@ function foregroundHelperScript(processName, logPath) {
 		'  if ($picked -ne [IntPtr]::Zero) { $handle = $picked; break }',
 		'}',
 		'if ($handle -eq [IntPtr]::Zero) { exit 2 }',
+		// 已经在前台就别再抢。AttachThreadInput + SetForegroundWindow 是**硬抢**：
+		// 窗口已经抬起来、用户随后切去别的应用时再来一次，就是把人拽回来
+		// （2026-10-07 现场日志：46 次点击的助手那一发**全部 exit 0**，说明到达时
+		// 窗口多半已经在前台，上一版却照抢不误）。最小化的窗口不算「已在前台」，
+		// 该 restore 还得 restore，所以这里连 IsIconic 一起看。
+		'$already = (([DshRaise.Native]::IsIconic($handle) -eq $false) -and ([DshRaise.Native]::GetForegroundWindow() -eq $handle))',
+		'if (-not $already) {',
 		'[DshRaise.Native]::ShowWindow($handle, 9) | Out-Null',
 		'$foreground = [DshRaise.Native]::GetForegroundWindow()',
 		'$foregroundThread = [DshRaise.Native]::GetWindowThreadProcessId($foreground, [IntPtr]::Zero)',
@@ -191,9 +202,10 @@ function foregroundHelperScript(processName, logPath) {
 		'[DshRaise.Native]::BringWindowToTop($handle) | Out-Null',
 		'[DshRaise.Native]::SetForegroundWindow($handle) | Out-Null',
 		'[DshRaise.Native]::AttachThreadInput($currentThread, $foregroundThread, $false) | Out-Null',
+		'}',
 		'$raised = ([DshRaise.Native]::GetForegroundWindow() -eq $handle)',
 		// 用 ConvertTo-Json 生成，别手拼引号（手拼过一次，多出一个 `"` 让整行不是合法 JSON）。
-		'$payload = [ordered]@{ event = "raise"; time = (Get-Date).ToUniversalTime().ToString("o"); hwnd = [int64]$handle; title = [DshRaise.Native]::Title($handle); minimized = [DshRaise.Native]::IsIconic($handle); foreground = $raised; helperPid = $PID }',
+		'$payload = [ordered]@{ event = "raise"; time = (Get-Date).ToUniversalTime().ToString("o"); hwnd = [int64]$handle; title = [DshRaise.Native]::Title($handle); minimized = [DshRaise.Native]::IsIconic($handle); foreground = $raised; alreadyForeground = $already; helperPid = $PID }',
 		'Add-Content -LiteralPath $logPath -Value ($payload | ConvertTo-Json -Compress) -Encoding UTF8',
 		'if ($raised) { exit 0 } else { exit 1 }',
 		'} catch {',
@@ -271,12 +283,18 @@ function activationEnvironment(environment = process.env) {
 /**
  * 每次尝试的时刻（ms，相对点击那一刻）。Windows 前台抢占是竞速：实测
  * 「spawn 成功（204）但窗口没抬起来」复现过多次，而且**第一次点击**最容易输
- * （2026-10-07 用户实测：点弹窗第一下没抬起来，后续点击都抬起来了）。所以
- * 首发之外补发四次、尾巴拉到 4 秒，并让两条启动方式轮换 —— 把「谁先赶到
- * 单实例锁 / 谁拿得到前台权限」的运气摊薄。代价是每次唤醒多起几个撞锁
- * 即退的短命进程。
+ * （2026-10-07 用户实测：点弹窗第一下没抬起来，后续点击都抬起来了），所以首发
+ * 之外还要补发，把「谁先赶到单实例锁 / 谁拿得到前台权限」的运气摊薄。
+ *
+ * **补发是有条件、有上限的**（1.6.2 修的那个 bug）：`%USERPROFILE%\.dsh\
+ * task-reminder-activation.log` 里 46 次点击的现场日志显示，700ms 那一发
+ * 的助手**每次都把窗口置成了前台**，后面的 1400 / 2400 / 4000ms 三发却照旧
+ * 无条件执行 —— 每次点击都白抢三次前台，用户那边就是「已经切到别的应用，
+ * 又被拽回来，而且很频繁」。现在改成**成功就停**：助手报「已在前台」
+ * （exit 0）时立刻撤掉剩下的补发；助手动手前也会先看一眼是不是已经在前台。
+ * 表本身只留三发，第三发只在助手明说没抢到时才用得上。
  */
-const ACTIVATION_SCHEDULE_MS = Object.freeze([0, 700, 1400, 2400, 4000]);
+const ACTIVATION_SCHEDULE_MS = Object.freeze([0, 700, 2200]);
 
 /** 唤醒日志：两个 profile 共用 JSONL 文件，靠 profile / hostPid / requestId 区分。 */
 function activationLogPath(userHome = homedir()) {
@@ -317,9 +335,11 @@ function recordActivation(record, entry) {
 
 /**
  * 再启动一份应用，触发第一份的 second-instance → focusPrimaryWindow()。
- * 宿主半侧观测不到主进程最终有没有 focus 成功，所以补发是无条件的。
- * 失败（平台不支持、spawn 抛错）返回 false，调用方据此回 501；补发排在
- * 后台，不受首发结果影响。
+ * 宿主半侧观测不到主进程最终有没有 focus 成功，所以补发是**条件性**的：
+ * 唯一看得见的达成信号是前台助手的退出码 0（脚本收尾时目标窗口已在前台），
+ * 拿到它就把剩下的补发全部作废 —— 目的已达还继续抢，只会把用户从别的应用
+ * 里拽回来。失败（平台不支持、spawn 抛错）返回 false，调用方据此回 501；
+ * 补发排在后台，不受首发结果影响。
  * @param platform - `process.platform`。
  * @param options - 可注入的桩：{ spawn, schedule, environment, executable }（自检用）。
  * @returns 首发是否成功发出。
@@ -333,8 +353,16 @@ function launchDesktopWindow(platform, options = {}) {
 	}
 	const spawnProcess = options.spawn ?? spawn;
 	const schedule = options.schedule ?? setTimeout;
+	/** 「目的达成」闸门：一置上，还没发出去的补发全部作废（定时器照旧到点，但只空跑）。 */
+	let settled = false;
+	const settle = (reason) => {
+		if (settled) return;
+		settled = true;
+		recordActivation(record, { event: 'settled', reason });
+	};
 	/** 发一次（按次序轮换启动方式）；子进程 error 必须有监听者（否则冒泡成未捕获异常）。 */
 	const attempt = (index) => {
+		if (settled) return false;
 		const command = commands[index % commands.length];
 		// 助手是**控制台程序**：`detached: true` 会让它在没有控制台时立刻退 0
 		// （2026-10-07 实测：宿主原来那套 `detached + stdio:'ignore'` 下
@@ -375,6 +403,10 @@ function launchDesktopWindow(platform, options = {}) {
 					.replace(/<Objs[\s\S]*?<\/Objs>/gu, ' ')
 					.trim();
 				recordActivation(record, { ...detail, event: 'exit', code, signal, ...(text === '' ? {} : { output: text.slice(0, 500) }) });
+				// 助手的退出码 0 = 收尾时目标窗口已经是前台（`foregroundHelperScript`）。
+				// 这是宿主唯一看得见的「窗口已经在用户眼前」信号 —— 拿到就撤掉剩下的
+				// 补发，别再反复抢前台。exe / explorer 的退出码没有这个含义，不认。
+				if (isHelper && code === 0) settle('foreground');
 			});
 			recordActivation(record, { ...detail, event: 'issued', childPid: child.pid ?? null });
 			child.unref();
