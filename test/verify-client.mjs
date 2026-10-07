@@ -515,7 +515,6 @@ const {
 	NOTIFY_PERSIST_KEY,
 	NOTIFICATION_TAG,
 	NOTIFY_KIND_COMPLETED,
-	NOTIFY_KIND_ERROR,
 	NOTIFY_KIND_WAITING,
 	NOTIFY_LANGUAGE_AUTO,
 	NOTIFY_LANGUAGE_EN,
@@ -3274,7 +3273,22 @@ check('连不上宿主也如实报失败（不把没查到当成已最新）', f
 
 console.log('');
 console.log('回收');
+// 卸载守卫：把一次停止分类摁在途，再走真正的卸载路径（跑所有 ctx.effect 清理）。
+// 落地的那次分类已经属于一个死实例（热重载 / 停用 / 换新实例），不得再弹窗、再放音。
+let unloadGateRelease;
+fakeUsingGate = new Promise((resolve) => { unloadGateRelease = resolve; });
+resetNotificationLog();
+resetAudioLog();
+statusListener('s2', true);
+statusListener('s2', false); // 停止边沿 → 分类被闸门摁在途
 for (const { disposer } of [...effects].reverse()) if (typeof disposer === 'function') disposer();
+unloadGateRelease();
+await tick();
+await tick();
+await tick();
+check('卸载后落地的分类不再弹窗（死实例上不提醒）', notificationLog.created.length === 0, String(notificationLog.created.length));
+check('卸载后落地的分类不再放音', audioLog.oscillators.length === 0, String(audioLog.oscillators.length));
+fakeUsingGate = null;
 check('排障钩子被移除', windowStub.__dshTaskReminder === undefined);
 check('事件订阅被退订', listeners.every((entry) => entry.disposed === true));
 check('会话列表订阅被退订', listListeners.size === 0, String(listListeners.size));

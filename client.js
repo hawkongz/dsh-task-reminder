@@ -230,7 +230,7 @@ const CLICK_ROUTER_KEY = '__dshTaskReminderClickRouter';
  */
 function clickRouterOf(root) {
 	try {
-		const owner = root ?? (typeof window !== 'undefined' ? window : null);
+		const owner = root ?? window;
 		if (owner === null || owner === undefined) return null;
 		if (owner[CLICK_ROUTER_KEY] === undefined) owner[CLICK_ROUTER_KEY] = { handler: null };
 		return owner[CLICK_ROUTER_KEY];
@@ -274,7 +274,7 @@ function newerRecord(instance, shared) {
  */
 function toastRegistryOf(root) {
 	try {
-		const owner = root ?? (typeof window !== 'undefined' ? window : null);
+		const owner = root ?? window;
 		if (owner === null || owner === undefined) return null;
 		if (owner[TOAST_REGISTRY_KEY] === undefined) owner[TOAST_REGISTRY_KEY] = new Map();
 		return owner[TOAST_REGISTRY_KEY];
@@ -627,7 +627,7 @@ function installNotificationClickRelay(scope) {
 		/** 消息行上的类型属性。 */
 		const QUESTION_ROW_ATTR = 'data-chat-flow-kind';
 		/** 算作「你的消息」的两种行（`turn-trigger` 是系统唤醒行，不算提问）。 */
-		const QUESTION_ROW_KINDS = ['user', 'steering'];
+		const QUESTION_ROW_KINDS = Object.freeze(['user', 'steering']);
 		/** 行选择器：自检的 DOM 桩按同一串匹配，改这里必须同步改桩。 */
 		const QUESTION_ROW_SELECTOR = QUESTION_ROW_KINDS.map((kind) => `[${QUESTION_ROW_ATTR}="${kind}"]`).join(', ');
 		/** 对齐偏移：行顶落在滚动口顶边下方这么多像素（应用自己的「跳到第 N 轮」也是 24）。 */
@@ -1025,9 +1025,8 @@ function installNotificationClickRelay(scope) {
 		 * @returns [0, CUSTOM_SOUND_CHOICE] 内的整数下标。
 		 */
 		function resolveSoundChoice(value) {
-			const index = typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : Number.NaN;
-			if (!Number.isFinite(index)) return DEFAULT_SOUND_CHOICE;
-			return clampInteger(index, 0, CUSTOM_SOUND_CHOICE, DEFAULT_SOUND_CHOICE);
+			// 取整、夹区间、坏值兜底都由 clampInteger 一次做完（这里不再重复判一遍）。
+			return clampInteger(value, 0, CUSTOM_SOUND_CHOICE, DEFAULT_SOUND_CHOICE);
 		}
 
 		/**
@@ -1102,7 +1101,6 @@ function installNotificationClickRelay(scope) {
 		/** 这个浏览器能不能用 IndexedDB 存自定义音频（不能时设置页直接说清楚）。 */
 		function indexedDbAvailable() {
 			try {
-				if (typeof window === 'undefined') return false;
 				const factory = window.indexedDB;
 				return factory !== null && factory !== undefined && typeof factory === 'object' && typeof factory.open === 'function';
 			} catch {
@@ -1290,7 +1288,6 @@ function installNotificationClickRelay(scope) {
 			 */
 			function playPreset(choice, volume) {
 				try {
-					if (typeof window === 'undefined') return { scheduled: false, state: 'no-window' };
 					const volumePercent = clampVolume(volume);
 					if (volumePercent <= 0) return { scheduled: false, state: 'muted' }; // 0 = 静音：一条音都不排。
 					const Ctor = window.AudioContext ?? window.webkitAudioContext;
@@ -1322,7 +1319,6 @@ function installNotificationClickRelay(scope) {
 			 */
 			function playBuffer(buffer, volume) {
 				try {
-					if (typeof window === 'undefined') return { scheduled: false, state: 'no-window' };
 					const volumePercent = clampVolume(volume);
 					if (volumePercent <= 0) return { scheduled: false, state: 'muted' }; // 0 = 静音：不排。
 					if (buffer === null || buffer === undefined) return { scheduled: false, state: 'custom-missing' };
@@ -1365,7 +1361,6 @@ function installNotificationClickRelay(scope) {
 					const input = data !== null && data !== undefined && typeof data.arrayBuffer === 'function'
 						? await data.arrayBuffer()
 						: data;
-					if (typeof window === 'undefined') throw new Error('no-window');
 					const Ctor = window.AudioContext ?? window.webkitAudioContext;
 					if (Ctor === undefined) throw new Error('unsupported');
 					audio ??= new Ctor();
@@ -1392,7 +1387,6 @@ function installNotificationClickRelay(scope) {
 				 */
 				warm() {
 					try {
-						if (typeof window === 'undefined') return;
 						const Ctor = window.AudioContext ?? window.webkitAudioContext;
 						if (Ctor === undefined) return;
 						audio ??= new Ctor();
@@ -1517,9 +1511,9 @@ function installNotificationClickRelay(scope) {
 				}
 			};
 			try {
-				if (typeof window === 'undefined' || !('dshDesktop' in window)) { record('no-desktop'); return; }
+				if (!('dshDesktop' in window)) { record('no-desktop'); return; }
 				if (typeof window.fetch !== 'function') { record('no-fetch'); return; }
-				focused = typeof document !== 'undefined' && document.hidden === false
+				focused = document.hidden === false
 					&& typeof document.hasFocus === 'function' && document.hasFocus() === true;
 				// 带上这次点击的 ID：宿主把它写进唤醒日志，页面留痕与宿主日志能对上
 				// 同一次点击（两个 profile 共用一份日志，必须靠 ID 区分）。
@@ -1550,13 +1544,12 @@ function installNotificationClickRelay(scope) {
 		 */
 		function createNotifier() {
 			/** 当前是否具备发通知的条件（浏览器支持且已授权）。 */
-			const granted = () => typeof window !== 'undefined'
-				&& typeof window.Notification === 'function'
+			const granted = () => typeof window.Notification === 'function'
 				&& window.Notification.permission === 'granted';
 			return {
 				/** 浏览器有没有 Notification 构造器。 */
 				get supported() {
-					return typeof window !== 'undefined' && typeof window.Notification === 'function';
+					return typeof window.Notification === 'function';
 				},
 				/** 当前权限：granted / denied / default / unsupported。 */
 				permission() {
@@ -1642,7 +1635,6 @@ function installNotificationClickRelay(scope) {
 		 */
 		function selfBundleUrl() {
 			try {
-				if (typeof window === 'undefined') return null;
 				return findSelfBundleUrl(window.__DSH_BOOT__?.entries);
 			} catch {
 				return null;
@@ -1730,10 +1722,6 @@ function installNotificationClickRelay(scope) {
 					if (started) return;
 					started = true;
 					try {
-						if (typeof window === 'undefined') {
-							setState('unsupported: no window');
-							return;
-						}
 						const serviceWorker = window.navigator?.serviceWorker;
 						if (serviceWorker === undefined || serviceWorker === null) {
 							setState('unsupported: no service worker');
@@ -2615,6 +2603,13 @@ function installNotificationClickRelay(scope) {
 			const bridgeStateStore = createSnapshotStore(actionBridge.state);
 			// 设置页最底部「检查更新」的状态：不持久化，每次打开设置页都从「还没查」开始。
 			const updateStore = createSnapshotStore(UPDATE_IDLE);
+			/**
+			 * 卸载标记。`ctx.timer` 的兜底定时器会随插件卸载一起取消，但**分类本身是
+			 * 异步的**（RPC + 裸 `setTimeout` 重试），没有这个标记时：卸载（热重载 /
+			 * 停用 / 页面换新实例）之后落地的那次分类仍会弹窗、放音 —— 在一个已经不属于
+			 * 自己的实例上。所有「等异步结果再动提醒」的路径都先看它。
+			 */
+			let disposed = false;
 
 			/**
 			 * 调一条宿主更新路由。桌面壳里 `window.fetch` 经 dsh-app 协议转发到宿主，
@@ -2625,7 +2620,7 @@ function installNotificationClickRelay(scope) {
 			 * @returns 宿主答复对象。
 			 */
 			const callUpdateRoute = (path, body) => {
-				if (typeof window === 'undefined' || typeof window.fetch !== 'function') {
+				if (typeof window.fetch !== 'function') {
 					return Promise.reject(new Error('no-fetch'));
 				}
 				const options = { method: 'POST', cache: 'no-store' };
@@ -2666,7 +2661,7 @@ function installNotificationClickRelay(scope) {
 			 */
 			const reloadPage = () => {
 				try {
-					if (typeof window !== 'undefined' && window.location !== undefined && typeof window.location.reload === 'function') {
+					if (window.location !== undefined && typeof window.location.reload === 'function') {
 						window.location.reload();
 					}
 				} catch {
@@ -2837,7 +2832,8 @@ function installNotificationClickRelay(scope) {
 					type: typeof file.type === 'string' ? file.type : '',
 					at: Date.now(),
 				});
-				if (meta === null) return;
+				// name 上面已兜成非空（'audio'），normalizeCustomMeta 必定返回元数据；
+				// 这里不再写一个永远不会成立的 null 分支。
 				const revision = (customRevision += 1);
 				customStatusStore.set('loading');
 				void customSounds.put({ ...meta, blob: file }).then((stored) => {
@@ -2958,7 +2954,7 @@ function installNotificationClickRelay(scope) {
 					attempts += 1;
 					// 对着「目标会话那一列」对齐（见 pickConversationColumn）：DOM 里可能
 					// 同时挂着好几个会话流列，盲取第一个就可能滚错会话。
-					const column = typeof document === 'undefined' ? null : pickConversationColumn(document, sessionId);
+					const column = pickConversationColumn(document, sessionId);
 					if (column === null) {
 						if (attempts >= QUESTION_MAX_ATTEMPTS) settle('no-column');
 						else schedule();
@@ -3102,7 +3098,7 @@ function installNotificationClickRelay(scope) {
 			const verifyJumpMounted = (id, via, attempt = 0, escalated = false) => {
 				const cancel = ctx.timer.timeout(() => {
 					questionTimers.delete(cancel);
-					const column = typeof document === 'undefined' ? null : pickConversationColumn(document, id);
+					const column = pickConversationColumn(document, id);
 					const mounted = mountedSessionId(column);
 					// `mainReference` 是比 DOM 更可靠的信号：现场见过三个会话流列
 					// **共用**一个挂着 `data-conversation-session` 的外层壳 —— 列上的
@@ -3479,6 +3475,7 @@ function installNotificationClickRelay(scope) {
 			 */
 			const readTurnEndReason = async (sessionId) => {
 				for (let attempt = 0; ; attempt += 1) {
+					if (disposed) return null; // 插件已卸载：结果无处可报，剩下几次重试直接省掉
 					let classified = null;
 					try {
 						classified = await ctx.sessions.using(sessionId, { source: 'task-reminder' }, async (reference) => {
@@ -3660,7 +3657,7 @@ function installNotificationClickRelay(scope) {
 				const token = {};
 				completing.set(sessionId, token);
 				const fallbackCancel = ctx.timer.timeout(() => {
-					if (settled) return;
+					if (settled || disposed) return;
 					settled = true;
 					if (completing.get(sessionId) === token) completing.delete(sessionId);
 					reportCompletion(sessionId, source); // 兜底：读不到原因（也就读不到回合号）→ 退回 5 秒完成→完成去重
@@ -3673,6 +3670,8 @@ function installNotificationClickRelay(scope) {
 						if (settled) return;
 						settled = true;
 						fallbackCancel();
+						// 插件已经卸载（热重载 / 停用）：这次分类不作数，别再往一个死实例上弹窗放音。
+						if (disposed) return;
 						const reason = classified?.reason ?? null;
 						const turn = typeof classified?.turn === 'number' ? classified.turn : null;
 						if (turn !== null && lastReportedTurn.get(sessionId) === turn) {
@@ -3879,7 +3878,6 @@ function installNotificationClickRelay(scope) {
 			// 前台跟踪：标签页被切走 / 窗口失焦时 view.focused = false。
 			ctx.effect(() => {
 				const sync = () => {
-					if (typeof document === 'undefined') return;
 					const hidden = document.hidden === true;
 					const unfocused = typeof document.hasFocus === 'function' && document.hasFocus() === false;
 					view.focused = !hidden && !unfocused;
@@ -3903,7 +3901,7 @@ function installNotificationClickRelay(scope) {
 			// 首声会迟一拍。用户在页面上的第一次点击 / 按键就同时做两件事：
 			// 预热（把设备初始化挪到手势里，之后零延迟）与拉活。
 			ctx.effect(() => {
-				if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return () => {};
+				if (typeof window.addEventListener !== 'function') return () => {};
 				const revive = () => {
 					chime.warm();
 					chime.resume();
@@ -3923,7 +3921,7 @@ function installNotificationClickRelay(scope) {
 			// 权限按 Origin 共享：本站点授权一次，任何插件都通用。
 			ctx.effect(() => {
 				try {
-					const storage = typeof window !== 'undefined' ? window.localStorage : undefined;
+					const storage = window.localStorage;
 					if (!storage || typeof storage.getItem !== 'function') return;
 					if (storage.getItem(PERMISSION_ASKED_KEY) === '1') return;
 					if (notifyStore.getSnapshot() !== true) return;
@@ -3970,8 +3968,9 @@ function installNotificationClickRelay(scope) {
 				return () => { cancelled = true; };
 			}, 'dsh-task-reminder: custom sound restore');
 			// 回收对账票据与它们的遗忘定时器、grace 标记、结清回合号（卸载时不再有
-			// 延迟回调落地）。
+			// 延迟回调落地）。先立 `disposed`：在途的分类 / 解码回来时据此直接收手。
 			ctx.effect(() => () => {
+				disposed = true;
 				for (const entry of recentReports.values()) {
 					if (entry.cancel !== null) entry.cancel();
 				}
@@ -4139,7 +4138,7 @@ function installNotificationClickRelay(scope) {
 				/** 数一下选择器命中几个（读不到 DOM 时给 -1，与「有 DOM 但为 0」区分开）。 */
 				const count = (selector) => {
 					try {
-						if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return -1;
+						if (typeof document.querySelectorAll !== 'function') return -1;
 						return document.querySelectorAll(selector).length;
 					} catch {
 						return -1;
@@ -4156,7 +4155,7 @@ function installNotificationClickRelay(scope) {
 				};
 				// 选中「该对齐的那一列」（见 pickConversationColumn）。DOM 里可能同时挂着
 				// 多个会话流列（实测桌面端 3 个、网页端 30 个），只报第一个列会误导。
-				const column = typeof document === 'undefined' ? null : pickConversationColumn(document, null);
+				const column = pickConversationColumn(document, null);
 				const scroller = questionScroller(column);
 				const row = findLatestQuestionRow(column);
 				// 留痕取「实例内那份」与「页面级那份」里更新的一个：热重载会清空前者，
@@ -4164,7 +4163,7 @@ function installNotificationClickRelay(scope) {
 				const lastClick = newerRecord(stats.lastClick, clickDiag.last);
 				const lastJump = newerRecord(stats.lastJump, jumpDiag.last);
 				const lastQuestionJump = newerRecord(stats.lastQuestionJump, jumpDiag.question);
-				const columns = typeof document === 'undefined' ? [] : conversationColumnInfo(document);
+				const columns = conversationColumnInfo(document);
 				const now = Date.now();
 				const ageOf = (record) => (record === null || typeof record?.at !== 'number' ? null : now - record.at);
 				return JSON.stringify({
@@ -4194,7 +4193,7 @@ function installNotificationClickRelay(scope) {
 					// 当前这份页面到底有没有桌面壳全局 —— 桌面壳里一定有
 					// （非主框架 / 非 dsh-app 页面也会有个 protocolVersion 影子），
 					// 没有就说明这一页跑在普通浏览器里，抬窗只能靠 window.focus()。
-					hasDesktop: typeof window !== 'undefined' && 'dshDesktop' in window,
+					hasDesktop: 'dshDesktop' in window,
 					column: count(`[${QUESTION_FLOW_ATTR}]`),
 					questionRows: count(QUESTION_ROW_SELECTOR),
 					scrollHosts: count(`[${QUESTION_SCROLL_ATTR}]`),
