@@ -19,8 +19,10 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      # 发布前先跑测试：断言不全绿就没有后面的发布。
-      - run: node test/verify-client.mjs
+      # 发布前先跑全部自检：跨半侧契约 + 浏览器半侧 + 宿主半侧。
+      # 走 npm test 而不是手写单条命令 —— 门禁与 package.json 只有一份真值，
+      # 加了一套自检也不会漏（verify-host.mjs 就曾长期不在发布门里）。
+      - run: npm test
 
       # tag 必须与 package.json 的 version 对上，否则手动 dispatch 会拿当前分支乱发。
       - name: Tag matches package.json

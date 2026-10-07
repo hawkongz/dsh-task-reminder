@@ -116,17 +116,127 @@ const setFocus = ({ hidden, focused }) => {
 };
 
 /**
- * 「回到底部」按钮桩：插件按 aria-label / CSS module 类名后缀找它，测试里手动增删。
- * getAttribute 只认 aria-label，click 记账，便于断言「点了几次」。
+ * 「点弹窗落到你这次提问的位置」的 DOM 桩。真实环境里插件做的是：
+ *   document.querySelector('[data-chat-flow]')                       → 会话流列
+ *   column.querySelectorAll('[data-chat-flow-kind="user"], …="steering"]')
+ *   column.closest('[data-conversation-scroll]') ?? column.parentElement → 滚动容器
+ *   行 / 容器各量一次 getBoundingClientRect().top
+ * 这里给出同样的形状；几何按「行的视口坐标 = 内容坐标 − scrollTop」算 ——
+ * 写完 scrollTop 再量一次就能看出对齐有没有生效（真浏览器就是这个语义）。
+ * 选择器/属性名在这里写成字面量，另有断言校验它们与插件导出的常量一致。
  */
-const domButtons = [];
-const makeDomButton = (className, label) => ({
-	className,
-	label,
-	clicks: 0,
-	getAttribute: (name) => (name === 'aria-label' ? label : null),
-	click() { this.clicks += 1; },
+const QUESTION_COLUMN_SELECTOR = '[data-chat-flow]';
+const QUESTION_ROW_SELECTOR_STUB = '[data-chat-flow-kind="user"], [data-chat-flow-kind="steering"]';
+const QUESTION_OUTER_SELECTOR = '[data-conversation-scroll]';
+const QUESTION_SESSION_SELECTOR = '[data-conversation-session]';
+/** 当前装上的「会话画面」：列 / 滚动容器 / 行。没装时 document.querySelector 给 null。 */
+const questionStage = { column: null, scroller: null, rows: [], outer: null, sessionHost: null, columns: [] };
+/** 一条消息行的桩：只有插件真会用到的那几个成员。 */
+const makeQuestionRow = (kind, contentTop, scroller, options = {}) => ({
+	kind,
+	hasAttribute: (name) => name === 'hidden' && options.hidden === true,
+	// 桩里不做 hidden 祖先：需要时 options.hiddenAncestor 直接把最近 hidden 祖先指成容器。
+	closest: (selector) => (selector === '[hidden]' && options.hiddenAncestor === true ? scroller : null),
+	getBoundingClientRect: () => {
+		const top = contentTop - scroller.scrollTop;
+		return { top, height: 60, bottom: top + 60, left: 0, right: 800 };
+	},
 });
+/**
+ * 造一个会话流列（与真实 DOM 同形：列 → closest('[data-conversation-session]') 拿到会话号）。
+ * @param options.mountedSession - 挂载点上的会话号（null = 没有这层属性）。
+ * @param options.hidden - true 时列自带 hidden（real DOM 里被藏起来的列）。
+ * @param options.rows - `{ kind, contentTop }` 列表。
+ * @param options.scroller - 这个列自己那条滚动容器。
+ */
+const makeColumn = ({ mountedSession = null, hidden = false, rows = [], scroller }) => {
+	const sessionHost = mountedSession === null ? null : {
+		getAttribute: (name) => (name === QUESTION_SESSION_SELECTOR.slice(1, -1) ? mountedSession : null),
+	};
+	const column = {
+		parentElement: scroller,
+		rows: [],
+		hidden,
+		hasAttribute: (name) => name === 'hidden' && hidden === true,
+		closest: (selector) => {
+			if (selector === QUESTION_OUTER_SELECTOR) return null;
+			if (selector === QUESTION_SESSION_SELECTOR) return sessionHost;
+			if (selector === '[hidden]') return hidden ? scroller : null;
+			return null;
+		},
+		// 与真实选择器同义：只给出 user / steering 两种行。
+		querySelectorAll: (selector) => (selector === QUESTION_ROW_SELECTOR_STUB
+			? column.rows.filter((row) => row.kind === 'user' || row.kind === 'steering')
+			: []),
+	};
+	column.rows = rows.map((row) => makeQuestionRow(row.kind, row.contentTop, scroller, row));
+	return { column, rows: column.rows, sessionHost };
+};
+/**
+ * 装一套会话画面。
+ * @param options.withOuter - true 时滚动口是列祖先上的 `[data-conversation-scroll]`，
+ *   否则退回列的父节点（聊天自己的 `_scroll`）—— 两条真实路径都覆盖。
+ * @param options.rows - `{ kind, contentTop }` 列表，DOM 顺序即数组顺序。
+ * @param options.extraColumns - 额外挂着的会话流列（真实 DOM 里同时挂着好几个），
+ *   每项 `{ mountedSession, hidden, rows }`；用来验「对着正确那一列对齐」。
+ * @returns 这套画面的各个部件（列 / 实际滚动容器 / 行）。
+ */
+const installQuestionStage = (options = {}) => {
+	const { withOuter = false, scrollTop = 0, scrollHeight = 4000, rows = [], mountedSession = null, extraColumns = [] } = options;
+	const makeScroller = () => ({
+		scrollTop,
+		clientHeight: 600,
+		scrollHeight,
+		getBoundingClientRect: () => ({ top: 0, height: 600, bottom: 600, left: 0, right: 800 }),
+	});
+	const inner = makeScroller();
+	const outer = withOuter ? makeScroller() : null;
+	const scroller = outer ?? inner;
+	// 挂载点：真实结构里它是列的更外层祖先，属性值就是当前挂着的会话号。
+	const sessionHost = {
+		getAttribute: (name) => (name === QUESTION_SESSION_SELECTOR.slice(1, -1) ? mountedSession : null),
+	};
+	const column = {
+		parentElement: inner,
+		rows: [],
+		hidden: false,
+		hasAttribute: () => false,
+		closest: (selector) => {
+			if (selector === QUESTION_OUTER_SELECTOR) return outer;
+			if (selector === QUESTION_SESSION_SELECTOR) return mountedSession === null ? null : sessionHost;
+			if (selector === '[hidden]') return null;
+			return null;
+		},
+		// 与真实选择器同义：只给出 user / steering 两种行。
+		querySelectorAll: (selector) => (selector === QUESTION_ROW_SELECTOR_STUB
+			? column.rows.filter((row) => row.kind === 'user' || row.kind === 'steering')
+			: []),
+	};
+	column.rows = rows.map((row) => makeQuestionRow(row.kind, row.contentTop, scroller, row));
+	// 额外列各有自己的滚动容器（各自独立滚动，才能验「滚的是哪一列」）。
+	const extras = extraColumns.map((entry) => makeColumn({
+		mountedSession: entry.mountedSession ?? null,
+		hidden: entry.hidden === true,
+		rows: entry.rows ?? [],
+		scroller: makeScroller(),
+	}));
+	questionStage.column = column;
+	questionStage.scroller = scroller;
+	questionStage.rows = column.rows;
+	questionStage.outer = outer;
+	questionStage.sessionHost = mountedSession === null ? null : sessionHost;
+	questionStage.columns = [column, ...extras.map((entry) => entry.column)];
+	return { column, scroller, inner, outer, sessionHost, rows: column.rows, extras };
+};
+/** 拆掉会话画面（等价于「当前打开的会话没有这根轴」）。 */
+const clearQuestionStage = () => {
+	questionStage.column = null;
+	questionStage.scroller = null;
+	questionStage.rows = [];
+	questionStage.outer = null;
+	questionStage.sessionHost = null;
+	questionStage.columns = [];
+};
 
 const documentStub = {
 	head: { appendChild: () => {} },
@@ -139,7 +249,22 @@ const documentStub = {
 			this.removed = true;
 		},
 	}),
-	querySelectorAll: (selector) => (selector === 'button' ? [...domButtons] : []),
+	querySelector: (selector) => (selector === QUESTION_COLUMN_SELECTOR ? questionStage.column : null),
+	// 排障一行报告要按选择器数命中数：这里按装上的会话画面如实回答。
+	querySelectorAll: (selector) => {
+		if (selector === QUESTION_COLUMN_SELECTOR) {
+			// 真实 DOM 里可能同时挂着多个会话流列；装了几列就报几列。
+			if (questionStage.columns.length > 0) return questionStage.columns;
+			return questionStage.column === null ? [] : [questionStage.column];
+		}
+		if (selector === QUESTION_ROW_SELECTOR_STUB) {
+			const extraRows = questionStage.columns.slice(1).flatMap((entry) => entry.querySelectorAll(QUESTION_ROW_SELECTOR_STUB));
+			return [...questionStage.rows, ...extraRows].filter((row) => row.kind === 'user' || row.kind === 'steering');
+		}
+		if (selector === QUESTION_OUTER_SELECTOR) return questionStage.outer === null ? [] : [questionStage.outer];
+		if (selector === QUESTION_SESSION_SELECTOR) return questionStage.sessionHost === null ? [] : [questionStage.sessionHost];
+		return [];
+	},
 	get hidden() {
 		return focusState.hidden;
 	},
@@ -303,8 +428,55 @@ const FakeIndexedDB = {
 
 /** localStorage 桩：记账「已经申请过通知权限」。 */
 const localStorageBacking = {};
+/** Service Worker 桥的桩：注册、带按钮的通知、getNotifications 清理都记账。 */
+const swShown = [];
+const swClosed = [];
+/** 快捷裁决记下的 answer() 结果（按顺序）。 */
+const answeredOutcomes = [];
+const swRegisterUrls = [];
+let swRegisterCalls = 0;
+const swContainers = new Map();
+const fakeRegistration = {
+	active: {}, // 直接 active：跳过 installing 状态机，桥立刻可用
+	showNotification: (title, options) => { swShown.push({ title, options }); return Promise.resolve(); },
+	getNotifications: (filter) => {
+		swClosed.push(filter?.tag ?? null);
+		return Promise.resolve([]);
+	},
+};
+const fakeServiceWorkerContainer = {
+	register: (url) => {
+		swRegisterCalls += 1;
+		swRegisterUrls.push(url);
+		return Promise.resolve(fakeRegistration);
+	},
+	addEventListener: (name, fn) => { swContainers.set(name, fn); },
+};
+/** BroadcastChannel 桩：同名频道互投，页面侧用它收 worker 转回的点击。 */
+const broadcastChannels = [];
+class FakeBroadcastChannel {
+	constructor(name) {
+		this.name = name;
+		this.onmessage = null;
+		broadcastChannels.push(this);
+	}
+	postMessage(message) {
+		for (const channel of broadcastChannels) {
+			if (channel !== this && typeof channel.onmessage === 'function') channel.onmessage({ data: message });
+		}
+	}
+	close() {}
+}
 const windowStub = {
 	__ModuleLoader__: { load: (loaded) => { definition = loaded; } },
+	// 启动图：桥从这里认自己那一行的 bundle URL。
+	__DSH_BOOT__: { entries: [
+		{ id: 'some-other-plugin', url: '/plugins/some-other-plugin/client.js' },
+		{ id: '@hawkongz/dsh-task-reminder', url: '/plugins/@hawkongz/dsh-task-reminder/??/client.js&rev=abc123' },
+	] },
+	navigator: { serviceWorker: fakeServiceWorkerContainer },
+	BroadcastChannel: FakeBroadcastChannel,
+	isSecureContext: true,
 	localStorage: {
 		getItem: (key) => (Object.prototype.hasOwnProperty.call(localStorageBacking, key) ? localStorageBacking[key] : null),
 		setItem: (key, value) => { localStorageBacking[key] = String(value); },
@@ -325,6 +497,11 @@ if (definition === undefined) throw new Error('verify-client: client.js did not 
 const plugin = definition.factory(requireStub);
 const { diagnostics } = plugin;
 const {
+	APPROVAL_GRANT,
+	APPROVAL_REJECT,
+	BRIDGE_CHANNEL,
+	BRIDGE_MESSAGE_TYPE,
+	BRIDGE_SOURCE,
 	CUSTOM_SOUND_CHOICE,
 	CUSTOM_SOUND_MAX_BYTES,
 	CUSTOM_SOUND_PERSIST_KEY,
@@ -337,34 +514,74 @@ const {
 	NOTIFY_MODES,
 	NOTIFY_PERSIST_KEY,
 	NOTIFICATION_TAG,
+	NOTIFY_KIND_COMPLETED,
+	NOTIFY_KIND_ERROR,
+	NOTIFY_KIND_WAITING,
+	NOTIFY_LANGUAGE_AUTO,
+	NOTIFY_LANGUAGE_EN,
+	NOTIFY_LANGUAGE_PERSIST_KEY,
+	NOTIFY_LANGUAGE_ZH,
+	NOTIFY_LANGUAGES,
 	NS,
+	PLUGIN_BUILD,
+	PLUGIN_PACKAGE_NAME,
 	PLUGIN_VERSION,
 	QUESTION_GRACE_MS,
+	QUESTION_ALIGN_MARGIN,
+	QUESTION_ALIGN_TOLERANCE,
+	QUESTION_FLOW_ATTR,
+	QUESTION_MAX_ATTEMPTS,
+	QUESTION_POLL_MS,
+	QUESTION_ROW_ATTR,
+	QUESTION_ROW_KINDS,
+	QUESTION_ROW_SELECTOR,
+	QUESTION_SCROLL_ATTR,
+	QUESTION_SESSION_ATTR,
+	QUESTION_STABLE_ATTEMPTS,
 	REPORT_GRACE_MS,
-	RETURN_TO_BOTTOM_CLASS_HINT,
-	RETURN_TO_BOTTOM_LABEL_KEY,
-	RETURN_TO_BOTTOM_LABEL_NS,
-	RETURN_TO_BOTTOM_MAX_ATTEMPTS,
-	RETURN_TO_BOTTOM_POLL_MS,
 	SOUND_CHOICES,
 	SOUND_CHOICE_PERSIST_KEY,
 	SOUND_PERSIST_KEY,
 	SUBAGENT_PERSIST_KEY,
+	STICKY_PERSIST_KEY,
+	TEST_APPROVAL_KEY,
+	UPDATE_APPLY_ROUTE,
+	UPDATE_CHECK_ROUTE,
+	UPDATE_IDLE,
 	VOLUME_BOOST,
 	VOLUME_MAX,
 	VOLUME_MIN,
 	VOLUME_PERSIST_KEY,
 	VOLUME_STEP,
+	WAIT_TITLE_KEYS,
+	alignQuestionRow,
 	clampVolume,
+	compareVersions,
+	conversationColumnInfo,
+	createActionBridge,
 	createNotifier,
 	en,
-	findReturnToBottomButton,
+	findLatestQuestionRow,
+	findSelfBundleUrl,
+	isHiddenElement,
+	isNewerVersion,
+	isServiceWorkerScope,
 	isSubagentSession,
+	mountedSessionId,
 	normalizeCustomMeta,
+	newerRecord,
+	notifyLanguageFromLocale,
+	pickConversationColumn,
+	questionScroller,
 	resolveDoNotifySubagent,
+	resolveStickyNotifications,
+	resolveNotifyLanguage,
 	resolveNotifyMode,
 	resolveSoundChoice,
 	titleOf,
+	updatePresentation,
+	updateReducer,
+	updateRouteUrl,
 	zh,
 } = diagnostics;
 
@@ -387,6 +604,18 @@ console.log('模块与文案');
 check('浏览器半侧模块 id 与包名一致（@hawkongz/dsh-task-reminder）', definition.id === '@hawkongz/dsh-task-reminder', definition.id);
 check('插件形状正确（name / inject / apply）', plugin.name === 'dsh-task-reminder' && typeof plugin.apply === 'function'
 	&& JSON.stringify(plugin.inject) === JSON.stringify(['slots', 'locale', 'sessions', 'remote', 'uiSession', 'uiWorkspace', 'timer']), JSON.stringify(plugin.inject));
+// 顶层一个声明都不许有：这份脚本可能被重新求值（HMR / 再次装载），顶层 `const`
+// 会进全局词法环境，第二次求值直接抛「已声明」而让整个插件失效。这里用间接
+// eval 在全局作用域连跑两次 —— 还有顶层声明就会在这里炸。
+check('源码可重复求值（顶层无声明，重新装载不会因重复声明整条失效）', (() => {
+	try {
+		(0, eval)(source); // eslint-disable-line no-eval
+		(0, eval)(source); // eslint-disable-line no-eval
+		return true;
+	} catch {
+		return false;
+	}
+})(), '第二次求值抛错：说明顶层还有声明');
 
 const zhKeys = Object.keys(zh).sort();
 const enKeys = Object.keys(en).sort();
@@ -395,10 +624,38 @@ check('全部文案非空', zhKeys.every((key) => typeof zh[key] === 'string' &&
 check('应用内卡片相关文案已全部移除（卡片通道删除）', !('toast.title' in zh) && !('toast.open' in zh) && !('toast.close' in zh)
 	&& !zhKeys.some((key) => key.startsWith('width.') || key.startsWith('height.') || key.startsWith('preview.')), JSON.stringify(zhKeys));
 check('三种停止各有弹窗标题文案', ['toast.completed.title', 'toast.question.title', 'toast.error.title'].every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
+check('「等你操作」按挂起类型分三个标题（审批请求 / 提问 / 方案待确认）+ 通用兜底', (() => {
+	const keys = ['toast.approval.title', 'toast.question.title', 'toast.plan.title', 'toast.waiting.title'];
+	if (!keys.every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== '')) return false;
+	if (new Set(keys.map((key) => zh[key])).size !== keys.length) return false; // 四个标题互不相同
+	return WAIT_TITLE_KEYS.approval === 'toast.approval.title' && WAIT_TITLE_KEYS['plan-review'] === 'toast.plan.title'
+		&& WAIT_TITLE_KEYS.question === 'toast.question.title' && WAIT_TITLE_KEYS.other === undefined;
+})(), JSON.stringify({ approval: zh['toast.approval.title'], question: zh['toast.question.title'], plan: zh['toast.plan.title'] }));
+check('审批弹窗有「同意 / 拒绝」两个按钮的文案', typeof zh['toast.approve'] === 'string' && zh['toast.approve'] !== '' && typeof zh['toast.reject'] === 'string' && zh['toast.reject'] !== ''
+	&& typeof en['toast.approve'] === 'string' && en['toast.approve'] !== '' && typeof en['toast.reject'] === 'string' && en['toast.reject'] !== '');
+check('通知语言设置：只有两档（简体中文 / English，没有「跟随界面」）+ 持久化键', NOTIFY_LANGUAGES.length === 2
+	&& NOTIFY_LANGUAGES.map((item) => item.id).join(',') === 'zh,en'
+	&& NOTIFY_LANGUAGES.every((item) => typeof zh[item.nameKey] === 'string' && zh[item.nameKey] !== '')
+	&& !('notify.language.auto' in zh) && !('notify.language.auto' in en)
+	&& typeof zh['notify.language.title'] === 'string' && typeof NOTIFY_LANGUAGE_PERSIST_KEY === 'string' && NOTIFY_LANGUAGE_PERSIST_KEY.startsWith('dsh.task-reminder.'),
+	JSON.stringify(NOTIFY_LANGUAGES.map((item) => item.id)));
+check('通知语言默认仍是 auto（跟随界面），它只是不再作为选项出现', DEFAULTS.notifyLanguage === NOTIFY_LANGUAGE_AUTO);
+check('通知语言归一化：坏值退回 auto，钉住时认 zh / en', resolveNotifyLanguage(NOTIFY_LANGUAGE_ZH) === 'zh' && resolveNotifyLanguage(NOTIFY_LANGUAGE_EN) === 'en'
+	&& resolveNotifyLanguage(NOTIFY_LANGUAGE_AUTO) === 'auto' && resolveNotifyLanguage('zh-CN') === 'auto' && resolveNotifyLanguage(undefined) === 'auto' && resolveNotifyLanguage(null) === 'auto');
+check('界面语言折算通知语言：区域码取主语言，认不出按中文', notifyLanguageFromLocale('en') === 'en' && notifyLanguageFromLocale('en-US') === 'en'
+	&& notifyLanguageFromLocale('zh-CN') === 'zh' && notifyLanguageFromLocale('ja') === 'zh' && notifyLanguageFromLocale(undefined) === 'zh');
 check('没有「试听」按钮文案（切换音效即发声）', !Object.keys(zh).some((key) => zh[key] === '试听'));
 check('设置页有导航标题与导语', typeof zh['nav'] === 'string' && zh['nav'] !== '' && typeof zh['intro'] === 'string' && zh['intro'] !== '');
-check('弹窗/提示音两个开关各有标题与说明', ['settings.notify.title', 'settings.notify.description', 'settings.sound.title', 'settings.sound.description'].every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
-check('弹窗时机有两种文案', ['notify.mode.title', 'notify.mode.description', 'notify.mode.always', 'notify.mode.unfocused'].every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
+check('弹窗/提示音两个开关只有标题（自解释的行不再带说明）', ['settings.notify.title', 'settings.sound.title'].every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
+check('自解释的行不再有说明文案（系统弹窗 / 通知语言 / 子智能体 / 完成提示音）', ['settings.notify.description', 'notify.mode.description', 'notify.language.description', 'subagent.description', 'settings.sound.description'].every((key) => !(key in zh) && !(key in en)));
+check('留下的说明文案都很短（≤ 60 字，给用户看的短句）', ['sound.choice.description', 'sound.custom.empty', 'volume.description', 'reset.description', 'reset.descriptionDefault', 'notify.mode.always.description', 'notify.mode.unfocused.description'].every((key) => typeof zh[key] === 'string' && zh[key].length > 0 && zh[key].length <= 60), JSON.stringify(['sound.choice.description', 'sound.custom.empty', 'volume.description', 'reset.description', 'notify.mode.always.description', 'notify.mode.unfocused.description'].map((key) => [key, zh[key]?.length])));
+check('按用户要求删掉的解释不再出现（音效生成的实现细节 / 自定义音频的存储细节）', !zh['sound.choice.description'].includes('Web Audio') && !zh['sound.choice.description'].includes('只存本地')
+	&& !zh['sound.custom.empty'].includes('IndexedDB') && !zh['sound.custom.empty'].includes('不会上传')
+	&& !en['sound.choice.description'].includes('Web Audio') && !en['sound.custom.empty'].includes('IndexedDB'), JSON.stringify({ choice: zh['sound.choice.description'], custom: zh['sound.custom.empty'] }));
+check('弹窗时机有标题、两个选项与两档各自的说明', ['notify.mode.title', 'notify.mode.always', 'notify.mode.unfocused', 'notify.mode.always.description', 'notify.mode.unfocused.description'].every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
+check('两档说明就是用户指定的文案', zh['notify.mode.always.description'] === '「任何情况都弹」：任务一完成就弹，不管浏览器窗口是否在前台'
+	&& zh['notify.mode.unfocused.description'] === '「仅非前台窗口」：切走标签页或浏览器窗口失焦（人在别的应用）时才弹',
+	JSON.stringify([zh['notify.mode.always.description'], zh['notify.mode.unfocused.description']]));
 check('弹窗时机文案注明两种语义', zh['notify.mode.always'] === '任何情况都弹' && zh['notify.mode.unfocused'] === '仅非前台窗口'
 	&& en['notify.mode.always'] === 'Always' && en['notify.mode.unfocused'] === 'Only when unfocused');
 check('音效/音量/恢复默认各有文案', ['sound.choice.title', 'sound.choice.description', 'volume.title', 'volume.description', 'reset.title', 'reset.description', 'reset.descriptionDefault'].every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
@@ -466,8 +723,22 @@ const dictionaries = [];
 const injections = [];
 const listeners = [];
 const opened = [];
+/** 跨工作区跳转时被 openWorkspace 切过的工作区（见 uiWorkspace 桩）。 */
+const openedWorkspaces = [];
+/** 模拟「openSession 对这些会话静默无效」（跨工作区时 DSH 的真实行为）。 */
+const silentOpenSessions = new Set();
+/** 工作区快照桩：默认空，用例要验跨工作区时临时塞 items。 */
+let workspaceSnapshot = { items: [], pinnedSessionIds: [], archivedSessionIds: [] };
 const timerEntries = [];
 const effects = [];
+/** DSH 界面语言（locale 快照 active）：用例可改它验证「跟随界面」。 */
+let activeLocale = 'zh-CN';
+/** locale 订阅者（插件的「生效语言」跟着界面语言走时用）。 */
+const localeSubscribers = new Set();
+/** 模拟一次界面语言切换通知。 */
+const notifyLocaleChange = () => {
+	for (const fn of [...localeSubscribers]) fn();
+};
 
 const t = (key, params) => {
 	const dict = dictionaries.at(-1)?.dicts?.zh ?? {};
@@ -569,16 +840,27 @@ const setStatusRunning = (sessionId, running) => {
 	sessionStatusMap = next;
 	for (const listener of [...statusSubscribers]) listener();
 };
-/** 整个会话从快照里消失（被删除 / 归档）。 */
-const dropSessionFromStatus = (sessionId) => {
+/**
+ * 只改某个会话的「完成未读」电平并通知订阅者（补漏通道专用）：
+ * 宿主在后台会话跑完且用户还没打开时点亮它，打开 / 再跑 / 会话消失即清零。
+ */
+const setCompletionUnread = (sessionId, unread) => {
+	const next = new Map(sessionStatusMap);
+	next.set(sessionId, {
+		running: false,
+		pendingInteraction: next.get(sessionId)?.pendingInteraction,
+		completionUnread: unread === true,
+	});
+	sessionStatusMap = next;
+	for (const listener of [...statusSubscribers]) listener();
+};
+
+/** 整个会话从快照里消失（被删除 / 归档）。 */const dropSessionFromStatus = (sessionId) => {
 	const next = new Map(sessionStatusMap);
 	next.delete(sessionId);
 	sessionStatusMap = next;
 	for (const listener of [...statusSubscribers]) listener();
 };
-
-/** ui-chat 的 chat 命名空间字典桩：只用得到「回到底部」按钮的 aria-label。 */
-const chatDictionary = { 'chat.toBottom': '回到底部' };
 
 const ctxStub = {
 	effect(fn, label) {
@@ -587,13 +869,20 @@ const ctxStub = {
 		return disposer;
 	},
 	locale: {
+		// DSH 当前界面语言（真实宿主是 locale 快照的 active）：通知语言 auto 档读它。
+		getSnapshot: () => ({ active: activeLocale }),
+		// 界面语言变化通知（真实宿主在切语言时推给订阅者）。
+		subscribe(fn) {
+			localeSubscribers.add(fn);
+			return () => localeSubscribers.delete(fn);
+		},
 		register(ns, dicts) {
 			dictionaries.push({ ns, dicts });
 			return () => {};
 		},
-		// 命名空间感知：插件自己的文案走 task-reminder 字典，「回到底部」的
-		// aria-label 走 ui-chat 的 chat 字典（真实环境里两者是独立命名空间）。
-		bind: (ns) => (key, params) => (ns === 'chat' ? chatDictionary[key] ?? key : t(key, params)),
+		// 命名空间感知：插件自己的文案走 task-reminder 字典。现在不再借用
+		// ui-chat 的 chat 命名空间（「回到底部」按钮那条路已经删掉）。
+		bind: (ns) => (key, params) => (ns === 'chat' ? key : t(key, params)),
 	},
 	slots: {
 		inject(name, callback) {
@@ -614,7 +903,26 @@ const ctxStub = {
 			};
 		},
 	},
-	uiWorkspace: { openSession: (id) => opened.push(id) },
+	uiWorkspace: {
+		// 真实 `openSession(target)` 走 `replaceMain`，**同步**把 mainReference 指到
+		// 目标会话（DSH 自己的「当前会话」判据）；桩照做，否则就测不出
+		// 「openSession 到底有没有吃下这个会话」。
+		// `silentOpenSessions` 里的会话模拟「openSession 静默无效」——DSH 在目标会话
+		// 属于别的工作区时就是这个行为（不抛错、也不切界面）。
+		openSession: (id) => {
+			opened.push(id);
+			if (silentOpenSessions.has(id)) return;
+			ctxStub.uiWorkspace.mainReference = { sessionId: id };
+		},
+		// 跨工作区跳转用：当前主视图会话 + 工作区快照（默认空 = 认不出工作区，
+		// 走原来的「直接开会话」路径，不影响其它用例）。
+		mainReference: { sessionId: 's1' },
+		workspaces: { list: { getSnapshot: () => workspaceSnapshot } },
+		openWorkspace: (workspaceId) => {
+			openedWorkspaces.push(workspaceId);
+			return Promise.resolve();
+		},
+	},
 	timer: {
 		timeout(fn, ms) {
 			const entry = { fn, ms, cancelled: false, fired: false };
@@ -645,34 +953,45 @@ check('设置页 order 避开 chat-locator(41)', section.entry.options.order ===
 check('设置页导航标题走本地化', section.entry.options.label() === '任务提醒', section.entry.options.label());
 const sectionFace = () => section.entry.options.inject();
 const face = sectionFace();
-check('设置页 face 带六个配置 store 与写回函数', ['notifyStore', 'notifyModeStore', 'soundStore', 'soundChoiceStore', 'volumeStore', 'subagentStore', 'permissionStore'].every((name) => typeof face[name]?.getSnapshot === 'function')
-	&& ['setNotify', 'setNotifyMode', 'setSound', 'setSoundChoice', 'setVolume', 'setSubagent'].every((name) => typeof face[name] === 'function'));
+check('设置页 face 带八个配置 store 与写回函数', ['notifyStore', 'notifyModeStore', 'notifyLanguageStore', 'soundStore', 'soundChoiceStore', 'volumeStore', 'subagentStore', 'stickyStore', 'permissionStore'].every((name) => typeof face[name]?.getSnapshot === 'function')
+	&& ['setNotify', 'setNotifyMode', 'setNotifyLanguage', 'setSound', 'setSoundChoice', 'setVolume', 'setSubagent', 'setSticky'].every((name) => typeof face[name] === 'function'));
 check('设置页 face 带自定义音效的 store、写回函数与支持标志', typeof face.customMetaStore?.getSnapshot === 'function' && typeof face.customStatusStore?.getSnapshot === 'function'
 	&& typeof face.setCustomSound === 'function' && typeof face.clearCustomSound === 'function' && face.customSupported === true, JSON.stringify({ customSupported: face.customSupported }));
+check('设置页 face 带审批快捷裁决桥的状态 store', typeof face.bridgeStateStore?.getSnapshot === 'function', typeof face.bridgeStateStore?.getSnapshot);
 check('设置页 face 不带卡片相关（宽度/高度/预览/弹窗开关）', !('widthStore' in face) && !('heightStore' in face) && !('setWidth' in face) && !('setHeight' in face) && !('popupStore' in face) && !('preview' in face));
 check('设置页 face 带恢复默认、通知支持标志与本地化函数', typeof face.reset === 'function' && typeof face.notifySupported === 'boolean' && typeof face.t === 'function');
 check('浏览器桩支持 Notification 时 notifySupported 为真', face.notifySupported === true);
 
-check('九个 store：七个持久化 + 权限与自定义音效状态不持久化', persistedStores.length === 9
+check('十四个 store：九个持久化 + 权限 / 桥状态 / 生效语言 / 自定义音效状态 / 更新状态不持久化', persistedStores.length === 14
 	&& persistedStores[0].options?.persist?.name === NOTIFY_PERSIST_KEY
 	&& persistedStores[1].options?.persist?.name === NOTIFY_MODE_PERSIST_KEY
 	&& persistedStores[2].options?.persist?.name === SOUND_PERSIST_KEY
 	&& persistedStores[3].options?.persist?.name === SOUND_CHOICE_PERSIST_KEY
 	&& persistedStores[4].options?.persist?.name === VOLUME_PERSIST_KEY
 	&& persistedStores[5].options?.persist?.name === SUBAGENT_PERSIST_KEY
-	&& persistedStores[6].options?.persist?.name === CUSTOM_SOUND_PERSIST_KEY
-	&& persistedStores[7].options === undefined && persistedStores[8].options === undefined, JSON.stringify(persistedStores.map((store) => store.options?.persist?.name)));
+	&& persistedStores[6].options?.persist?.name === STICKY_PERSIST_KEY
+	&& persistedStores[7].options?.persist?.name === NOTIFY_LANGUAGE_PERSIST_KEY
+	&& persistedStores[8].options === undefined
+	&& persistedStores[9].options?.persist?.name === CUSTOM_SOUND_PERSIST_KEY
+	&& persistedStores[10].options === undefined && persistedStores[11].options === undefined && persistedStores[12].options === undefined
+	&& persistedStores[13].options === undefined, JSON.stringify(persistedStores.map((store) => store.options?.persist?.name)));
 check('自定义音效的元数据默认空（没上传过就是 null）', face.customMetaStore.getSnapshot() === null && DEFAULTS.customSound === null && face.customStatusStore.getSnapshot() === 'idle', JSON.stringify({ meta: face.customMetaStore.getSnapshot(), status: face.customStatusStore.getSnapshot() }));
-check('六个配置默认值符合出厂表', face.notifyStore.getSnapshot() === DEFAULTS.notify
+check('八个配置默认值符合出厂表', face.notifyStore.getSnapshot() === DEFAULTS.notify
 	&& face.notifyModeStore.getSnapshot() === DEFAULTS.notifyMode
+	&& face.notifyLanguageStore.getSnapshot() === DEFAULTS.notifyLanguage
 	&& face.soundStore.getSnapshot() === DEFAULTS.sound
 	&& face.soundChoiceStore.getSnapshot() === DEFAULTS.soundChoice
 	&& face.volumeStore.getSnapshot() === DEFAULTS.volume
-	&& face.subagentStore.getSnapshot() === DEFAULTS.subagent);
+	&& face.subagentStore.getSnapshot() === DEFAULTS.subagent
+	&& face.stickyStore.getSnapshot() === DEFAULTS.sticky);
+check('通知语言默认跟随界面', DEFAULTS.notifyLanguage === NOTIFY_LANGUAGE_AUTO && face.notifyLanguageStore.getSnapshot() === 'auto', String(face.notifyLanguageStore.getSnapshot()));
 check('系统弹窗默认开启且时机为「任何情况都弹」', face.notifyStore.getSnapshot() === true && face.notifyModeStore.getSnapshot() === 'always');
 check('子智能体提醒默认关闭（默认不提示子智能体）', DEFAULTS.subagent === false && face.subagentStore.getSnapshot() === false, String(face.subagentStore.getSnapshot()));
 check('子智能体开关只认布尔真值（坏值退回关）', resolveDoNotifySubagent(true) === true && resolveDoNotifySubagent(false) === false
 	&& resolveDoNotifySubagent('true') === false && resolveDoNotifySubagent(1) === false && resolveDoNotifySubagent(undefined) === false && resolveDoNotifySubagent(null) === false);
+check('「弹窗一直挂着」默认关闭（横幅照旧自动收）', DEFAULTS.sticky === false && face.stickyStore.getSnapshot() === false, String(face.stickyStore.getSnapshot()));
+check('「弹窗一直挂着」开关只认布尔真值（坏值退回关）', resolveStickyNotifications(true) === true && resolveStickyNotifications(false) === false
+	&& resolveStickyNotifications('true') === false && resolveStickyNotifications(1) === false && resolveStickyNotifications(undefined) === false);
 check('isSubagentSession 只认 origin === "subagent"', (() => {
 	const ctxFor = (byId) => ({ sessions: { list: { getSnapshot: () => ({ ids: [], byId }) } } });
 	return isSubagentSession(ctxFor({ a: { origin: 'subagent' } }), 'a') === true
@@ -687,9 +1006,14 @@ check('排障钩子暴露了状态与版本号', typeof windowStub.__dshTaskRemi
 check('client.js 的版本号与 package.json 一致', PLUGIN_VERSION === packageJson.version, `client.js=${PLUGIN_VERSION} package.json=${packageJson.version}`);
 check('排障钩子带当场试一次（test）', typeof windowStub.__dshTaskReminder?.test === 'function');
 check('排障钩子带只放音（sound）', typeof windowStub.__dshTaskReminder?.sound === 'function');
-check('排障状态覆盖六个配置、弹窗时机、通知权限与前台状态', (() => {
+check('排障钩子带直接跳会话（jump）', typeof windowStub.__dshTaskReminder?.jump === 'function');
+check('排障状态覆盖七个配置、弹窗时机、通知权限、前台状态与检查更新', (() => {
 	const state = windowStub.__dshTaskReminder.state();
-	return ['notify', 'notifyMode', 'sound', 'soundChoice', 'volume', 'subagent', 'focused', 'notificationPermission', 'notificationSupported'].every((key) => key in state) && !('toasts' in state) && !('popup' in state);
+	return ['notify', 'notifyMode', 'notifyLanguage', 'notifyLanguageResolved', 'sound', 'soundChoice', 'volume', 'subagent', 'focused', 'notificationPermission', 'notificationSupported', 'update'].every((key) => key in state) && !('toasts' in state) && !('popup' in state);
+})());
+check('排障状态里的检查更新就是设置页那一行（未查过时 idle + 当前版本）', (() => {
+	const state = windowStub.__dshTaskReminder.state().update;
+	return state.phase === 'idle' && state.current === PLUGIN_VERSION && state.latest === null;
 })());
 check('做种后 s1 记为 running、s2/s3 记为空闲', JSON.stringify(windowStub.__dshTaskReminder.state().running) === JSON.stringify([['s1', true], ['s2', false], ['s3', false]]), JSON.stringify(windowStub.__dshTaskReminder.state().running));
 
@@ -707,6 +1031,30 @@ const renderSection = () => {
 	return nodes;
 };
 let sectionNodes = renderSection();
+/** 按渲染顺序收集设置页里的全部文本（用来断言某段说明确实出现在页面上）。 */
+const sectionTexts = () => {
+	const texts = [];
+	const walk = (node) => {
+		if (typeof node === 'string') {
+			texts.push(node);
+			return;
+		}
+		if (node === null || typeof node !== 'object') return;
+		for (const child of (Array.isArray(node.children) ? node.children : []).flat(Infinity)) walk(child);
+	};
+	walk(section.entry.component(sectionFace()));
+	return texts;
+};
+check('弹窗时机那一行把两档的说明都摆出来', (() => {
+	const texts = sectionTexts();
+	return texts.includes(zh['notify.mode.always.description']) && texts.includes(zh['notify.mode.unfocused.description']);
+})(), JSON.stringify(sectionTexts().filter((text) => text.includes('弹窗') || text.includes('前台') || text.includes('失焦'))));
+check('两档说明各占一行（block），不是挤成一句', (() => {
+	const lines = sectionNodes.filter((node) => node?.props?.style?.display === 'block'
+		&& (Array.isArray(node.children) ? node.children : []).flat(Infinity).some((child) => typeof child === 'string'
+			&& (child === zh['notify.mode.always.description'] || child === zh['notify.mode.unfocused.description'])));
+	return lines.length === 2;
+})(), '说明行不是两个 block 元素');
 
 // 通知权限自动申请：首次装载 + 弹窗默认开着 + 权限未定 → 替用户申请一次并记账。
 check('首次装载即替用户申请一次通知权限', notificationLog.requested === 1, String(notificationLog.requested));
@@ -773,17 +1121,176 @@ await tick();
 check('完成边沿：分类读得 completed → 提示音与弹窗同轮发出', notificationLog.created.length === 1 && audioLog.oscillators.length === 2, `${notificationLog.created.length} / ${audioLog.oscillators.length}`);
 check('任务完成即发一条系统弹窗（默认任何情况都弹）', notificationLog.created.length === 1, String(notificationLog.created.length));
 check('弹窗标题/正文', notificationLog.created[0]?.title === '对话任务已完成' && notificationLog.created[0]?.options?.body === '另一个会话', JSON.stringify(notificationLog.created[0]));
-check('每次弹窗独立 tag（后一条不顶掉前一条）', String(notificationLog.created[0]?.options?.tag).startsWith(`${NOTIFICATION_TAG}-`) && notificationLog.created[0].options.tag !== NOTIFICATION_TAG, String(notificationLog.created[0]?.options?.tag));
+check('tag 按类型固定（等待 / 完成 / 出错各一个槽位，同类型替换上一条）', notificationLog.created[0]?.options?.tag === `${NOTIFICATION_TAG}-${NOTIFY_KIND_COMPLETED}`
+	&& notificationLog.created[0]?.options?.renotify === true, String(notificationLog.created[0]?.options?.tag));
+check('通知标记 silent：声音只由插件自己那套负责（不叠系统提示音）', notificationLog.created[0]?.options?.silent === true, JSON.stringify(notificationLog.created[0]?.options));
+// 「弹窗一直挂着」（requireInteraction）默认关：横幅收进通知中心之后再点，
+// Electron 在 Windows 上不投递 click（electron#29461），打开后横幅不走、点击
+// 必定送达 —— 代价是横幅占屏幕，所以默认关、由设置页那个开关控制（5 类都生效）。
+check('默认关闭「弹窗一直挂着」：完成类不设 requireInteraction', notificationLog.created[0]?.options?.requireInteraction === false, JSON.stringify(notificationLog.created[0]?.options));
 check('弹窗记进 stats.notifications', windowStub.__dshTaskReminder.state().stats.notifications === 1, String(windowStub.__dshTaskReminder.state().stats.notifications));
 check('提示音每次完成都响（页面有焦点也响）', audioLog.oscillators.length === 2 && audioLog.gains.length === 2, String(audioLog.oscillators.length));
 check('排障状态记录完成来源为 event', windowStub.__dshTaskReminder.state().stats.lastCompletion?.source === 'event');
+// 保活：非持久通知的 JS 对象一旦被回收，点击就再也到不了 onclick；插件热重载
+// 还会让旧模块作用域变孤儿、连 onclick 闭包一起收走。所以通知对象压在页面级
+// 保活表（window.__dshTaskReminderToasts）里，跨实例按住，点击时才释放。
+const toastRegistry = windowStub.__dshTaskReminderToasts;
+check('通知对象压在页面级保活表里（按类型留最近一条）', toastRegistry instanceof Map
+	&& toastRegistry.get(NOTIFY_KIND_COMPLETED) === notificationLog.created[0], String(toastRegistry?.size));
 notificationLog.created[0].onclick();
 check('点击弹窗：窗口回前台并打开对应会话、关闭弹窗', notificationLog.focused === 1 && opened.includes('s2') && notificationLog.closed === 1, JSON.stringify(notificationLog));
+check('点击弹窗留痕：lastJump 记下会话 / 来源 page / ok', windowStub.__dshTaskReminder.state().stats.lastJump?.ok === true
+	&& windowStub.__dshTaskReminder.state().stats.lastJump?.via === 'page'
+	&& windowStub.__dshTaskReminder.state().stats.lastJump?.sessionId === 's2', JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastJump));
+check('点击弹窗留痕：成功次数进 stats.jumps', windowStub.__dshTaskReminder.state().stats.jumps === 1, String(windowStub.__dshTaskReminder.state().stats.jumps));
+check('点击后从保活表释放对应类型', toastRegistry.get(NOTIFY_KIND_COMPLETED) === undefined, String(toastRegistry?.size));
+check('点击留痕：lastClick 记下 kind / 会话（null 才说明 handler 没跑）', windowStub.__dshTaskReminder.state().stats.lastClick?.kind === NOTIFY_KIND_COMPLETED
+	&& windowStub.__dshTaskReminder.state().stats.lastClick?.sessionId === 's2'
+	&& windowStub.__dshTaskReminder.state().stats.clicks === 1, JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastClick));
+// 通知对象比插件实例活得久：插件热重载后点旧通知，回调闭包里的 ctx 已经 dispose。
+// 所以回调只查页面级转发表（window.__dshTaskReminderClickRouter），表指向当前实例。
+const clickRouter = windowStub.__dshTaskReminderClickRouter;
+check('页面级点击转发表已装上处理函数', clickRouter !== undefined && typeof clickRouter.handler === 'function', JSON.stringify(Object.keys(clickRouter ?? {})));
+const routed = [];
+const previousHandler = clickRouter.handler;
+clickRouter.handler = (sessionId) => routed.push(sessionId); // 冒充「新实例」
+notificationLog.created[0].onclick();
+check('旧通知点击走转发表：交给当前实例（不是闭包里的旧 ctx）', routed.length === 1 && routed[0] === 's2', JSON.stringify(routed));
+clickRouter.handler = previousHandler;
+// 排障钩子：不用等弹窗也能当场跳一次 —— 把「点击有没有送达」与「跳转本身成不成」拆开。
+const openedBeforeDebugJump = opened.length;
+check('jump() 直接跳会话并留痕（via = debug）', windowStub.__dshTaskReminder.jump('s3') === true
+	&& opened.length === openedBeforeDebugJump + 1 && opened.at(-1) === 's3'
+	&& windowStub.__dshTaskReminder.state().stats.lastJump?.via === 'debug'
+	&& windowStub.__dshTaskReminder.state().stats.lastJump?.sessionId === 's3', JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastJump));
+// 跨工作区：openSession 只在当前工作区内生效 —— 目标会话在别的工作区时它既不抛错
+// 也不切界面（2026-10-07 实测：lastJump ok:true、抬窗 204、mountedSession 没变）。
+// 所以必须先 openWorkspace 切过去，再 openSession 开目标会话。
+// 把「当前会话」放回 ws-ds：桩里的 openSession 会同步搬 mainReference（与真实
+// replaceMain 一致），上面那次 jump('s3') 已经把它搬走了。
+ctxStub.uiWorkspace.mainReference = { sessionId: 's1' };
+workspaceSnapshot = {
+	items: [{ workspaceId: 'ws-ds', sessionIds: ['s1', 's2'] }, { workspaceId: 'ws-other', sessionIds: ['s9'] }],
+	pinnedSessionIds: [],
+	archivedSessionIds: [],
+};
+const openedBeforeCross = opened.length;
+const workspacesBeforeCross = openedWorkspaces.length;
+check('跨工作区跳转：先切工作区、不急着开会话', windowStub.__dshTaskReminder.jump('s9') === true
+	&& openedWorkspaces.length === workspacesBeforeCross + 1 && openedWorkspaces.at(-1) === 'ws-other'
+	&& opened.length === openedBeforeCross, JSON.stringify({ workspaces: openedWorkspaces, opened }));
+await tick();
+check('跨工作区跳转：工作区落地后打开目标会话', opened.at(-1) === 's9', JSON.stringify(opened.slice(-2)));
+check('跨工作区跳转留痕带 crossWorkspace 且最终 ok', windowStub.__dshTaskReminder.state().stats.lastJump?.crossWorkspace === true
+	&& windowStub.__dshTaskReminder.state().stats.lastJump?.ok === true
+	&& windowStub.__dshTaskReminder.state().stats.lastJump?.sessionId === 's9', JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastJump));
+// mainSession = DSH 自己的当前会话（mainReference）：openSession 生效后它应当已经是
+// 目标会话 —— 这是「会话到底切没切」不依赖 DOM 的判据。
+check('跳转留痕带 mainSession（openSession 生效后 mainReference 就是目标会话）',
+	windowStub.__dshTaskReminder.state().stats.lastJump?.mainSession === 's9'
+	&& windowStub.__dshTaskReminder.state().stats.lastJump?.mainSessionBefore === 's1',
+	JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastJump));
+// 跳完要核对「界面真的挂到目标会话上了」才开始滚动：跨工作区挂载慢，早滚会滚错会话。
+clearQuestionStage();
+// 再放回 ws-ds 的会话：目标 s9 已在当前工作区时不走跨工作区那条路，本条要验的
+// 正是跨工作区的挂载核对。
+ctxStub.uiWorkspace.mainReference = { sessionId: 's1' };
+const timersBeforeVerify = timerEntries.length;
+windowStub.__dshTaskReminder.jump('s9');
+await tick();
+check('跨工作区跳完先排核对定时器（不立刻滚动）', timerEntries.length > timersBeforeVerify
+	&& timerEntries.at(-1)?.ms === QUESTION_POLL_MS
+	&& windowStub.__dshTaskReminder.state().stats.lastJump?.mounted === false
+	&& windowStub.__dshTaskReminder.state().stats.lastJump?.crossWorkspace === true
+	&& windowStub.__dshTaskReminder.state().stats.lastQuestionJump === undefined, JSON.stringify({ timers: timerEntries.length, jump: windowStub.__dshTaskReminder.state().stats.lastJump }));
+installQuestionStage({ mountedSession: 's9', rows: [] });
+flushTimers();
+check('目标会话挂上来后：核对通过并开始落到提问位置', windowStub.__dshTaskReminder.state().stats.lastJump?.mounted === true
+	&& windowStub.__dshTaskReminder.state().stats.lastJump?.ok === true
+	&& windowStub.__dshTaskReminder.state().stats.lastJump?.verifiedBy === 'dom+main', JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastJump));
+clearQuestionStage();
+workspaceSnapshot = { items: [], pinnedSessionIds: [], archivedSessionIds: [] };
+
+// ---------------------------------------------------------------------------
+// 跳转路径：openSession 在别的会话上是**静默无效**的（不抛错、也不切界面）。
+// 2026-10-07 那次真实点击正是踩了这个：crossWorkspace=false、lastJump.ok=true，
+// 而 DSH 的 mainReference 压根没动 —— 用户看到的就是「点了不跳会话」。
+// 所以：目标工作区认得出、当前工作区认不出时也要走「先切工作区」；首开没生效
+// 就当场补救；核对轮询里再升级一次。
+// ---------------------------------------------------------------------------
+
+console.log('');
+console.log('跳转路径（跨工作区 / openSession 静默无效）');
+
+// 1) 当前工作区认不出来（工作区快照里没有 mainReference 那个会话）：也要切工作区。
+clearQuestionStage();
+ctxStub.uiWorkspace.mainReference = { sessionId: 's-unknown-ws' };
+workspaceSnapshot = { items: [{ workspaceId: 'ws-other', sessionIds: ['s9'] }], pinnedSessionIds: [], archivedSessionIds: [] };
+const openedBeforeUnknown = opened.length;
+const wsBeforeUnknown = openedWorkspaces.length;
+check('当前工作区认不出、目标工作区认得出：走「先切工作区」而不是直接 openSession',
+	windowStub.__dshTaskReminder.jump('s9') === true
+	&& openedWorkspaces.length === wsBeforeUnknown + 1 && openedWorkspaces.at(-1) === 'ws-other'
+	&& opened.length === openedBeforeUnknown
+	&& windowStub.__dshTaskReminder.state().stats.lastJump?.crossWorkspace === true,
+	JSON.stringify({ workspaces: openedWorkspaces.slice(-2), opened: opened.slice(-2), jump: windowStub.__dshTaskReminder.state().stats.lastJump }));
+await tick();
+check('认不出当前工作区也照样把目标会话开出来（mainSession = 目标）',
+	opened.at(-1) === 's9' && windowStub.__dshTaskReminder.state().stats.lastJump?.mainSession === 's9',
+	JSON.stringify({ opened: opened.slice(-2), jump: windowStub.__dshTaskReminder.state().stats.lastJump }));
+
+// 2) 同工作区首开没生效（mainReference 没动）：当场改走「切工作区再开会话」。
+clearQuestionStage();
+workspaceSnapshot = {
+	items: [{ workspaceId: 'ws-ds', sessionIds: ['s1', 's-stuck'] }, { workspaceId: 'ws-other', sessionIds: ['s9'] }],
+	pinnedSessionIds: [],
+	archivedSessionIds: [],
+};
+ctxStub.uiWorkspace.mainReference = { sessionId: 's1' };
+silentOpenSessions.add('s-stuck');
+const wsBeforeRecover = openedWorkspaces.length;
+check('同工作区首开没生效：当场补救成「先切工作区、再开会话」（不把 5 秒耗在无效的 openSession 上）',
+	windowStub.__dshTaskReminder.jump('s-stuck') === true
+	&& openedWorkspaces.length === wsBeforeRecover + 1 && openedWorkspaces.at(-1) === 'ws-ds'
+	&& windowStub.__dshTaskReminder.state().stats.lastJump?.recoveredBy === 'open-workspace'
+	&& windowStub.__dshTaskReminder.state().stats.lastJump?.mainSessionBefore === 's1',
+	JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastJump));
+await tick();
+check('补救那一步仍没生效时如实留痕（mainSession 还是原会话，不假报成功）',
+	windowStub.__dshTaskReminder.state().stats.lastJump?.mainSession === 's1',
+	JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastJump));
+
+// 3) 核对轮询里的升级重试：一直静默无效 → 轮询发现没切过去 → 再升级一次并救回来。
+clearQuestionStage();
+silentOpenSessions.delete('s-stuck');
+workspaceSnapshot = { items: [{ workspaceId: 'ws-ds', sessionIds: ['s1'] }, { workspaceId: 'ws-other', sessionIds: ['s-retry'] }], pinnedSessionIds: [], archivedSessionIds: [] };
+ctxStub.uiWorkspace.mainReference = { sessionId: 's1' };
+silentOpenSessions.add('s-retry');
+windowStub.__dshTaskReminder.jump('s-retry');
+await tick();
+silentOpenSessions.delete('s-retry'); // 升级之后这次 openSession 才生效
+flushTimers();
+await tick();
+check('核对轮询发现没切过去：升级成「切工作区再开会话」，并记 recoveredBy',
+	windowStub.__dshTaskReminder.state().stats.lastJump?.recoveredBy === 'open-workspace-retry'
+	&& windowStub.__dshTaskReminder.state().stats.lastJump?.crossWorkspace === true,
+	JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastJump));
+flushTimers();
+check('升级重试后会话切过去：核对通过（mainSession = 目标）',
+	windowStub.__dshTaskReminder.state().stats.lastJump?.mounted === true
+	&& windowStub.__dshTaskReminder.state().stats.lastJump?.mainSession === 's-retry',
+	JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastJump));
+clearQuestionStage();
+silentOpenSessions.clear();
+workspaceSnapshot = { items: [], pinnedSessionIds: [], archivedSessionIds: [] };
+ctxStub.uiWorkspace.mainReference = { sessionId: 's1' };
 
 // 桌面壳（DSH Desktop / Electron）：渲染进程的 window.focus() 拉不起最小化 /
 // 已关进托盘的窗口，改请宿主半侧跑一次 dsh://open（second-instance →
-// focusPrimaryWindow）。窗口本就在前台时不打扰宿主；普通浏览器（没有
-// dshDesktop 全局）完全不走这条路。
+// focusPrimaryWindow）。**点通知一律发请求**：Electron 里窗口被别的窗口挡住 /
+// 最小化时 document.hasFocus() 仍可能报 true（2026-10-07 用户实测：点弹窗不抬窗，
+// 手动 POST 同一条路由立刻抬起），按它跳过就等于永远唤不起。
+// 普通浏览器（没有 dshDesktop 全局）完全不走这条路。
 const desktopRequests = [];
 windowStub.dshDesktop = { protocolVersion: 1 };
 windowStub.fetch = (input, init) => {
@@ -798,11 +1305,25 @@ notificationLog.created[0].onclick();
 check('桌面壳里窗口最小化时点弹窗同样请宿主唤醒', desktopRequests.length === 2, JSON.stringify(desktopRequests));
 setFocus({ hidden: false, focused: true });
 notificationLog.created[0].onclick();
-check('桌面壳里窗口已在前台时点弹窗不请求唤醒', desktopRequests.length === 2, JSON.stringify(desktopRequests));
+check('页面自称有焦点也照发请求（hasFocus 不可信，跳过就唤不起）', desktopRequests.length === 3, JSON.stringify(desktopRequests));
+check('留痕记下点击那一刻的自述焦点（只用于判断，不再决定发不发）', windowStub.__dshTaskReminder.state().stats.lastActivation?.focused === true, JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastActivation));
 delete windowStub.dshDesktop;
 setFocus({ hidden: false, focused: false });
 notificationLog.created[0].onclick();
-check('普通浏览器里点弹窗不发唤醒请求', desktopRequests.length === 2, JSON.stringify(desktopRequests));
+check('普通浏览器里点弹窗不发唤醒请求', desktopRequests.length === 3, JSON.stringify(desktopRequests));
+check('留痕：没有桌面壳全局 → no-desktop', windowStub.__dshTaskReminder.state().stats.lastActivation?.reason === 'no-desktop', JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastActivation));
+
+// 唤醒留痕（stats.lastActivation）：这条链路以前全静默，复现「点了没抬窗」时
+// 只能猜；现在每个去路（不发 / 发出 / 应答 / 失败）都记一笔。
+windowStub.dshDesktop = { protocolVersion: 1 };
+setFocus({ hidden: false, focused: false });
+notificationLog.created[0].onclick();
+await tick();
+check('留痕：发出请求并收到 204 → answered', windowStub.__dshTaskReminder.state().stats.lastActivation?.reason === 'answered' && windowStub.__dshTaskReminder.state().stats.lastActivation?.status === 204, JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastActivation));
+windowStub.fetch = () => Promise.reject(new Error('connect-failed'));
+notificationLog.created[0].onclick();
+await tick();
+check('留痕：请求失败 → failed 并带上原因', windowStub.__dshTaskReminder.state().stats.lastActivation?.reason === 'failed' && String(windowStub.__dshTaskReminder.state().stats.lastActivation?.error).includes('connect-failed'), JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastActivation));
 delete windowStub.fetch;
 setFocus({ hidden: false, focused: true });
 
@@ -1184,7 +1705,10 @@ fakeEventEntries = null;
 resetNotificationLog();
 resetAudioLog();
 setPendingInteraction('s2', { sessionId: 's2', kind: 'question', key: 'question:1', questions: [{ id: 'q1', question: '要用哪个数据库？' }] });
-check('出现问题即发「等待你的回答」弹窗（正文是首个问题）', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '等待你的回答' && notificationLog.created[0]?.options?.body === '要用哪个数据库？', JSON.stringify(notificationLog.created[0]));
+check('出现问题即发「提问」弹窗（正文是首个问题）', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '提问' && notificationLog.created[0]?.options?.body === '要用哪个数据库？', JSON.stringify(notificationLog.created[0]));
+check('默认关闭：等待类也不设 requireInteraction', notificationLog.created[0]?.options?.requireInteraction === false, JSON.stringify(notificationLog.created[0]?.options));
+check('等待类弹窗按类型选标题：提问 → 提问、plan-review → 方案待确认', WAIT_TITLE_KEYS.question === 'toast.question.title' && WAIT_TITLE_KEYS['plan-review'] === 'toast.plan.title' && WAIT_TITLE_KEYS.approval === 'toast.approval.title', JSON.stringify(WAIT_TITLE_KEYS));
+check('等待类弹窗共用 waiting 槽位', notificationLog.created[0]?.options?.tag === `${NOTIFICATION_TAG}-${NOTIFY_KIND_WAITING}`, String(notificationLog.created[0]?.options?.tag));
 check('待答记进 stats.questions', windowStub.__dshTaskReminder.state().stats.questions === questionsBeforeClassify + 1, String(windowStub.__dshTaskReminder.state().stats.questions));
 check('待答也响提示音', audioLog.oscillators.length === 2, String(audioLog.oscillators.length));
 
@@ -1262,6 +1786,22 @@ dropSessionFromStatus('s2');
 setPendingInteraction('s2', { sessionId: 's2', kind: 'question', key: 'question:9', questions: [{ id: 'q1', question: '回来后的新问题？' }] });
 check('会话从快照消失后再挂起仍提醒', notificationLog.created.length === 3 && notificationLog.created[2]?.options?.body === '回来后的新问题？', JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
 setPendingInteraction('s2', null);
+
+// ⑬-b 等待类通知的收尾：消散即收掉，通知中心不留陈旧条目（陈旧条目点下去
+// 什么都不发生 —— 「有时点了不跳」的疑凶）。带按钮的审批通知早有这条（1.6.0），
+// 提问 / 方案待确认 / 退回普通样式的审批现在补上。
+resetNotificationLog();
+setPendingInteraction('s2', { sessionId: 's2', kind: 'question', key: 'question:close-1', questions: [{ id: 'q1', question: '收尾测试？' }] });
+check('等待通知记进 waitingToasts（排障可见）', windowStub.__dshTaskReminder.state().waitingToasts.includes('s2'), JSON.stringify(windowStub.__dshTaskReminder.state().waitingToasts));
+const closedBeforeSettle = notificationLog.closed;
+setPendingInteraction('s2', null); // 用户已回答 → 挂起消散
+check('挂起消散：等待类通知被收掉（不留陈旧条目）', notificationLog.closed === closedBeforeSettle + 1, `${closedBeforeSettle} → ${notificationLog.closed}`);
+check('收掉后 waitingToasts 不再记着这个会话', !windowStub.__dshTaskReminder.state().waitingToasts.includes('s2'), JSON.stringify(windowStub.__dshTaskReminder.state().waitingToasts));
+resetNotificationLog();
+setPendingInteraction('s2', { sessionId: 's2', kind: 'plan-review', key: 'plan:close-2', questions: [{ id: 'q1', question: '会话要没了？' }] });
+const closedBeforeDrop = notificationLog.closed;
+dropSessionFromStatus('s2'); // 会话被删除 / 归档
+check('会话从快照消失：未结清的等待通知也收掉', notificationLog.closed === closedBeforeDrop + 1 && !windowStub.__dshTaskReminder.state().waitingToasts.includes('s2'), `${closedBeforeDrop} → ${notificationLog.closed}`);
 
 // ⑭ 待答也受时机门控：仅非前台窗口 + 页面有焦点 → 不弹，记 skippedFocused。
 const skippedBefore = windowStub.__dshTaskReminder.state().stats.skippedFocused;
@@ -1538,14 +2078,15 @@ FakeNotification.permission = 'granted';
 console.log('');
 console.log('设置页');
 
-// 默认态：三个开关 + 弹窗时机（二选一，默认「任何情况都弹」）+ 音效四选一 + 自定义音效 + 音量步进 + 恢复默认。
+// 默认态：四个开关 + 弹窗时机（二选一，默认「任何情况都弹」）+ 音效四选一 + 自定义音效 + 音量步进 + 恢复默认。
 sectionNodes = renderSection();
 const switches = sectionNodes.filter((node) => node.type === 'Switch');
-check('设置页渲染三个开关（系统弹窗 / 子智能体提醒 / 提示音）', switches.length === 3, String(switches.length));
+check('设置页渲染四个开关（系统弹窗 / 子智能体提醒 / 弹窗一直挂着 / 提示音）', switches.length === 4, String(switches.length));
 check('系统弹窗排在第一位且默认开启', switches[0]?.props?.label === '系统弹窗' && switches[0]?.props?.checked === true, JSON.stringify(switches.map((node) => [node.props.label, node.props.checked])));
 check('子智能体提醒默认关闭（第二行）', switches[1]?.props?.label === '子智能体提醒' && switches[1]?.props?.checked === false, JSON.stringify(switches.map((node) => [node.props.label, node.props.checked])));
-check('提示音开关默认开启', switches[2]?.props?.label === '完成提示音' && switches[2]?.props?.checked === true);
-check('三个开关的 onChange 都接到了写回函数', switches.every((node) => typeof node.props.onChange === 'function'));
+check('「弹窗一直挂着」默认关闭（第三行）', switches[2]?.props?.label === '弹窗一直挂着' && switches[2]?.props?.checked === false, JSON.stringify(switches.map((node) => [node.props.label, node.props.checked])));
+check('提示音开关默认开启', switches[3]?.props?.label === '完成提示音' && switches[3]?.props?.checked === true);
+check('四个开关的 onChange 都接到了写回函数', switches.every((node) => typeof node.props.onChange === 'function'));
 check('设置页没有「试听」按钮（切换音效即发声）', !sectionNodes.some((node) => node.type === 'button' && node.children?.[0] === '试听'));
 
 const segmentedGroups = sectionNodes.filter((node) => node.type === 'div' && node.props?.role === 'group'
@@ -1554,6 +2095,8 @@ const modeButtons = kidsOf(segmentedGroups[0]).filter((node) => node.type === 'b
 check('弹窗时机是二选一分段控件', modeButtons.length === 2, String(modeButtons.length));
 check('弹窗时机两个选项的文案与顺序', JSON.stringify(modeButtons.map((node) => node.children?.[0])) === JSON.stringify(['任何情况都弹', '仅非前台窗口']), JSON.stringify(modeButtons.map((node) => node.children?.[0])));
 check('默认选中「任何情况都弹」', modeButtons[0]?.props['aria-pressed'] === true && modeButtons[1]?.props['aria-pressed'] === false);
+check('弹窗时机两档上下排（不是左右并排）', segmentedGroups[0]?.props?.style?.flexDirection === 'column'
+	&& segmentedGroups[0]?.props?.style?.alignItems === 'stretch', JSON.stringify(segmentedGroups[0]?.props?.style));
 modeButtons[1].props.onClick();
 check('点「仅非前台窗口」即写回配置', face.notifyModeStore.getSnapshot() === 'unfocused', face.notifyModeStore.getSnapshot());
 modeButtons[0].props.onClick();
@@ -1562,6 +2105,34 @@ switches[0].props.onChange(false);
 check('关掉系统弹窗后时机行不再出现', !renderSection().some((node) => node.type === 'div' && node.props?.role === 'group' && node.props?.['aria-label'] === '弹窗时机'), '时机行仍存在');
 switches[0].props.onChange(true);
 sectionNodes = renderSection();
+
+// 通知语言：只有两档（简体中文 / English）。默认 auto 不在选项里，而是把当前
+// 生效语言显示成选中的那一档 —— 界面中文时就是「简体中文」被选中。
+const languageGroupOf = (nodes) => nodes.find((node) => node.type === 'div' && node.props?.role === 'group'
+	&& node.props?.['aria-label'] === '通知语言');
+const languageButtons = kidsOf(languageGroupOf(sectionNodes)).filter((node) => node.type === 'button' && typeof node.props?.['aria-pressed'] === 'boolean');
+check('通知语言仍是左右并排（上下排只用在弹窗时机那一行）', languageGroupOf(sectionNodes)?.props?.style?.flexDirection !== 'column'
+	&& languageGroupOf(sectionNodes)?.props?.style?.flexDirection === undefined, JSON.stringify(languageGroupOf(sectionNodes)?.props?.style));
+check('通知语言是二选一分段控件，没有「跟随界面」这一档', languageButtons.length === 2
+	&& JSON.stringify(languageButtons.map((node) => node.children?.[0])) === JSON.stringify(['简体中文', 'English']), JSON.stringify(languageButtons.map((node) => node.children?.[0])));
+check('默认（auto）时把界面语言显示为选中档：界面中文 → 简体中文', face.notifyLanguageStore.getSnapshot() === 'auto'
+	&& languageButtons[0]?.props['aria-pressed'] === true && languageButtons[1]?.props['aria-pressed'] === false,
+	JSON.stringify({ stored: face.notifyLanguageStore.getSnapshot(), pressed: languageButtons.map((node) => node.props['aria-pressed']) }));
+languageButtons[1].props.onClick();
+check('点 English 即钉住（写回配置，且选中 English）', face.notifyLanguageStore.getSnapshot() === 'en'
+	&& kidsOf(languageGroupOf(renderSection())).filter((node) => node.type === 'button')[1]?.props['aria-pressed'] === true,
+	face.notifyLanguageStore.getSnapshot());
+// 回到 auto：界面语言切成英文后，选中档应当跟着变成 English。
+face.setNotifyLanguage('auto');
+activeLocale = 'en-US';
+notifyLocaleChange();
+const followedButtons = kidsOf(languageGroupOf(renderSection())).filter((node) => node.type === 'button');
+check('auto 档跟随界面：界面英文 → 选中 English（不需要用户再选一次）', face.notifyLanguageStore.getSnapshot() === 'auto'
+	&& followedButtons[1]?.props['aria-pressed'] === true && followedButtons[0]?.props['aria-pressed'] === false,
+	JSON.stringify(followedButtons.map((node) => node.props['aria-pressed'])));
+activeLocale = 'zh-CN';
+face.setNotifyLanguage('auto');
+notifyLocaleChange();
 
 const soundGroup = sectionNodes.find((node) => node.type === 'div' && node.props?.role === 'group'
 	&& node.props?.['aria-label'] === '提示音音效');
@@ -1578,7 +2149,7 @@ check('步进器有增减按钮', decOf(stepperGroups[0]) !== undefined && incOf
 check('音量在界内时增减都可用', decOf(stepperGroups[0]).props.disabled === false && incOf(stepperGroups[0]).props.disabled === false);
 const resetButton = sectionNodes.find((node) => node.type === 'button' && node.children?.[0] === '恢复默认');
 check('设置页有「恢复默认」按钮，默认值时置灰', resetButton !== undefined && resetButton.props.disabled === true, String(resetButton?.props?.disabled));
-check('默认值时恢复默认行显示「已是默认值」文案', sectionNodes.some((node) => node.children?.[0] === '当前各项都已经是默认值。'));
+check('默认值时恢复默认行显示「已是默认设置」文案', sectionNodes.some((node) => node.children?.[0] === '当前已是默认设置。'));
 check('音量行说明带当前值（插值）', sectionNodes.some((node) => node.children?.[0] === '提示音的整体增益，当前 80%；0 为静音'), JSON.stringify(sectionNodes.map((node) => node.children?.[0]).filter((text) => typeof text === 'string' && text.includes('增益'))));
 
 // 交互：切音效即发声；步进器改音量；恢复默认。
@@ -1600,13 +2171,18 @@ face.setNotifyMode('unfocused');
 face.setSound(false);
 face.setSoundChoice(3);
 face.setVolume(40);
+// 后加的两个配置也一并拨离默认值：恢复默认必须把它们写回，
+// 否则「钉住了通知语言 / 弹窗一直挂着，点恢复默认却没还原」不会被任何断言发现。
+face.setSticky(true);
+face.setNotifyLanguage('en');
 sectionNodes = renderSection();
 const resetButtonAfter = sectionNodes.find((node) => node.type === 'button' && node.children?.[0] === '恢复默认');
 check('改花后「恢复默认」按钮置灰解除', resetButtonAfter?.props?.disabled === false, String(resetButtonAfter?.props?.disabled));
-check('改花后说明换成默认值清单', sectionNodes.some((node) => typeof node.children?.[0] === 'string' && node.children[0].startsWith('一键写回全部默认值')));
+check('改花后说明换成短句（不再罗列默认值清单）', sectionNodes.some((node) => typeof node.children?.[0] === 'string' && node.children[0].startsWith('把上面的设置写回出厂值')));
 resetButtonAfter.props.onClick();
-check('恢复默认写回全部六个配置（弹窗回开、时机回任何情况都弹、子智能体提醒回关）', face.notifyStore.getSnapshot() === true && face.notifyModeStore.getSnapshot() === 'always' && face.soundStore.getSnapshot() === true
-	&& face.soundChoiceStore.getSnapshot() === 0 && face.volumeStore.getSnapshot() === 80 && face.subagentStore.getSnapshot() === false,
+check('恢复默认写回全部八个配置（弹窗回开、时机回任何情况都弹、子智能体回关、语言回跟随界面、弹窗不再一直挂着）', face.notifyStore.getSnapshot() === true && face.notifyModeStore.getSnapshot() === 'always' && face.soundStore.getSnapshot() === true
+	&& face.soundChoiceStore.getSnapshot() === 0 && face.volumeStore.getSnapshot() === 80 && face.subagentStore.getSnapshot() === false
+	&& face.stickyStore.getSnapshot() === false && face.notifyLanguageStore.getSnapshot() === 'auto',
 	JSON.stringify(windowStub.__dshTaskReminder.state()));
 
 // 权限被拒时设置页给出提示。
@@ -1732,61 +2308,677 @@ check("test('error') 当场发一条「出错停止」弹窗（不经过判定�
 check("test('error') 也放提示音", audioLog.oscillators.length === 2, String(audioLog.oscillators.length));
 resetAudioLog();
 windowStub.__dshTaskReminder.test('question');
-check("test('question') 当场发一条「等待你的回答」弹窗", notificationLog.created.length === 3 && notificationLog.created[2]?.title === '等待你的回答', JSON.stringify(notificationLog.created[2]));
+check("test('question') 当场发一条「提问」弹窗", notificationLog.created.length === 3 && notificationLog.created[2]?.title === '提问', JSON.stringify(notificationLog.created[2]));
+resetAudioLog();
+windowStub.__dshTaskReminder.test('plan-review');
+check("test('plan-review') 当场发一条「方案待确认」弹窗（也接受简写 'plan'）", notificationLog.created.length === 4
+	&& notificationLog.created[3]?.title === zh['toast.plan.title'] && notificationLog.created[3]?.options?.tag === `${NOTIFICATION_TAG}-${NOTIFY_KIND_WAITING}`, JSON.stringify(notificationLog.created[3]));
+resetAudioLog();
+swShown.length = 0;
+windowStub.__dshTaskReminder.test('approval');
+check("test('approval') 走带按钮的链路（桥 active 时，不发普通通知）", swShown.length === 1
+	&& swShown[0]?.title === zh['toast.approval.title'] && swShown[0]?.options?.actions?.length === 2
+	&& notificationLog.created.length === 4, JSON.stringify({ swShown: swShown.length, plain: notificationLog.created.length }));
 resetAudioLog();
 windowStub.__dshTaskReminder.sound();
-check('sound() 只放音不发弹窗', audioLog.oscillators.length === 2 && notificationLog.created.length === 3, String(audioLog.oscillators.length));
+check('sound() 只放音不发弹窗', audioLog.oscillators.length === 2 && notificationLog.created.length === 4, String(audioLog.oscillators.length));
+
+// 「弹窗一直挂着」开关：默认关（上面各条已断言 false）；打开后 5 类通知都带
+// requireInteraction —— 横幅不自动收进通知中心，逼用户点横幅，点击必定送达。
+face.setSticky(true);
+check('打开「弹窗一直挂着」：写回开关', face.stickyStore.getSnapshot() === true);
+resetNotificationLog();
+windowStub.__dshTaskReminder.test('completed');
+check('打开后：完成类通知带 requireInteraction', notificationLog.created.at(-1)?.options?.requireInteraction === true, JSON.stringify(notificationLog.created.at(-1)?.options));
+windowStub.__dshTaskReminder.test('question');
+check('打开后：等待类（提问）通知带 requireInteraction', notificationLog.created.at(-1)?.options?.requireInteraction === true
+	&& notificationLog.created.at(-1)?.title === zh['toast.question.title'], JSON.stringify(notificationLog.created.at(-1)?.options));
+swShown.length = 0;
+windowStub.__dshTaskReminder.test('approval');
+check('打开后：带按钮的审批通知也带 requireInteraction', swShown.at(-1)?.options?.requireInteraction === true
+	&& swShown.at(-1)?.options?.actions?.length === 2, JSON.stringify(swShown.at(-1)?.options));
+face.setSticky(false);
+check('关回去：横幅恢复自动收（默认态）', face.stickyStore.getSnapshot() === false);
+resetNotificationLog();
 
 // ---------------------------------------------------------------------------
-// 点弹窗回到底部（DSH 没有滚动 API → 替用户点应用自带的「回到底部」按钮）
+// 通知语言（只影响通知文案；设置页本身仍跟随界面语言）
 // ---------------------------------------------------------------------------
 
 console.log('');
-console.log('点弹窗回到底部');
+console.log('通知语言');
 
-check('回到底部按钮的定位参数取自 DSH 界面（命名空间 / 文案键 / 类名后缀）', RETURN_TO_BOTTOM_LABEL_NS === 'chat' && RETURN_TO_BOTTOM_LABEL_KEY === 'chat.toBottom'
-	&& RETURN_TO_BOTTOM_CLASS_HINT === '_toBottom' && RETURN_TO_BOTTOM_POLL_MS > 0 && RETURN_TO_BOTTOM_MAX_ATTEMPTS >= 2,
-	JSON.stringify({ RETURN_TO_BOTTOM_LABEL_NS, RETURN_TO_BOTTOM_LABEL_KEY, RETURN_TO_BOTTOM_CLASS_HINT, RETURN_TO_BOTTOM_POLL_MS, RETURN_TO_BOTTOM_MAX_ATTEMPTS }));
+face.setNotify(true);
+face.setNotifyMode('always');
+resetNotificationLog();
+resetAudioLog();
+activeLocale = 'en-US';
+face.setNotifyLanguage('auto');
+windowStub.__dshTaskReminder.test('completed');
+check('auto 跟随界面：界面英文 → 通知取英文文案', notificationLog.created.length === 1 && notificationLog.created[0]?.title === en['toast.completed.title'], String(notificationLog.created[0]?.title));
+check('排障状态给出 auto 折算后的语言', windowStub.__dshTaskReminder.state().notifyLanguage === 'auto' && windowStub.__dshTaskReminder.state().notifyLanguageResolved === 'en', JSON.stringify(windowStub.__dshTaskReminder.state().notifyLanguageResolved));
+resetNotificationLog();
+activeLocale = 'zh-CN';
+face.setNotifyLanguage('en');
+windowStub.__dshTaskReminder.test('completed');
+check('钉住 English：界面中文时通知仍取英文', notificationLog.created.length === 1 && notificationLog.created[0]?.title === en['toast.completed.title'], String(notificationLog.created[0]?.title));
+resetNotificationLog();
+face.setNotifyLanguage('zh');
+activeLocale = 'en-US';
+windowStub.__dshTaskReminder.test('question');
+check('钉住简体中文：界面英文时通知仍取中文', notificationLog.created.length === 1 && notificationLog.created[0]?.title === zh['toast.question.title'], String(notificationLog.created[0]?.title));
+check('通知语言写回做了归一化（坏值退回 auto）', (face.setNotifyLanguage('bogus'), face.notifyLanguageStore.getSnapshot() === 'auto'), String(face.notifyLanguageStore.getSnapshot()));
+check('设置页文案不受通知语言影响（钉英文也不影响界面文案）', (face.setNotifyLanguage('en'), face.t('notify.language.title') === zh['notify.language.title']), face.t('notify.language.title'));
+face.setNotifyLanguage('auto');
+activeLocale = 'zh-CN';
 
-// 选择器：aria-label 精确命中优先，类名后缀兜底，都没有就给 null。
-domButtons.length = 0;
-const byLabel = makeDomButton('hash_other', '回到底部');
-const byClass = makeDomButton('xz4KEq_toBottom', 'Back to bottom');
-domButtons.push(byClass, byLabel);
-check('findReturnToBottomButton 按 aria-label 精确命中', findReturnToBottomButton('回到底部') === byLabel);
-check('findReturnToBottomButton 类名后缀兜底（构建哈希变了也找得到）', findReturnToBottomButton('') === byClass);
-domButtons.length = 0;
-check('没有按钮时返回 null（＝本来就在底部）', findReturnToBottomButton('回到底部') === null);
+// 宿主写死的英文：方案待审的问题原文来自 dsh-plan-mode 的 exit_plan_mode
+// （`Approve this plan and leave plan mode?`），宿主客户端有自己的中文字典，但
+// 通知正文取的是挂起载荷里的原文，不跟界面语言走。插件按通知语言补一层逐字对照：
+// 中文换、英文原样透传、认不出的文本（用户 / 模型自己写的）绝不翻译。
+resetNotificationLog();
+face.setNotifyLanguage('zh');
+setPendingInteraction('s4', { sessionId: 's4', kind: 'plan-review', key: 'host:plan-1', questions: [{ id: 'q1', question: 'Approve this plan and leave plan mode?' }] });
+check('中文通知语言：方案待审正文的宿主英文换成中文', notificationLog.created.length === 1
+	&& notificationLog.created[0]?.title === zh['toast.plan.title']
+	&& notificationLog.created[0]?.options?.body === '同意执行这份计划并退出计划模式？', JSON.stringify(notificationLog.created[0]));
+setPendingInteraction('s4', null);
+resetNotificationLog();
+face.setNotifyLanguage('en');
+setPendingInteraction('s4', { sessionId: 's4', kind: 'plan-review', key: 'host:plan-2', questions: [{ id: 'q1', question: 'Approve this plan and leave plan mode?' }] });
+check('英文通知语言：宿主英文原文原样透传', notificationLog.created.length === 1
+	&& notificationLog.created[0]?.options?.body === 'Approve this plan and leave plan mode?', JSON.stringify(notificationLog.created[0]?.options?.body));
+setPendingInteraction('s4', null);
+resetNotificationLog();
+face.setNotifyLanguage('zh');
+setPendingInteraction('s4', { sessionId: 's4', kind: 'plan-review', key: 'host:plan-3', questions: [{ id: 'q1', question: '这份计划先不改，能跑通吗？' }] });
+check('认不出的原文原样透传（只做逐字对照，不猜着翻）', notificationLog.created.length === 1
+	&& notificationLog.created[0]?.options?.body === '这份计划先不改，能跑通吗？', JSON.stringify(notificationLog.created[0]?.options?.body));
+setPendingInteraction('s4', null);
+resetNotificationLog();
+face.setNotifyLanguage('auto');
 
-// 点弹窗：打开会话后轮询等按钮出现 → 点一次。
+// ---------------------------------------------------------------------------
+// 完成未读补漏（页面刷新 / 插件热重载期间跑完的后台会话）
+// ---------------------------------------------------------------------------
+
+console.log('');
+console.log('完成未读补漏');
+
+// s9 是这一节新引入的会话：插件本次装载从没见过它的 running 边沿，
+// 正好模拟「页面刷新前就跑完了」——只有宿主的「完成未读」电平能救回来。
+hostList = { ids: [...hostList.ids, 's9'], byId: { ...hostList.byId, s9: { title: '第九个会话', displayTitle: '第九个会话', running: false } } };
+resetNotificationLog();
+resetAudioLog();
+const completedBeforeUnread = statsNow().completed;
+const unreadBefore = statsNow().unreadRecovered;
+fakeEventEntries = [{ type: 'event', event: { type: 'turn/end', seq: 1, time: 1, data: { turn: 601, reason: { kind: 'completed' } } } }];
+setCompletionUnread('s9', true);
+await tick();
+check('「完成未读」电平补报一条完成（边沿是盲区的那种）', notificationLog.created.length === 1 && notificationLog.created[0]?.options?.body === '第九个会话', JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
+check('补报计入 stats.unreadRecovered 与 completed', statsNow().unreadRecovered === unreadBefore + 1 && statsNow().completed === completedBeforeUnread + 1, JSON.stringify({ unread: statsNow().unreadRecovered, completed: statsNow().completed }));
+check('排障状态记着已补报的会话', windowStub.__dshTaskReminder.state().completionUnreadReported.includes('s9'), JSON.stringify(windowStub.__dshTaskReminder.state().completionUnreadReported));
+const unreadAfterFirst = statsNow().unreadRecovered;
+setCompletionUnread('s9', true);
+await tick();
+check('同一段未读只补一次（电平没熄灭就不重复弹）', notificationLog.created.length === 1 && statsNow().unreadRecovered === unreadAfterFirst, JSON.stringify({ created: notificationLog.created.length, unread: statsNow().unreadRecovered }));
+setCompletionUnread('s9', false);
+await tick();
+check('电平熄灭（打开会话 / 再跑 / 会话消失）即解锁', !windowStub.__dshTaskReminder.state().completionUnreadReported.includes('s9'), JSON.stringify(windowStub.__dshTaskReminder.state().completionUnreadReported));
+// 新的一段未读（新回合）照常补报：锁是按「未读实例」算的。
+resetNotificationLog();
+fakeEventEntries = [{ type: 'event', event: { type: 'turn/end', seq: 1, time: 1, data: { turn: 602, reason: { kind: 'completed' } } } }];
+setCompletionUnread('s9', true);
+await tick();
+check('新的一段未读照常补报', notificationLog.created.length === 1 && statsNow().unreadRecovered === unreadAfterFirst + 1, JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
+setCompletionUnread('s9', false);
+await tick();
+// 挂起的等待不算完成：宿主在有待答交互时也会点亮这个电平，不能被当成完成。
+hostList = { ids: [...hostList.ids, 's10'], byId: { ...hostList.byId, s10: { title: '第十个会话', displayTitle: '第十个会话', running: false } } };
+resetNotificationLog();
+setPendingInteraction('s10', { sessionId: 's10', kind: 'question', key: 'question:unread', questions: [{ id: 'q1', question: '未读电平也跟着亮？' }] });
+resetNotificationLog();
+setCompletionUnread('s10', true);
+await tick();
+check('有 pendingInteraction 时电平补漏让位给等待提醒（不额外报完成）', notificationLog.created.every((item) => item.title !== zh['toast.completed.title']), JSON.stringify(notificationLog.created.map((item) => item.title)));
+setPendingInteraction('s10', null);
+setCompletionUnread('s10', false);
+fakeEventEntries = null;
+
+// ---------------------------------------------------------------------------
+// Service Worker 半侧：同一份字节在 worker 上下文里只装点击转信
+// ---------------------------------------------------------------------------
+
+console.log('');
+console.log('Service Worker 半侧（同源 bundle 当 worker 跑）');
+
+const workerRelayed = [];
+const workerListeners = new Map();
+const workerClients = [
+	{ visibilityState: 'hidden', postMessage: (msg) => workerRelayed.push({ to: 'hidden', msg }), focus: () => Promise.resolve() },
+	{ visibilityState: 'visible', postMessage: (msg) => workerRelayed.push({ to: 'visible', msg }), focus: () => Promise.resolve() },
+];
+const workerStub = {
+	registration: {},
+	addEventListener: (name, fn) => { workerListeners.set(name, fn); },
+	BroadcastChannel: class {
+		constructor(name) { this.name = name; }
+		postMessage(message) { workerRelayed.push({ to: 'broadcast', msg: message }); }
+		close() {}
+	},
+	clients: { matchAll: () => Promise.resolve(workerClients) },
+};
+// worker 上下文：window 为 undefined、self 是 worker 全局 —— 外壳必须走 worker 分支。
+new Function('window', 'self', 'document', source)(undefined, workerStub, undefined);
+check('worker 上下文装了 notificationclick 转信（不碰 __ModuleLoader__）', typeof workerListeners.get('notificationclick') === 'function', JSON.stringify([...workerListeners.keys()]));
+
+workerListeners.get('notificationclick')({
+	action: 'approve',
+	notification: { close: () => { workerRelayed.push({ closed: true }); }, data: { key: 'approval:3', sessionId: 's2' } },
+});
+await tick();
+check('worker 把「同意」转给页面（广播 + 逐窗口两路并发）', workerRelayed.some((entry) => entry.to === 'broadcast' && entry.msg?.action === 'approve')
+	&& workerRelayed.some((entry) => entry.to === 'visible' && entry.msg?.action === 'approve'), JSON.stringify(workerRelayed));
+check('转信消息带上 key / sessionId / 来源标记', workerRelayed.some((entry) => entry.msg?.key === 'approval:3' && entry.msg?.sessionId === 's2'
+	&& entry.msg?.source === BRIDGE_SOURCE && entry.msg?.type === BRIDGE_MESSAGE_TYPE), JSON.stringify(workerRelayed.map((entry) => entry.msg)));
+check('按钮点击不让任何窗口 navigate（在通知上裁决不该抢焦点）', workerRelayed.every((entry) => entry.msg === undefined || entry.msg.navigate === false), JSON.stringify(workerRelayed.map((entry) => entry.msg?.navigate)));
+check('worker 收到点击先关掉那条通知', workerRelayed.some((entry) => entry.closed === true));
+
+workerRelayed.length = 0;
+workerListeners.get('notificationclick')({ action: '', notification: { close: () => {}, data: { sessionId: 's2' } } });
+await tick();
+const navigations = workerRelayed.filter((entry) => entry.msg !== undefined).map((entry) => ({ to: entry.to, navigate: entry.msg.navigate }));
+check('正文点击：只让一个窗口 navigate，且优先可见的那个', navigations.filter((entry) => entry.navigate === true).length === 1
+	&& navigations.some((entry) => entry.to === 'visible' && entry.navigate === true), JSON.stringify(navigations));
+
+check('worker 的频道名固定（页面与 worker 必须一致）', BRIDGE_CHANNEL === 'dsh-task-reminder:bridge', BRIDGE_CHANNEL);
+check('isServiceWorkerScope 只认 worker 全局', isServiceWorkerScope({ registration: {}, addEventListener: () => {} }) === true
+	&& isServiceWorkerScope(windowStub) === false && isServiceWorkerScope(undefined) === false && isServiceWorkerScope(null) === false);
+check('只认启动图里自己那一行 bundle URL', findSelfBundleUrl([
+	{ id: 'some-other-plugin', url: '/plugins/some-other-plugin/client.js' },
+	{ id: PLUGIN_PACKAGE_NAME, url: '/plugins/@hawkongz/dsh-task-reminder/??/client.js&rev=abc123' },
+]) === '/plugins/@hawkongz/dsh-task-reminder/??/client.js&rev=abc123'
+	&& findSelfBundleUrl([{ id: 'dsh-task-reminder', url: 'x' }]) === 'x'
+	&& findSelfBundleUrl([{ id: 'dsh-task-reminder-extra', url: 'y' }]) === null
+	&& findSelfBundleUrl(undefined) === null && findSelfBundleUrl([]) === null);
+check('桥对外形状：active 之前 show() 一律 false（不假装发了按钮通知）', (() => {
+	const bridge = createActionBridge();
+	return typeof bridge.state === 'string' && bridge.active === false
+		&& typeof bridge.onMessage === 'function' && typeof bridge.onStateChange === 'function'
+		&& bridge.show('标题', {}) === false && bridge.closeTag('x') === undefined;
+})());
+
+// ---------------------------------------------------------------------------
+// 审批快捷裁决（页面侧：注册 worker、带按钮的通知、点击 → answer）
+// ---------------------------------------------------------------------------
+
+console.log('');
+console.log('审批快捷裁决（通知上的同意 / 拒绝）');
+
+check('桥注册的是启动图里自己那一行的 bundle URL', swRegisterCalls === 1 && swRegisterUrls[0] === windowStub.__DSH_BOOT__.entries[1].url, JSON.stringify(swRegisterUrls));
+check('桥状态 active（worker 注册成功）', windowStub.__dshTaskReminder.state().approvalBridge === 'active', String(windowStub.__dshTaskReminder.state().approvalBridge));
+
+// 审批挂起 → 走 worker 弹带两个按钮的持久通知。
+resetNotificationLog();
+swShown.length = 0;
+FakeNotification.permission = 'granted';
+face.setNotify(true);
+face.setNotifyMode('always');
+answeredOutcomes.length = 0;
+const approvalA = {
+	sessionId: 's3',
+	kind: 'approval',
+	key: 'approval:7',
+	answer: (outcome) => { answeredOutcomes.push(outcome); return Promise.resolve(); },
+};
+setPendingInteraction('s3', approvalA);
+check('审批挂起：走 worker 弹通知，而不是 Notification 构造函数', swShown.length === 1 && notificationLog.created.length === 0, JSON.stringify({ swShown: swShown.length, plain: notificationLog.created.length }));
+check('审批通知：标题是「审批请求」+ 两个按钮（同意 / 拒绝）', swShown[0]?.title === zh['toast.approval.title']
+	&& swShown[0]?.options?.actions?.map((item) => item.action).join(',') === 'approve,reject'
+	&& swShown[0]?.options?.actions?.[0]?.title === zh['toast.approve']
+	&& swShown[0]?.options?.actions?.[1]?.title === zh['toast.reject'], JSON.stringify(swShown[0]));
+check('审批通知带 data.key / sessionId，并且 silent（声音只由插件负责）', swShown[0]?.options?.data?.key === 'approval:7' && swShown[0]?.options?.data?.sessionId === 's3'
+	&& swShown[0]?.options?.silent === true && swShown[0]?.options?.renotify === true, JSON.stringify(swShown[0]?.options));
+check('带按钮的通知自己占 tag 槽位（不会被别的等待顶掉）', String(swShown[0]?.options?.tag).includes('approval:7'), String(swShown[0]?.options?.tag));
+check('默认关闭：带按钮的审批通知也不设 requireInteraction', swShown[0]?.options?.requireInteraction === false, JSON.stringify(swShown[0]?.options));
+check('排障状态列着这条未结清的审批通知', windowStub.__dshTaskReminder.state().approvalToasts.includes('approval:7'), JSON.stringify(windowStub.__dshTaskReminder.state().approvalToasts));
+
+// worker 转回「同意」→ 调审批对象自己的 answer('allowed-once')
+const pageChannel = broadcastChannels[broadcastChannels.length - 1];
+pageChannel.onmessage({ data: { source: BRIDGE_SOURCE, type: BRIDGE_MESSAGE_TYPE, action: 'approve', key: 'approval:7', sessionId: 's3', navigate: false } });
+await tick();
+check('点「同意」：调 answer("allowed-once")（＝审批卡片的「允许一次」）', answeredOutcomes.join(',') === APPROVAL_GRANT, JSON.stringify(answeredOutcomes));
+check('裁决记进 stats.decisions 与 lastDecision', windowStub.__dshTaskReminder.state().stats.decisions === 1 && windowStub.__dshTaskReminder.state().stats.lastDecision?.outcome === APPROVAL_GRANT, JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastDecision));
+check('裁决后账上不再留这条通知，并清掉它的 tag', !windowStub.__dshTaskReminder.state().approvalToasts.includes('approval:7'), JSON.stringify(windowStub.__dshTaskReminder.state().approvalToasts));
+check('关通知时按 tag 找（只关这一条，不动别的）', swClosed.includes(String(swShown[0]?.options?.tag)), JSON.stringify(swClosed));
+
+pageChannel.onmessage({ data: { source: BRIDGE_SOURCE, type: BRIDGE_MESSAGE_TYPE, action: 'approve', key: 'approval:7', sessionId: 's3', navigate: false } });
+await tick();
+check('重复点击是空操作（不会裁决第二次）', answeredOutcomes.length === 1, JSON.stringify(answeredOutcomes));
+
+// 「拒绝」→ answer('rejected')
+setPendingInteraction('s3', null);
+swShown.length = 0;
+setPendingInteraction('s3', { sessionId: 's3', kind: 'approval', key: 'approval:8', answer: (outcome) => { answeredOutcomes.push(outcome); return Promise.resolve(); } });
+pageChannel.onmessage({ data: { source: BRIDGE_SOURCE, type: BRIDGE_MESSAGE_TYPE, action: 'reject', key: 'approval:8', sessionId: 's3', navigate: false } });
+await tick();
+check('点「拒绝」：调 answer("rejected")', answeredOutcomes.join(',') === `${APPROVAL_GRANT},${APPROVAL_REJECT}`, JSON.stringify(answeredOutcomes));
+
+// 陈旧通知：等待已经被新请求顶替（key 变了）→ 什么都不裁决
+setPendingInteraction('s3', null);
+swShown.length = 0;
+setPendingInteraction('s3', { sessionId: 's3', kind: 'approval', key: 'approval:9', answer: (outcome) => { answeredOutcomes.push(outcome); return Promise.resolve(); } });
+const answeredBeforeStale = answeredOutcomes.length;
+pageChannel.onmessage({ data: { source: BRIDGE_SOURCE, type: BRIDGE_MESSAGE_TYPE, action: 'approve', key: 'approval:8', sessionId: 's3', navigate: false } });
+await tick();
+check('陈旧通知（key 已被新请求顶替）不裁决任何东西', answeredOutcomes.length === answeredBeforeStale, JSON.stringify(answeredOutcomes));
+
+// 页面里从别处裁决（审批卡片 / 别的标签页）→ 等待消散，按钮通知一并收掉
+swClosed.length = 0;
+const toastsBeforeTeardown = windowStub.__dshTaskReminder.state().approvalToasts.slice();
+setPendingInteraction('s3', null);
+check('等待消散：未结清的审批通知被收掉（不留点了没用的按钮）', swClosed.length >= 1 && toastsBeforeTeardown.includes('approval:9'), JSON.stringify({ closed: swClosed, toasts: toastsBeforeTeardown }));
+
+// 没有 answer 方法的审批（别的形状 / 老宿主）：退回普通无按钮通知
+resetNotificationLog();
+swShown.length = 0;
+setPendingInteraction('s3', { sessionId: 's3', kind: 'approval', key: 'approval:11' });
+check('没有 answer 的审批：退回普通通知（不假装有按钮）', swShown.length === 0 && notificationLog.created.length === 1
+	&& notificationLog.created[0]?.options?.tag === `${NOTIFICATION_TAG}-${NOTIFY_KIND_WAITING}`, JSON.stringify({ swShown: swShown.length, plain: notificationLog.created[0]?.options?.tag }));
+setPendingInteraction('s3', null);
+
+// 审批通知的正文：工具名 + 理由（displayReason 按通知语言取）。宿主侧审批
+// 交互（PendingApproval）不带 questions 列表 —— 曾经的 bug 是正文恒等于
+// 会话名：通知上带着「同意 / 拒绝」却看不出要批准什么（1.6.1 修）。
+resetNotificationLog();
+swShown.length = 0;
+setPendingInteraction('s3', {
+	sessionId: 's3', kind: 'approval', key: 'approval:body', answer: () => Promise.resolve(),
+	toolName: 'bash',
+	reason: 'escalate sandbox to danger-full-access: 用户要求再弹一次审批',
+	displayReason: {
+		en: 'Allow this operation with danger-full-access permissions: user asked for another approval popup',
+		zh: '允许本次操作使用 danger-full-access 权限：用户要求再弹一次审批',
+	},
+});
+check('审批正文：工具名 + displayReason 中文文案（不退回会话名「第三个会话」）', swShown.length === 1
+	&& swShown[0]?.options?.body === 'bash：允许本次操作使用 danger-full-access 权限：用户要求再弹一次审批', JSON.stringify(swShown[0]?.options?.body));
+setPendingInteraction('s3', null);
+
+// 通知语言钉英文：取 displayReason.en，分隔符用半角冒号。
+resetNotificationLog();
+swShown.length = 0;
+face.setNotifyLanguage('en');
+setPendingInteraction('s3', {
+	sessionId: 's3', kind: 'approval', key: 'approval:body-en', answer: () => Promise.resolve(),
+	toolName: 'bash',
+	displayReason: {
+		en: 'Allow this operation with danger-full-access permissions: user asked for another approval popup',
+		zh: '允许本次操作使用 danger-full-access 权限：用户要求再弹一次审批',
+	},
+});
+check('通知语言钉英文：审批正文取 displayReason.en', swShown[0]?.options?.body === 'bash: Allow this operation with danger-full-access permissions: user asked for another approval popup', JSON.stringify(swShown[0]?.options?.body));
+setPendingInteraction('s3', null);
+
+// 没有 displayReason：退回未本地化的 reason。
+resetNotificationLog();
+swShown.length = 0;
+face.setNotifyLanguage('auto');
+setPendingInteraction('s3', { sessionId: 's3', kind: 'approval', key: 'approval:body-raw', answer: () => Promise.resolve(), toolName: 'bash', reason: 'escalate sandbox to danger-full-access: raw reason' });
+check('没有 displayReason：正文用未本地化的 reason', swShown[0]?.options?.body === 'bash：escalate sandbox to danger-full-access: raw reason', JSON.stringify(swShown[0]?.options?.body));
+setPendingInteraction('s3', null);
+
+// 工具与理由都没有：退回会话名（兜底，不是审批内容本身）。
+resetNotificationLog();
+swShown.length = 0;
+setPendingInteraction('s3', { sessionId: 's3', kind: 'approval', key: 'approval:body-empty', answer: () => Promise.resolve() });
+check('工具与理由都缺：退回会话名（兜底）', swShown[0]?.options?.body === '第三个会话', JSON.stringify(swShown[0]?.options?.body));
+setPendingInteraction('s3', null);
+
+// 排障用的测试审批：点了只回一条测试反馈，不裁决任何真实请求
+resetNotificationLog();
+swShown.length = 0;
+windowStub.__dshTaskReminder.test('approval');
+check("test('approval') 发的是带按钮的测试审批通知", swShown.length === 1 && swShown[0]?.options?.data?.key === TEST_APPROVAL_KEY, JSON.stringify(swShown[0]?.options?.data));
+pageChannel.onmessage({ data: { source: BRIDGE_SOURCE, type: BRIDGE_MESSAGE_TYPE, action: 'approve', key: TEST_APPROVAL_KEY, sessionId: null, navigate: false } });
+check('测试审批点「同意」：只回一条测试反馈', notificationLog.created.length === 1 && notificationLog.created[0]?.options?.body === zh['test.approved'], JSON.stringify(notificationLog.created));
+check('测试审批也记进 stats.decisions（并标了 test）', windowStub.__dshTaskReminder.state().stats.lastDecision?.test === true, JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastDecision));
+
+// 正文点击转回页面：navigate 只对一个窗口为真
+const openedBeforeBridge = opened.length;
+pageChannel.onmessage({ data: { source: BRIDGE_SOURCE, type: BRIDGE_MESSAGE_TYPE, action: '', key: null, sessionId: 's2', navigate: false } });
+check('navigate=false（别的标签页收到的那份）：不切会话', opened.length === openedBeforeBridge, JSON.stringify(opened.slice(-2)));
+pageChannel.onmessage({ data: { source: BRIDGE_SOURCE, type: BRIDGE_MESSAGE_TYPE, action: '', key: null, sessionId: 's2', navigate: true } });
+check('navigate=true：打开提醒所属的会话', opened.at(-1) === 's2', String(opened.at(-1)));
+check('带按钮通知的正文点击也留痕（via = sw）', windowStub.__dshTaskReminder.state().stats.lastJump?.ok === true
+	&& windowStub.__dshTaskReminder.state().stats.lastJump?.via === 'sw'
+	&& windowStub.__dshTaskReminder.state().stats.lastJump?.sessionId === 's2', JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastJump));
+pageChannel.onmessage({ data: { source: 'other-plugin', type: BRIDGE_MESSAGE_TYPE, action: 'approve', key: 'approval:8', sessionId: 's3', navigate: true } });
+check('来源标记不对的消息直接忽略', opened.at(-1) === 's2');
+// 收尾：把上面那次「打开会话」排下的「落到提问」轮询打空（还没装会话画面 →
+// 一定是 no-column），别让它留到下面那节用例里被一起触发。
+clearQuestionStage();
+for (let i = 0; i < QUESTION_MAX_ATTEMPTS + 2; i += 1) flushTimers();
+clearQuestionStage();
+
+// ---------------------------------------------------------------------------
+// 点弹窗落到你这次提问的位置（DSH 没有滚动 API → 自己把最后一条你的消息对到顶部）
+// ---------------------------------------------------------------------------
+
+console.log('');
+console.log('点弹窗落到你的提问位置');
+
+check('定位参数取自 DSH 界面（列 / 滚动口 / 挂载点会话号 / 你的消息两种类型 / 对齐偏移）',
+	QUESTION_FLOW_ATTR === 'data-chat-flow' && QUESTION_SCROLL_ATTR === 'data-conversation-scroll'
+	&& QUESTION_SESSION_ATTR === 'data-conversation-session'
+	&& QUESTION_ROW_ATTR === 'data-chat-flow-kind' && QUESTION_ROW_KINDS.join(',') === 'user,steering'
+	&& QUESTION_ROW_SELECTOR === QUESTION_ROW_SELECTOR_STUB
+	&& QUESTION_ALIGN_MARGIN === 24 && QUESTION_ALIGN_TOLERANCE < QUESTION_ALIGN_MARGIN
+	&& QUESTION_POLL_MS > 0 && QUESTION_MAX_ATTEMPTS >= 2 && QUESTION_STABLE_ATTEMPTS >= 1,
+	JSON.stringify({ QUESTION_FLOW_ATTR, QUESTION_SCROLL_ATTR, QUESTION_SESSION_ATTR, QUESTION_ROW_ATTR, QUESTION_ROW_KINDS, QUESTION_ROW_SELECTOR, QUESTION_ALIGN_MARGIN, QUESTION_ALIGN_TOLERANCE }));
+check('「你的消息」只认 user / steering（turn-trigger 是系统唤醒行，不在选择器里）',
+	!QUESTION_ROW_SELECTOR.includes('turn-trigger') && QUESTION_ROW_SELECTOR.includes('"user"') && QUESTION_ROW_SELECTOR.includes('"steering"'));
+check('导语不再承诺落到对话底部，改成落到你这次提问的位置',
+	!zh['intro'].includes('底部') && zh['intro'].includes('你这次提问的位置')
+	&& !en['intro'].includes('at the bottom') && en['intro'].includes('at your last question'), zh['intro']);
+
+// 找行：DOM 顺序的最后一条「你的消息」；助手行不在候选里，hidden 行要跳过。
+clearQuestionStage();
+check('读不到 DOM / 没有会话流列 → 找不到行（静默收工）',
+	findLatestQuestionRow(null) === null && findLatestQuestionRow(undefined) === null && findLatestQuestionRow({}) === null);
+const finderStage = installQuestionStage({ rows: [
+	{ kind: 'assistant-step', contentTop: 100 },
+	{ kind: 'user', contentTop: 700 },
+	{ kind: 'steering', contentTop: 1300 },
+	{ kind: 'assistant-step', contentTop: 1900 },
+] });
+const finderCandidates = finderStage.column.rows.filter((row) => row.kind === 'user' || row.kind === 'steering');
+check('候选只有 user / steering（助手行被选择器挡掉）', finderStage.column.querySelectorAll(QUESTION_ROW_SELECTOR_STUB).length === 2);
+check('找最后一条你的消息（steering 比 user 新，取 steering）', findLatestQuestionRow(finderStage.column) === finderCandidates[1], String(finderCandidates.indexOf(findLatestQuestionRow(finderStage.column))));
+const hiddenStage = installQuestionStage({ rows: [
+	{ kind: 'user', contentTop: 700 },
+	{ kind: 'user', contentTop: 1300, hidden: true },
+	{ kind: 'user', contentTop: 1900, hiddenAncestor: true },
+] });
+check('带 hidden 的行、藏在 hidden 祖先里的行都跳过 → 取上一条', findLatestQuestionRow(hiddenStage.column) === hiddenStage.rows[0], String(hiddenStage.rows.indexOf(findLatestQuestionRow(hiddenStage.column))));
+const allHiddenStage = installQuestionStage({ rows: [
+	{ kind: 'user', contentTop: 700, hidden: true },
+	{ kind: 'user', contentTop: 1300, hiddenAncestor: true },
+] });
+check('全被藏起来时一行都找不到（不硬滚）', findLatestQuestionRow(allHiddenStage.column) === null);
+clearQuestionStage();
+
+// 滚动容器：优先列祖先上的 [data-conversation-scroll]，没有就退回列的父节点。
+const innerStage = installQuestionStage({ rows: [{ kind: 'user', contentTop: 700 }] });
+check('没有外层滚动口时用列的父节点（聊天自己的 _scroll）', questionScroller(innerStage.column) === innerStage.inner, JSON.stringify(Boolean(questionScroller(innerStage.column))));
+const outerStage = installQuestionStage({ withOuter: true, rows: [{ kind: 'user', contentTop: 700 }] });
+check('有共享会话壳的滚动口时用它（与应用的 closest(...) ?? list 同规则）', questionScroller(outerStage.column) === outerStage.outer && questionScroller(outerStage.column) !== outerStage.inner);
+const bareStage = installQuestionStage({ rows: [{ kind: 'user', contentTop: 700 }] });
+bareStage.column.parentElement = null;
+check('两级都拿不到时返回 null（这一节直接收工，不当成对齐）', questionScroller(bareStage.column) === null && questionScroller(null) === null);
+clearQuestionStage();
+
+// 对齐：行顶 = 滚动口顶 + margin；已经在容差内不写；那个方向滚不动了也不写。
+const alignStage = installQuestionStage({ rows: [{ kind: 'user', contentTop: 800 }] });
+check('行在下面：写一次 scrollTop 把它对到 24px 处', alignQuestionRow(alignStage.rows[0], alignStage.scroller) === 'moved' && alignStage.scroller.scrollTop === 800 - QUESTION_ALIGN_MARGIN, String(alignStage.scroller.scrollTop));
+check('写完再量：已在容差内 → aligned（且不再写）', alignQuestionRow(alignStage.rows[0], alignStage.scroller) === 'aligned' && alignStage.scroller.scrollTop === 800 - QUESTION_ALIGN_MARGIN);
+const nearStage = installQuestionStage({ scrollTop: 600, rows: [{ kind: 'user', contentTop: 600 + QUESTION_ALIGN_MARGIN }] });
+check('本来就在 24px 处：什么也不写', alignQuestionRow(nearStage.rows[0], nearStage.scroller) === 'aligned' && nearStage.scroller.scrollTop === 600);
+const topStage = installQuestionStage({ rows: [{ kind: 'user', contentTop: 10 }] });
+check('行靠顶（要往上滚但它已经在顶上）：算就位，不写（否则每拍加一点会把视口推走）',
+	alignQuestionRow(topStage.rows[0], topStage.scroller) === 'aligned' && topStage.scroller.scrollTop === 0, String(topStage.scroller.scrollTop));
+const bottomStage = installQuestionStage({ scrollTop: 3400, scrollHeight: 4000, rows: [{ kind: 'user', contentTop: 5000 }] });
+check('行靠底（要往下滚但已经到底）：同样算就位，不写',
+	alignQuestionRow(bottomStage.rows[0], bottomStage.scroller) === 'aligned' && bottomStage.scroller.scrollTop === 3400, String(bottomStage.scroller.scrollTop));
+check('读不到几何时按就位处理（不能因为量不到就反复写）', alignQuestionRow(null, alignStage.scroller) === 'aligned' && alignQuestionRow({}, alignStage.scroller) === 'aligned');
+clearQuestionStage();
+
+// 点完成弹窗：打开会话 + 轮到你的提问处，连续两拍坐稳后自己收工。
 FakeNotification.permission = 'granted';
 face.setNotifyMode('always');
 face.setNotify(true);
-domButtons.length = 0;
 resetNotificationLog();
 resetAudioLog();
 completeOnce();
 await tick();
 check('完成先弹一条通知（准备点它）', notificationLog.created.length === 1, String(notificationLog.created.length));
-const timersBeforeFirstClick = timerEntries.length;
+const clickStage = installQuestionStage({ rows: [
+	{ kind: 'user', contentTop: 700 },
+	{ kind: 'assistant-step', contentTop: 1300 },
+	{ kind: 'user', contentTop: 2600 },
+	{ kind: 'assistant-step', contentTop: 3200 },
+] });
+const timersBeforeClick = timerEntries.length;
 notificationLog.created[0].onclick();
 check('点弹窗仍然打开对应会话', opened.at(-1) === 's2', String(opened.at(-1)));
-check('点弹窗后先排一次轮询（此刻按钮还没出现）', timerEntries.length === timersBeforeFirstClick + 1, String(timerEntries.length - timersBeforeFirstClick));
-domButtons.push(makeDomButton('xz4KEq_toBottom', '回到底部'));
+check('点弹窗后排下第一拍轮询', timerEntries.length === timersBeforeClick + 1, String(timerEntries.length - timersBeforeClick));
 flushTimers();
-check('按钮出现后替用户点一次（等于手动回到底部）', domButtons[0].clicks === 1, String(domButtons[0].clicks));
-check('点中之后不再继续轮询', timerEntries.length === timersBeforeFirstClick + 1, String(timerEntries.length - timersBeforeFirstClick));
+check('轮询把最后一条你的消息对到视口顶部 24px 处', clickStage.scroller.scrollTop === 2600 - QUESTION_ALIGN_MARGIN, String(clickStage.scroller.scrollTop));
+check('坐稳后不再继续轮询（两拍确认 + 一拍落位 = 3 拍）', timerEntries.length === timersBeforeClick + 1 + QUESTION_STABLE_ATTEMPTS, String(timerEntries.length - timersBeforeClick));
+check('排障结果记成 aligned（写在 stats.lastQuestionJump）', statsNow().lastQuestionJump?.result === 'aligned' && statsNow().lastQuestionJump?.sessionId === 's2', JSON.stringify(statsNow().lastQuestionJump));
 
-// 等不到按钮（本来就在底部）：轮询到上限自己停下，不点、不抛。
-domButtons.length = 0;
+// 等待类弹窗（审批 / 提问 / 方案）走的也是同一条落地规则（用户要求三类一致）。
+clearQuestionStage();
+resetNotificationLog();
+const bridgeStage = installQuestionStage({ rows: [{ kind: 'user', contentTop: 900 }] });
+const openedBeforeBridge2 = opened.length;
+pageChannel.onmessage({ data: { source: BRIDGE_SOURCE, type: BRIDGE_MESSAGE_TYPE, action: '', key: null, sessionId: 's3', navigate: true } });
+check('审批弹窗正文点击：仍然打开对应会话', opened.length === openedBeforeBridge2 + 1 && opened.at(-1) === 's3', String(opened.at(-1)));
+flushTimers();
+check('等待类弹窗也落到你的提问处（不再是底部）', bridgeStage.scroller.scrollTop === 900 - QUESTION_ALIGN_MARGIN, String(bridgeStage.scroller.scrollTop));
+check('排障结果记的是这次点击的会话', statsNow().lastQuestionJump?.sessionId === 's3' && statsNow().lastQuestionJump?.result === 'aligned', JSON.stringify(statsNow().lastQuestionJump));
+
+// 切会话要一拍才落地：挂载点还写着上一次的会话时先不动，到上限如实记 other-session。
+clearQuestionStage();
+const otherStage = installQuestionStage({ mountedSession: 's-old', rows: [{ kind: 'user', contentTop: 900 }] });
 resetNotificationLog();
 completeOnce();
 await tick();
-const timersBeforeTimeout = timerEntries.length;
+const timersBeforeOther = timerEntries.length;
+const openedBeforeOther = opened.length;
 notificationLog.created[0].onclick();
-for (let i = 0; i < RETURN_TO_BOTTOM_MAX_ATTEMPTS + 2; i += 1) flushTimers();
-check('一直找不到按钮：轮询到上限自动停止', timerEntries.length === timersBeforeTimeout + RETURN_TO_BOTTOM_MAX_ATTEMPTS, String(timerEntries.length - timersBeforeTimeout));
-check('等不到按钮时什么也不点（静默收工）', domButtons.length === 0 && timerEntries.slice(timersBeforeTimeout).every((entry) => entry.fired), JSON.stringify(timerEntries.slice(timersBeforeTimeout).map((entry) => [entry.fired, entry.cancelled])));
+flushTimers();
+check('挂载的还是上一次的会话：一像素都不动，到上限记 other-session',
+	otherStage.scroller.scrollTop === 0 && timerEntries.length === timersBeforeOther + QUESTION_MAX_ATTEMPTS && statsNow().lastQuestionJump?.result === 'other-session',
+	JSON.stringify({ top: otherStage.scroller.scrollTop, added: timerEntries.length - timersBeforeOther, last: statsNow().lastQuestionJump }));
+// 目标没挂上来的那几拍里要补开会话（幂等）：首开 1 次 + 15 拍里每 4 拍补一次（3 次）= 4 次。
+// 这条修的是同工作区小概率「openSession 被 DSH 自己的导航/恢复盖掉」。
+check('挂载对不上时补开一次会话（首开 + 每 4 拍共 4 次）',
+	opened.slice(openedBeforeOther).filter((id) => id === 's2').length === 4,
+	JSON.stringify(opened.slice(openedBeforeOther)));
+
+// 挂载点已经是刚打开的那个会话：照常对齐（会话号对不上只是「再等一拍」，不是放弃）。
+const switchedStage = installQuestionStage({ mountedSession: 's2', rows: [{ kind: 'user', contentTop: 1200 }] });
+resetNotificationLog();
+completeOnce();
+await tick();
+notificationLog.created[0].onclick();
+flushTimers();
+check('会话号对上后照常对齐（核对只是延后，不会白等）', switchedStage.scroller.scrollTop === 1200 - QUESTION_ALIGN_MARGIN && statsNow().lastQuestionJump?.result === 'aligned', String(switchedStage.scroller.scrollTop));
+check('挂载点会话号的读取：有属性读得到，没有这层属性时给 null（跳过核对）',
+	mountedSessionId(installQuestionStage({ mountedSession: 's9' }).column) === 's9'
+	&& mountedSessionId(installQuestionStage({}).column) === null && mountedSessionId(null) === null,
+	JSON.stringify([mountedSessionId(installQuestionStage({ mountedSession: 's9' }).column), mountedSessionId(installQuestionStage({}).column)]));
+
+// 认不出会话画面（DSH 界面变了 / 还不是聊天视图）：轮询到上限自己停，不抛不卡。
+clearQuestionStage();
+resetNotificationLog();
+completeOnce();
+await tick();
+const timersBeforeGiveUp = timerEntries.length;
+notificationLog.created[0].onclick();
+flushTimers();
+check('找不到会话画面：轮询到上限自动停止', timerEntries.length === timersBeforeGiveUp + QUESTION_MAX_ATTEMPTS, String(timerEntries.length - timersBeforeGiveUp));
+check('放弃时记成 no-column（排障一眼看出是界面没认出来）', statsNow().lastQuestionJump?.result === 'no-column', JSON.stringify(statsNow().lastQuestionJump));
+
+// 会话画面在、但没有「你的消息」行：同样到上限收工。
+installQuestionStage({ rows: [{ kind: 'assistant-step', contentTop: 700 }] });
+resetNotificationLog();
+completeOnce();
+await tick();
+const timersBeforeNoQuestion = timerEntries.length;
+notificationLog.created[0].onclick();
+flushTimers();
+check('有会话画面但没有你的消息：轮询到上限后记 no-question',
+	timerEntries.length === timersBeforeNoQuestion + QUESTION_MAX_ATTEMPTS && statsNow().lastQuestionJump?.result === 'no-question',
+	JSON.stringify({ added: timerEntries.length - timersBeforeNoQuestion, last: statsNow().lastQuestionJump }));
+
+// 排障钩子：不点弹窗也能当场跑一次（现场验证定位规则用）。
+clearQuestionStage();
+const debugStage = installQuestionStage({ rows: [{ kind: 'user', contentTop: 1500 }] });
+windowStub.__dshTaskReminder.focusQuestion('s7');
+check('focusQuestion() 当场排一拍轮询（不用等弹窗）', timerEntries.at(-1)?.fired === false && timerEntries.at(-1)?.ms === QUESTION_POLL_MS, JSON.stringify(timerEntries.at(-1)));
+flushTimers();
+check('focusQuestion() 同样把行对到 24px 处并记进排障统计',
+	debugStage.scroller.scrollTop === 1500 - QUESTION_ALIGN_MARGIN && statsNow().lastQuestionJump?.sessionId === 's7', JSON.stringify(statsNow().lastQuestionJump));
+
+// 排障一行报告：一条命令看清「跑到哪一步 + DSH 那套 DOM 还在不在」。
+const reportStage = installQuestionStage({ withOuter: true, mountedSession: 's2', rows: [
+	{ kind: 'assistant-step', contentTop: 200 },
+	{ kind: 'user', contentTop: 900 },
+] });
+windowStub.__dshTaskReminder.focusQuestion('s2');
+flushTimers();
+const reportText = windowStub.__dshTaskReminder.report();
+const report = JSON.parse(reportText);
+check('report() 一行说全：跑到哪一步 + 会话号 + 会话流列 / 你的消息行 / 滚动口计数',
+	report.build === PLUGIN_BUILD && report.version === PLUGIN_VERSION
+	&& report.lastQuestionJump?.result === 'aligned' && report.mountedSession === 's2'
+	&& report.column === 1 && report.questionRows === 1 && report.scrollHosts === 1,
+	reportText);
+check('report() 给出滚动口几何与行在视口里的位置（对齐后＝24px）',
+	report.scroller?.scrollTop === 900 - QUESTION_ALIGN_MARGIN && report.scroller?.clientHeight === 600
+	&& report.rowTopInView === QUESTION_ALIGN_MARGIN && report.row?.height === 60,
+	JSON.stringify({ scroller: report.scroller, rowTopInView: report.rowTopInView, row: report.row }));
+check('report() 带上「这份实例装载时刻 / 现在 / 点击多久前」：旧记录不会冒充刚才那次',
+	typeof report.instanceStartedAt === 'number' && typeof report.now === 'number'
+	&& report.now >= report.instanceStartedAt && typeof report.clickAgeMs === 'number'
+	&& report.clickBeforeThisInstance === false, JSON.stringify({ started: report.instanceStartedAt, now: report.now, age: report.clickAgeMs }));
+check('report() 把全部会话流列列出来（选中是不是眼前那一列，只有这份清单答得了）',
+	Array.isArray(report.columns) && report.columns.length === 1
+	&& report.columns[0].session === 's2' && report.columns[0].hidden === false && report.columns[0].questionRows === 1,
+	JSON.stringify(report.columns));
+// 留痕跨热重载保留：点击 / 跳转 / 落位三笔都同时写进页面级表，插件换一份实例也能读到。
+const clickDiagStore = windowStub.__dshTaskReminderClickRouter?.clickDiag;
+const jumpDiagStore = windowStub.__dshTaskReminderClickRouter?.jumpDiag;
+check('点击 / 跳转 / 落位留痕都压在页面级表里（跨热重载不丢）',
+	clickDiagStore?.last?.sessionId === 's2' && clickDiagStore.count >= 1
+	&& jumpDiagStore?.last?.sessionId === 's2' && jumpDiagStore?.question?.sessionId === 's2',
+	JSON.stringify({ click: clickDiagStore?.last, jump: jumpDiagStore?.last, question: jumpDiagStore?.question }));
+check('留痕取更新的那份：实例里没有（刚热重载过）就用页面级；两边都有就按时间取新',
+	(() => {
+		const shared = { at: 200, sessionId: 's-shared' };
+		return newerRecord(null, shared) === shared && newerRecord(shared, null) === shared
+			&& newerRecord({ at: 100, sessionId: 's-instance' }, shared) === shared
+			&& newerRecord({ at: 300, sessionId: 's-newer' }, shared).sessionId === 's-newer'
+			&& newerRecord(null, null) === null;
+	})(), JSON.stringify({ nullShared: newerRecord(null, null) }));
+const plantedOlderClick = { at: 1, kind: 'completed', sessionId: 's-old' };
+const plantedClick = { ...clickDiagStore.last };
+clickDiagStore.last = plantedOlderClick;
+const olderReport = JSON.parse(windowStub.__dshTaskReminder.report());
+check('页面级表里是更旧的一次点击：report() 仍报更新的那份（旧记录不会冒充刚才那次）',
+	olderReport.lastClick?.sessionId === 's2' && olderReport.clickBeforeThisInstance === false
+	&& typeof olderReport.clickAgeMs === 'number', JSON.stringify(olderReport.lastClick));
+clickDiagStore.last = plantedClick;
+clearQuestionStage();
+const emptyReport = JSON.parse(windowStub.__dshTaskReminder.report());
+check('没有会话画面时 report() 不抛：计数 0、几何全 null（一眼看出断在哪）',
+	emptyReport.column === 0 && emptyReport.questionRows === 0 && emptyReport.scrollHosts === 0
+	&& emptyReport.mountedSession === null && emptyReport.scroller === null && emptyReport.rowTopInView === null,
+	JSON.stringify(emptyReport));
+clearQuestionStage();
+
+// ---------------------------------------------------------------------------
+// 多个会话流列同时挂着：对齐必须落在**目标会话那一列**上
+// （实测桌面端 DOM 里同时有 3 个 [data-chat-flow]、网页端 30 个；原先盲取
+//  第一个，可能对着别的会话滚一遍 —— 留痕写着 aligned、用户眼前一动没动）
+// ---------------------------------------------------------------------------
+
+console.log('');
+console.log('会话流列的选择');
+
+check('isHiddenElement：自带 hidden / 藏在 hidden 祖先里都算藏起来', (() => {
+	const hiddenSelf = { hasAttribute: (name) => name === 'hidden', closest: () => null };
+	const hiddenAncestor = { hasAttribute: () => false, closest: (selector) => (selector === '[hidden]' ? {} : null) };
+	const visible = { hasAttribute: () => false, closest: () => null };
+	return isHiddenElement(hiddenSelf) === true && isHiddenElement(hiddenAncestor) === true
+		&& isHiddenElement(visible) === false && isHiddenElement(null) === false;
+})());
+const multiStage = installQuestionStage({
+	mountedSession: 's-other',
+	rows: [{ kind: 'user', contentTop: 700 }],
+	extraColumns: [
+		{ mountedSession: 's-target', rows: [{ kind: 'user', contentTop: 1500 }] },
+		{ mountedSession: 's-hidden', hidden: true, rows: [{ kind: 'user', contentTop: 2000 }] },
+	],
+});
+check('pickConversationColumn：命中挂载会话号等于目标的那一列（不是 DOM 里第一个）',
+	pickConversationColumn(documentStub, 's-target') === multiStage.extras[0].column,
+	JSON.stringify(multiStage.extras.map((entry) => entry.column.closest(QUESTION_SESSION_SELECTOR)?.getAttribute('data-conversation-session'))));
+check('pickConversationColumn：目标列不在时退回第一个**可见**列（藏起来的不算）',
+	pickConversationColumn(documentStub, 's-missing') === multiStage.column && pickConversationColumn(documentStub, null) === multiStage.column);
+check('conversationColumnInfo：把所有列连同会话号 / 藏没藏 / 行数 / 滚动口一起报出来',
+	conversationColumnInfo(documentStub).length === 3
+	&& conversationColumnInfo(documentStub)[0].session === 's-other'
+	&& conversationColumnInfo(documentStub)[1].session === 's-target' && conversationColumnInfo(documentStub)[1].questionRows === 1
+	&& conversationColumnInfo(documentStub)[2].hidden === true,
+	JSON.stringify(conversationColumnInfo(documentStub)));
+check('全部列都藏起来时仍退回第一个列（不比「取第一个」差）', (() => {
+	installQuestionStage({ mountedSession: 's-a', extraColumns: [{ mountedSession: 's-b', hidden: true }] });
+	const picked = pickConversationColumn(documentStub, 's-b');
+	return picked !== null && picked.closest(QUESTION_SESSION_SELECTOR)?.getAttribute('data-conversation-session') === 's-a';
+})(), JSON.stringify(conversationColumnInfo(documentStub)));
+// 集成：点击提醒落到目标会话那一列上，别的列一像素都不动。
+const multiClickStage = installQuestionStage({
+	mountedSession: 's-other',
+	rows: [{ kind: 'user', contentTop: 700 }],
+	extraColumns: [{ mountedSession: 's2', rows: [{ kind: 'user', contentTop: 1500 }] }],
+});
+windowStub.__dshTaskReminder.focusQuestion('s2');
+flushTimers();
+check('多列时对齐落在目标会话那一列上（另一列的滚动位置不动）',
+	multiClickStage.extras[0].column.parentElement.scrollTop === 1500 - QUESTION_ALIGN_MARGIN
+	&& multiClickStage.scroller.scrollTop === 0
+	&& statsNow().lastQuestionJump?.result === 'aligned',
+	JSON.stringify({ target: multiClickStage.extras[0].column.parentElement.scrollTop, other: multiClickStage.scroller.scrollTop, last: statsNow().lastQuestionJump }));
+check('report() 报的 mountedSession 与列清单能对上看的是不是同一列',
+	JSON.parse(windowStub.__dshTaskReminder.report()).columns.length === 2, windowStub.__dshTaskReminder.report());
+clearQuestionStage();
+
+// 现实里见过的 DOM 形状（2026-10-07 现场 report）：三个会话流列**共用**一个挂着
+// `data-conversation-session` 的外层壳，于是列上读出来的会话号全是同一个 —— DOM
+// 根本分辨不了显示了哪个会话。这时唯一可信的判据是 DSH 自己的 mainReference。
+ctxStub.uiWorkspace.mainReference = { sessionId: 's1' };
+workspaceSnapshot = {
+	items: [{ workspaceId: 'ws-ds', sessionIds: ['s1'] }, { workspaceId: 'ws-other', sessionIds: ['s-target'] }],
+	pinnedSessionIds: [],
+	archivedSessionIds: [],
+};
+clearQuestionStage();
+installQuestionStage({
+	mountedSession: 's-shared',
+	rows: [{ kind: 'user', contentTop: 700 }],
+	extraColumns: [
+		{ mountedSession: 's-shared', hidden: true },
+		{ mountedSession: 's-shared', hidden: true },
+	],
+});
+windowStub.__dshTaskReminder.jump('s-target');
+await tick();
+flushTimers();
+check('多个列共用外层会话壳（列上会话号分辨不了）时：按 mainReference 判成功，不误报 mounted:false',
+	windowStub.__dshTaskReminder.state().stats.lastJump?.mounted === true
+	&& windowStub.__dshTaskReminder.state().stats.lastJump?.verifiedBy === 'main-reference'
+	&& windowStub.__dshTaskReminder.state().stats.lastJump?.mainSession === 's-target',
+	JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastJump));
+check('report() 里 mainSession 与 mountedSession 各自独立报出（分辨不了时一眼看出该信哪个）', (() => {
+	const live = JSON.parse(windowStub.__dshTaskReminder.report());
+	return live.mainSession === 's-target' && live.mountedSession === 's-shared';
+})(), windowStub.__dshTaskReminder.report());
+clearQuestionStage();
+workspaceSnapshot = { items: [], pinnedSessionIds: [], archivedSessionIds: [] };
+ctxStub.uiWorkspace.mainReference = { sessionId: 's1' };
 
 // ---------------------------------------------------------------------------
 // 自定义音效：上传本机音频（IndexedDB 存字节 + decodeAudioData 解码 + 播放）
@@ -1921,7 +3113,7 @@ await settle();
 sectionNodes = renderSection();
 check('点「清除」删掉文件并回落合成音效', storedRecord() === undefined && face.customMetaStore.getSnapshot() === null && face.soundChoiceStore.getSnapshot() === 0, JSON.stringify(customState()));
 check('没有文件时只显示「选择文件」，不显示「清除」', sectionNodes.some((node) => node.type === 'button' && node.children?.[0] === '选择文件') && !sectionNodes.some((node) => node.type === 'button' && node.children?.[0] === '清除'));
-check('没有文件时说明是「选择本机音频文件…」', sectionNodes.some((node) => typeof node.children?.[0] === 'string' && node.children[0].startsWith('选择本机音频文件')));
+check('没有文件时说明只留「选择本机音频文件…」', sectionNodes.some((node) => typeof node.children?.[0] === 'string' && node.children[0].startsWith('选择本机音频文件')));
 
 /** 再造一次干净装载：证明装载期完全不碰音频硬件。 */
 const audioLog2 = { contexts: 0, oscillators: 0, gains: 0 };
@@ -1978,6 +3170,105 @@ check('冷启动恢复的文件名取自 IndexedDB 记录', windowStub2.__dshTas
 check('恢复解码不额外建音频节点（仍只一条预热音）', audioLog2.contexts === 1 && audioLog2.oscillators === 1 && audioLog2.gains === 1, JSON.stringify(audioLog2));
 
 // ---------------------------------------------------------------------------
+// 检查更新：设置页最底部那一行 + 两条宿主路由的往返
+// ---------------------------------------------------------------------------
+
+console.log('');
+console.log('检查更新');
+
+check('宿主更新路由写死在浏览器半侧（检查 / 更新各一条）', UPDATE_CHECK_ROUTE === '/api/task-reminder/update-check' && UPDATE_APPLY_ROUTE === '/api/task-reminder/update', `${UPDATE_CHECK_ROUTE} ${UPDATE_APPLY_ROUTE}`);
+check('更新路由地址：浏览器带根、桌面壳相对（dsh-app 里带斜杠会被当前端路由丢掉）', updateRouteUrl(UPDATE_CHECK_ROUTE, 'https:') === UPDATE_CHECK_ROUTE && updateRouteUrl(UPDATE_CHECK_ROUTE, 'dsh-app:') === 'api/task-reminder/update-check', JSON.stringify([updateRouteUrl(UPDATE_CHECK_ROUTE, 'https:'), updateRouteUrl(UPDATE_CHECK_ROUTE, 'dsh-app:')]));
+check('版本比较：常规递增 / 逐位补齐 / 预发布小于正式版', compareVersions('1.6.0', '1.5.5') > 0
+	&& compareVersions('1.5.5', '1.5.5') === 0 && compareVersions('1.5.4', '1.5.5') < 0
+	&& compareVersions('1.6', '1.6.0') === 0 && compareVersions('1.10.0', '1.9.9') > 0
+	&& compareVersions('1.7.0-beta.1', '1.6.0') > 0 && compareVersions('1.7.0', '1.7.0-beta.2') > 0
+	&& compareVersions('1.7.0-beta.2', '1.7.0-beta.10') < 0 && compareVersions('v1.6.0', '1.6.0') === 0, JSON.stringify([compareVersions('1.6', '1.6.0'), compareVersions('1.10.0', '1.9.9'), compareVersions('1.7.0-beta.2', '1.7.0-beta.10')]));
+check('认不出的版本按相等处理（宁可不说有新版）', compareVersions('', '1.0.0') === 0 && compareVersions(undefined, '1.0.0') === 0 && compareVersions('latest', '1.0.0') === 0);
+check('isNewerVersion 只认更高的版本', isNewerVersion('1.6.1', '1.6.0') === true && isNewerVersion('1.6.0', '1.6.0') === false && isNewerVersion('1.5.5', '1.6.0') === false && isNewerVersion(undefined, '1.6.0') === false);
+check('更新初值：还没查、当前版本就是本份代码的版本、不持久化', UPDATE_IDLE.phase === 'idle' && UPDATE_IDLE.current === PLUGIN_VERSION && UPDATE_IDLE.latest === null && UPDATE_IDLE.error === null);
+
+const checkState = updateReducer(UPDATE_IDLE, { type: 'check-result', result: { ok: true, current: '1.5.5', latest: '1.6.0', registry: 'https://registry.npmjs.org/', local: null, updatable: true, error: null } });
+const sameState = updateReducer(UPDATE_IDLE, { type: 'check-result', result: { ok: true, current: '1.6.0', latest: '1.6.0', updatable: true } });
+const reportedFailure = updateReducer(UPDATE_IDLE, { type: 'check-result', result: { ok: false, current: '1.6.0', latest: null, error: 'HTTP 500' } });
+const localState = updateReducer(UPDATE_IDLE, { type: 'check-result', result: { ok: true, current: '1.5.5', latest: '1.6.0', updatable: false, local: 'link:../dsh-task-reminder' } });
+check('检查出新版 → available（带源与能力）', checkState.phase === 'available' && checkState.latest === '1.6.0' && checkState.updatable === true && checkState.registry === 'https://registry.npmjs.org/', JSON.stringify(checkState));
+check('同版 / 源上更旧 → latest', sameState.phase === 'latest' && updateReducer(UPDATE_IDLE, { type: 'check-result', result: { ok: true, current: '1.6.0', latest: '1.5.5' } }).phase === 'latest');
+check('宿主报错 → failed，原因原样留着', reportedFailure.phase === 'failed' && reportedFailure.error === 'HTTP 500');
+check('本地开发安装：查得到新版，但不给一键升级', localState.phase === 'available' && updatePresentation(localState).descKey === 'update.local' && updatePresentation(localState).action === 'check');
+check('更新开始 → updating（按钮转圈、禁用）', (() => {
+	const state = updateReducer(checkState, { type: 'update-start' });
+	return state.phase === 'updating' && state.latest === '1.6.0' && updatePresentation(state).disabled === true;
+})());
+check('更新成功 → done（版本换成新装的、按钮变刷新页面）', (() => {
+	const state = updateReducer(updateReducer(checkState, { type: 'update-start' }), { type: 'update-result', result: { ok: true, current: '1.5.5', latest: '1.6.0', application: 'restart-required', error: null } });
+	const view = updatePresentation(state);
+	return state.phase === 'done' && state.to === '1.6.0' && view.labelKey === 'update.reload' && view.action === 'reload';
+})());
+check('更新失败 → failed，带宿主的原始说明，并提醒「可能其实已经装完」', (() => {
+	const state = updateReducer(checkState, { type: 'update-result', result: { ok: false, error: '包管理器退出码 1' } });
+	const view = updatePresentation(state);
+	return state.phase === 'failed' && state.step === 'update' && view.descKey === 'update.applyFailed' && view.descParams.reason === '包管理器退出码 1';
+})());
+check('查版本失败与装新版失败分开说（前者不提「已经装完」）', (() => {
+	const view = updatePresentation({ ...UPDATE_IDLE, phase: 'failed', step: 'check', error: 'HTTP 500' });
+	return view.descKey === 'update.failed' && !zh[view.descKey].includes('已经装完') && zh['update.applyFailed'].includes('已经装完');
+})());
+check('连不上宿主 / 答复读不出来也如实报失败', updateReducer(UPDATE_IDLE, { type: 'check-failed', reason: 'http' }).phase === 'failed'
+	&& updateReducer(UPDATE_IDLE, { type: 'check-failed' }).error === 'unknown');
+check('每一格相位都有中英文案与合法动作', [UPDATE_IDLE, checkState, sameState, localState, reportedFailure,
+	{ ...UPDATE_IDLE, phase: 'checking' },
+	{ ...checkState, phase: 'updating' },
+	{ ...checkState, phase: 'done', to: '1.6.0' },
+	{ ...checkState, phase: 'available', updatable: false, local: null }].every((state) => {
+	const view = updatePresentation(state);
+	return ['check', 'apply', 'reload'].includes(view.action)
+		&& typeof zh[view.descKey] === 'string' && zh[view.descKey] !== '' && typeof en[view.descKey] === 'string' && en[view.descKey] !== ''
+		&& typeof zh[view.labelKey] === 'string' && zh[view.labelKey] !== '' && typeof en[view.labelKey] === 'string' && en[view.labelKey] !== '';
+}));
+check('没有 pluginManager 的组合同样如实说明（不显示一个点了没用的按钮）', (() => {
+	const view = updatePresentation({ ...checkState, updatable: false, local: null });
+	return view.descKey === 'update.unavailable' && view.labelParams.latest === '1.6.0';
+})());
+check('设置页 face 带「检查更新」的 store 与三个动作', face.updateStore.getSnapshot().phase === 'idle' && face.updateStore.getSnapshot().current === PLUGIN_VERSION
+	&& ['checkUpdate', 'applyUpdate', 'reloadPage'].every((name) => typeof face[name] === 'function'));
+check('「检查更新」排在「恢复默认」之后（是整页最后一行）', (() => {
+	const texts = sectionTexts();
+	const update = texts.lastIndexOf('检查更新');
+	const reset = texts.lastIndexOf('恢复默认');
+	return update > reset && update >= 0 && reset >= 0;
+})(), JSON.stringify(sectionTexts().filter((text) => text.includes('更新') || text.includes('默认'))));
+check('那一行此刻写着当前版本（还没查过）', sectionTexts().some((text) => text.includes(`当前版本 v${PLUGIN_VERSION}`)), JSON.stringify(sectionTexts().slice(-6)));
+
+// 往返：检查 → 更新 → 刷新，走的就是设置页那个按钮会走的两条路。
+const updateCalls = [];
+let pageReloads = 0;
+windowStub.location = { reload: () => { pageReloads += 1; } };
+windowStub.fetch = (url, options) => {
+	updateCalls.push({ url, options });
+	const payload = String(url).endsWith('update-check')
+		? { ok: true, current: '1.5.5', latest: '1.6.0', registry: 'https://registry.npmjs.org/', local: null, updatable: true, error: null }
+		: { ok: true, current: '1.5.5', latest: '1.6.0', application: 'restart-required', error: null };
+	return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(payload) });
+};
+await face.checkUpdate();
+check('检查更新：POST 到宿主路由，状态推到「有新版」', updateCalls[0]?.url === UPDATE_CHECK_ROUTE && updateCalls[0]?.options?.method === 'POST'
+	&& face.updateStore.getSnapshot().phase === 'available' && updatePresentation(face.updateStore.getSnapshot()).labelKey === 'update.apply',
+	JSON.stringify({ calls: updateCalls.map((call) => call.url), phase: face.updateStore.getSnapshot().phase }));
+await face.applyUpdate();
+check('一键更新：带目标版本，宿主答「重启生效」后状态为 done', updateCalls[1]?.url === UPDATE_APPLY_ROUTE
+	&& JSON.parse(updateCalls[1]?.options?.body ?? '{}').version === '1.6.0'
+	&& face.updateStore.getSnapshot().phase === 'done' && face.updateStore.getSnapshot().to === '1.6.0',
+	JSON.stringify({ calls: updateCalls.map((call) => call.url), phase: face.updateStore.getSnapshot().phase }));
+face.reloadPage();
+check('更新完成后按钮是「刷新页面」并且真的刷新', pageReloads === 1 && updatePresentation(face.updateStore.getSnapshot()).labelKey === 'update.reload');
+windowStub.fetch = () => Promise.resolve({ ok: false, status: 404 });
+await face.checkUpdate();
+check('宿主路由不存在（404）如实报失败，不假装已是最新', face.updateStore.getSnapshot().phase === 'failed', face.updateStore.getSnapshot().error);
+windowStub.fetch = () => Promise.reject(new Error('offline'));
+await face.checkUpdate();
+check('连不上宿主也如实报失败（不把没查到当成已最新）', face.updateStore.getSnapshot().phase === 'failed' && face.updateStore.getSnapshot().error.includes('offline'), face.updateStore.getSnapshot().error);
+
+// ---------------------------------------------------------------------------
 // 回收：effects 逆序销毁
 // ---------------------------------------------------------------------------
 
@@ -1990,6 +3281,8 @@ check('会话列表订阅被退订', listListeners.size === 0, String(listListen
 check('焦点/可见性/手势监听被退订', [...domListeners.document.values()].every((set) => set.size === 0) && [...domListeners.window.values()].every((set) => set.size === 0), JSON.stringify([...domListeners.window.entries()].map(([type, set]) => [type, set.size])));
 check('回收时关掉了 AudioContext', audioLog.closed === 1, String(audioLog.closed));
 check('回收时对账/兜底定时器被取消', timerEntries.every((entry) => entry.cancelled || entry.fired), JSON.stringify(timerEntries.filter((entry) => !entry.cancelled && !entry.fired)));
+check('回收时清掉页面级点击转发表里的处理函数', windowStub.__dshTaskReminderClickRouter !== undefined
+	&& windowStub.__dshTaskReminderClickRouter.handler === null, JSON.stringify(windowStub.__dshTaskReminderClickRouter));
 
 console.log('');
 if (failures.length > 0) {

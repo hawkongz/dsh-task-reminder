@@ -15,7 +15,7 @@
 1. Fork 本项目
 2. 创建功能分支：`git checkout -b feature/your-feature`
 3. 编写代码和测试
-4. 跑一遍自检：`node test/verify-client.mjs`
+4. 跑一遍自检：`npm test`（跨半侧契约 + 浏览器半侧 + 宿主半侧）
 5. 提交变更：`git commit -m "feat: 添加 XX 功能"`
 6. 推送到分支：`git push origin feature/your-feature`
 7. 创建 Pull Request
@@ -28,7 +28,7 @@ git clone https://github.com/hawkongz/dsh-task-reminder.git
 cd dsh-task-reminder
 
 # 运行自检（无需安装依赖，无运行时依赖）
-node test/verify-client.mjs
+npm test
 ```
 
 把本地 checkout 装进 profile 开发（`link:` 让 profile 指向工作副本，改完即生效）：
@@ -41,8 +41,8 @@ dsh plugin --profile web add link:.\dsh-task-reminder
 改完 `client.js` 后的生效流程（宿主不热读客户端产物）：
 
 ```bash
-# 1. 自检
-node test/verify-client.mjs
+# 1. 自检（三套都跑：改 index.js 会连带影响跨半侧契约）
+npm test
 
 # 2. 重启宿主，然后在浏览器里硬刷新（Ctrl + F5）
 dsh web
@@ -50,12 +50,12 @@ dsh web
 
 ## 代码风格
 
-* 浏览器半侧（`client.js`）用制表符缩进；宿主半侧（`index.js`）只放浏览器半侧做不到的事（目前只有桌面端「点弹窗把窗口拉回前台」这一条路由），其余一律留在浏览器半侧
+* 浏览器半侧（`client.js`）用制表符缩进；宿主半侧（`index.js`）只放浏览器半侧做不到的事（桌面端「点弹窗把窗口拉回前台」，以及只有宿主进程有资格的「检查更新 / 就地升级」两条路由），其余一律留在浏览器半侧
 * 改 `index.js`（宿主半侧）必须重启宿主才生效：桌面端就是彻底退出并重开应用；只改 `client.js` 时，宿主侧 `dsh-client-hmr` 每 500ms 轮询客户端产物（mtime/ctime/size），页面上的插件会自动换新，不需要刷新；但发布出去的包与 `dsh plugin add` 装的副本仍按「重启 + 硬刷新」最稳
 * 可见文案全部走 `ctx.locale`（中英文案键集合必须一致）
 * 样式只用主题 token（`--dsw-alias-*`），不写死颜色
 * 资源（订阅、定时器、样式标签、监听）一律挂 `ctx.effect`，卸载时整体回收
-* 新行为必须同步扩充 `test/verify-client.mjs` 的桩断言
+* 新行为必须同步扩充对应半侧的自检：浏览器半侧 → `test/verify-client.mjs`，宿主半侧 → `test/verify-host.mjs`；改动两半共用的路由 / 字段 / 版本号则同时看 `test/verify-contract.mjs`（它会把两半放在同一个进程里对拍）
 * 提交信息遵循 [Conventional Commits](https://www.conventionalcommits.org/) 规范
 
 ## 提交信息规范

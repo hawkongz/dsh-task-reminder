@@ -34,7 +34,7 @@ browser surface you already use.
 When a conversation task stops, the plugin sends a **Windows system
 toast** (Web Notification — the native notification in the bottom-right corner
 of your OS, visible while the browser is in the background; click it to return
-to that session at the bottom of the conversation) and plays a synthesized chime. Three stop reasons are
+to that session **at your last question**) and plays a synthesized chime. Three stop reasons are
 covered: **task complete**, **the agent is waiting for your answer**
 (`ask_user_question` pending), and **an error stop** (any failed turn — a
 gateway HTTP error such as 400 / 401 / 429 / 500 / 502, a provider outage, or
@@ -47,38 +47,64 @@ card: the OS toast is the only visual channel. Everything is configured on its
 own settings page and persists across restarts.
 
 The reminder logic all lives on the browser side — the host half (`index.js`)
-adds exactly one thing, and only inside DSH Desktop: **raising the app window
-when you click a toast**. An Electron renderer cannot pull back a window that
-is minimized or hidden in the tray, so on a toast click the page asks the host
-half (a `POST` to `api/task-reminder/window-activation`, a Connection
-exact-Fetch route) to relaunch the app once: the second process cannot take the
-single-instance lock, exits at once, and the running app handles
-`second-instance` → `focusPrimaryWindow()`. There are no runtime dependencies;
-outside DSH Desktop nothing calls the route, and if something did it would just
-answer 501.
+adds exactly two things and nothing else. First, inside DSH Desktop only:
+**raising the app window when you click a toast**. An Electron renderer cannot
+pull back a window that is minimized or hidden in the tray, so on a toast click
+the page asks the host half (a `POST` to `api/task-reminder/window-activation`,
+a Connection exact-Fetch route) to relaunch the app once: the second process
+cannot take the single-instance lock, exits at once, and the running app handles
+`second-instance` → `focusPrimaryWindow()`. Outside DSH Desktop nothing calls the
+route, and if something did it would just answer 501.
+
+Second, for everyone: the two routes behind the settings page's **Check for
+updates** entry — one reads the latest published version from npm, the other
+upgrades the installed package through DSH's own plugin manager. Nothing about
+reminding depends on either route; without a web server they are simply not
+registered.
 
 ## ✨ Features
 
 * **Windows system toast as the single visual channel:** Web Notification API,
   an OS toast you can see while the app is in the background. Clicking it
-  brings the window forward, opens the session **and lands at the bottom of the
-  conversation** — `window.focus()` in a browser, and in DSH Desktop the host
+  brings the window forward, opens the session **and lands at your last
+  question** — reading then runs downward from it, the way you actually read —
+  `window.focus()` in a browser, and in DSH Desktop the host
   half raises the minimized or tray-hidden app window (see
   [DSH Desktop](#dsh-desktop-clicking-a-toast-raises-the-app-window)). DSH
-  exposes no scroll API (`openSession(target)` takes no options and
-  `ctx.uiConversation` has no navigation surface), so the plugin does what a
-  user would: right after opening, it polls for the built-in
-  **back-to-bottom** button (rendered only while the reader is off the tail)
-  and clicks it, which runs the app's own `returnToBottom()`. If the button
-  never shows up the reader was already at the bottom and nothing happens;
-  a changed DOM can only lose this extra step, never the session opening.
+  exposes no scroll API (`openSession(target)` takes no options,
+  `ctx.uiConversation` has no navigation surface, and the Chat view's own
+  scrolling is not exported by the package), so the plugin does what a reader
+  would: right after opening, it aligns the last row of **your own messages**
+  (`[data-chat-flow-kind="user"]` / `"steering"` inside the transcript's
+  `[data-chat-flow]` column) to the top of the conversation scrollport, 24 px
+  down — the exact landing the app's own *jump to turn N* uses. It keeps
+  checking for a couple of ticks because the app's own scroll restore can land
+  after the first try, and a direction that cannot scroll any further (top or
+  bottom) counts as aligned so no extra pixels are added on every tick. The
+  transcript is only touched once the mounted `data-conversation-session` is the
+  session that was just opened, so a still-switching view is left alone. All
+  three toast kinds land this way, approvals included. A changed DOM can only
+  lose this extra step, never the session opening;
+  `state().stats.lastQuestionJump` records which outcome happened
+  (`aligned` / `no-column` / `other-session` / `no-question` / `no-scroller` /
+  `timeout`).
   Three stop reasons are
-  covered: **task complete**, **waiting for your answer** (the agent blocked
-  in `ask_user_question` / plan review — detected by reading the read-only
-  `uiSession.sessionStatus` snapshot, never by joining the question waterfall),
-  and **error stop** (`api-session/error` — any failed turn: a gateway HTTP
-  error such as 400 / 401 / 429 / 500 / 502, a provider outage, or a
-  transport failure). One stop is
+  covered: **task complete**, **the agent waiting on you** (one title per
+  pending kind — **approval request**, **question**, **plan review** — detected
+  by reading the read-only `uiSession.sessionStatus` snapshot, never by joining
+  the question waterfall), and **error stop** (`api-session/error` — any failed
+  turn: a gateway HTTP error such as 400 / 401 / 429 / 500 / 502, a provider
+  outage, or a transport failure). An **approval toast carries 同意 / 拒绝
+  (Approve / Reject) buttons**: one click settles the request through the
+  approval's own `answer('allowed-once' | 'rejected')` — the exact verb the
+  in-page approval card uses — so you never switch back to the page to decide.
+  Its body is **tool: reason** — the host's localized `displayReason` resolved in the notification language, falling back to the raw `reason`; only an approval with neither falls back to the session name (since 1.6.1; before that the body always showed the session name and said nothing about what was being approved).
+  Buttons need a Service Worker; see
+  [Quick decisions](#quick-decisions-from-the-toast). Toast tags are fixed per
+  kind (waiting / completed / error), so a newer toast of the same kind replaces
+  the previous one in the Action Center instead of piling up, while the three
+  kinds never evict each other.
+  One stop is
   reported once, error first: when a stop arrives, the plugin classifies it
   from the session's durable log (the `turn/end` reason) — a completed turn
   (or one that hit its output ceiling) reports completion, a failed turn
@@ -137,7 +163,11 @@ answer 501.
   of going silent. The chime sounds on every stop, whatever the toast timing
   mode.
 * **Dedicated settings page:** `Settings → Task reminder` (no more rows in
-  `Settings → General`), with one-click restore defaults.
+  `Settings → General`), with one-click restore defaults and a **Check for
+  updates** entry at the very bottom — the current version, a button that asks
+  npm (official registry plus the mainland mirror) for the latest release, and a
+  one-click upgrade through DSH's own plugin manager. See
+  [Check for updates](#check-for-updates).
 * **Three-channel completion detection with deduplication:** the host-forwarded
   `api-session/status` event, the official session list's own `running` bit, and
   the `running` bit inside the `uiSession.sessionStatus` snapshot (the same
@@ -314,15 +344,114 @@ changed `client.js`.
 | :--- | :--- | :--- |
 | System toast | On | `dsh.task-reminder.notify` |
 | Toast timing (Always / Only when unfocused) | Always | `dsh.task-reminder.notify-mode` |
+| Notification language (Simplified Chinese / English) | Follows the interface | `dsh.task-reminder.notify-language` |
 | Subagent reminders | Off | `dsh.task-reminder.subagent` |
 | Completion sound | On | `dsh.task-reminder.sound` |
 | Chime effect (four synthesized + Custom) | Two-tone (classic) | `dsh.task-reminder.sound-choice` |
 | Custom chime file | none | `dsh.task-reminder.custom-sound` (metadata; audio bytes in IndexedDB) |
 | Chime volume (0–100) | 80 | `dsh.task-reminder.volume` |
 
-A restore-defaults button writes back: toast on (Always), subagent reminders
-off, sound on, first effect, volume 80. An uploaded custom chime file is kept —
-use **Clear** in the Custom chime row to delete it.
+A restore-defaults button writes back: toast on (Always), notification language
+following the interface, subagent reminders off, sound on, first effect, volume
+80. An uploaded custom chime file is kept — use **Clear** in the Custom chime
+row to delete it.
+
+**Toast timing** spells both modes out under the row's title, with the two modes
+stacked one above the other so each lines up with its own explanation — readable
+without trying them:
+
+* *Always* — toasts as soon as a task finishes, whether or not the browser
+  window is in the foreground.
+* *Only when unfocused* — toasts after you switch the tab away or the browser
+  window loses focus (you are in another app).
+
+**Notification language** has just two options — Simplified Chinese and English;
+*follow the interface* is the default rather than a third entry, and the row
+shows the language that is actually in effect (the interface language until you
+pin one). It affects the toast copy only (title, body, the Approve / Reject
+button labels); the settings page itself always follows the interface language,
+so pinning English alerts does not turn the page English.
+
+### Check for updates
+
+The last row on the page shows the version you are running and one button:
+
+| State | What the row says | Button |
+| :--- | :--- | :--- |
+| Not checked yet | `Current version v1.6.0` | **Check for updates** |
+| Checking | `Checking for updates…` | disabled |
+| Up to date | `Current version v1.6.0; this is the latest release` | **Check for updates** |
+| Newer release | `Current version v1.5.5; v1.6.0 is available. Restart DSH after updating` | **Update to v1.6.0** |
+| Updating | `Updating to v1.6.0…` | disabled |
+| Updated | `Updated to v1.6.0: restart DSH to load it` | **Reload page** |
+| Failed | `Update check failed: <reason>` / `Update failed: <reason>. If it did install, restart DSH and trust the version shown` | **Check for updates** |
+
+Updating never guesses. The host half asks **both** npm's official registry and
+`registry.npmmirror.com` in parallel and takes the highest version either one
+answers with, so a mirror that has not synced yet cannot turn a real release
+into "up to date" — and a machine that cannot reach one of them still gets an
+answer from the other. Only when *both* fail does the row report a failure
+instead of pretending everything is current.
+
+The check also does not depend on a proxy being up. Node 24's `fetch` honors
+`HTTPS_PROXY` when `NODE_USE_ENV_PROXY=1`, and with a local proxy that happens to
+be switched off (Clash closed, a corporate proxy down) that turns into
+`ECONNREFUSED 127.0.0.1:7897` even though the direct route is perfectly fine. So
+each registry is asked over **two transports at once**: a direct HTTPS request
+(`agent: false`, which opts out of the proxy that Node installs on the global
+agent) and, when the environment really enables a proxy, the proxy path. The
+first answer wins. A failure message carries the underlying cause (`ECONNREFUSED
+…`, `ENOTFOUND …`) instead of undici's bare "fetch failed".
+
+The upgrade itself is handed to **DSH's own plugin manager**
+(`pluginManager.installBundle`), not to a hand-rolled `pnpm` command line: that
+service knows how this profile starts its package manager (DSH Desktop passes
+the app's bundled pnpm through launcher facts), retries the next registry when
+one is unreachable, rolls `package.json` and the lockfile back when the install
+fails, and reports the outcome. Because the dependency already exists, the
+manager returns `restart-required` — it writes the new version to disk and
+leaves the running tree alone, which is exactly what you want while the plugin
+that asked for the update is itself running in that tree. Restart DSH (or, in a
+plain browser, reload the page) and the new version is live.
+
+Two cases are refused honestly rather than half-done:
+
+* **Local development install** (`link:` / `file:` in the profile's
+  `package.json`): the row still tells you a newer release exists, but there is
+  no button that would replace your working copy with the published package.
+* **A composition without the plugin manager**: the row says so and asks you to
+  update by hand (`dsh plugin add @hawkongz/dsh-task-reminder@latest`).
+
+Nothing is uploaded and no telemetry is involved: the check is one HTTPS `GET`
+for the package's `dist-tags.latest`, and the update is a normal package
+install in your own profile.
+
+### Quick decisions from the toast
+
+An **approval** toast carries **同意 / 拒绝** (Approve / Reject) buttons in the
+browser. Clicking one runs the same `answer('allowed-once' | 'rejected')` the
+in-page approval card runs — "Approve" is *Allow once*, nothing is widened — and
+the page never has to come forward: deciding from a toast must not drag the
+window up. A wait that is settled elsewhere (the card, another tab) closes its
+toast, and a stale toast whose request was replaced decides nothing.
+
+This needs a Service Worker, so the same `client.js` is registered as the
+plugin's own worker (the boot graph's single-plugin bundle URL); the worker only
+relays which button was clicked. Plain browser contexts work on
+`http://127.0.0.1` and `https`. Where a worker cannot run — an insecure LAN
+origin, or **DSH Desktop** (`dsh-app://` cannot register a Service Worker) — the
+approval toast falls back to its buttonless form and the settings page says so
+under the System toast row instead of pretending. Check the live state with
+`__dshTaskReminder.state().approvalBridge` (`active` = buttons are on), and send
+yourself a buttoned toast with `__dshTaskReminder.test('approval')` (the buttons
+report which one you pressed and settle nothing).
+
+One caveat about the worker's scope: every DSH client bundle is served from the
+same `/plugins/` route, so the registration lands on the shared `/plugins/`
+scope — an origin can only host one such worker. Install a single notification
+plugin that uses this trick: if another one (e.g. `dsh-notify-me`) is present,
+the two registrations replace each other and only one of them keeps its toast
+buttons. Running both plugins also double-alerts every stop.
 
 ### Custom chime (your own audio)
 
@@ -349,16 +478,34 @@ synthesized chime.
 In the browser DevTools console:
 
 ```js
-// Window focus state, the seven settings, toast timing, notification
-// permission, the custom chime state, per-session running records, channel
-// counters, duplicate suppressions, recent stops and the last stop of each kind
+// Window focus state, the eight settings, the resolved notification language,
+// toast timing, notification permission, the approval-button bridge state,
+// the custom chime state, per-session running records, channel counters,
+// duplicate suppressions, recent stops and the last stop of each kind, the
+// unsettled waiting toasts and the raise-window trace (stats.lastActivation)
 __dshTaskReminder.state()
 
 // Send a task-complete toast right away and play the chime (does not wait for a task)
 __dshTaskReminder.test()
+__dshTaskReminder.test('question')   // the "Question" toast
+__dshTaskReminder.test('approval')   // a real buttoned approval toast: press either
+                                     // button and it reports back (settles nothing)
+__dshTaskReminder.test('error')      // the error toast
 
 // Play the selected effect at the current volume only
 __dshTaskReminder.sound()
+
+// Run the "land at your last question" step again on the session you are
+// looking at (no toast needed) — handy to check it after a DSH update
+__dshTaskReminder.focusQuestion()
+
+// One line: where that landing last got to, plus the DSH DOM facts it relies
+// on (session column / your message rows / scroll host counts and geometry)
+__dshTaskReminder.report()
+
+// What the Check for updates row is in right now (phase, versions, failure
+// reason) — press the button, then read this to see how far the check got
+__dshTaskReminder.state().update
 ```
 
 ### DSH Desktop: clicking a toast raises the app window
@@ -386,16 +533,43 @@ foreground. In a plain browser, on a DSH build where the route is absent, or
 when the request fails, it is a silent no-op: opening the right session is
 never affected. macOS uses `open dsh://open`; other platforms skip it.
 
+Two related behaviours: waiting-class toasts (question / plan review /
+buttonless approval) are closed as soon as their wait clears (answered /
+interaction closed / session gone), so the notification center never keeps a
+stale entry that does nothing when clicked; and every hop of the raise-window
+path leaves a trace, so reproducing "clicked but the window did not come up"
+shows exactly where it broke:
+
+```js
+// { at, route, reason, status?, error? }
+// reason: no-desktop / no-fetch / already-focused / sent / answered / failed / error
+__dshTaskReminder.state().stats.lastActivation
+```
+
+Sessions with an unsettled waiting toast are listed in
+`__dshTaskReminder.state().waitingToasts` (it should drain quickly; a resident
+entry means a toast was never closed).
+
 ### Self-check
 
 ```bash
+npm test                 # contract + both halves
+node test/verify-contract.mjs
 node test/verify-client.mjs
+node test/verify-host.mjs
 ```
+
+`test/verify-contract.mjs` loads both halves into one process and asserts they
+agree on the package name, the three routes (host-side absolute paths vs the
+desktop-relative form the page must use) and the version, then feeds the host's
+real `checkUpdate` / `applyUpdate` replies into the page-side update reducer —
+a rename on one side can no longer drift green.
 
 Runs the browser half under stubbed services (no browser needed) and asserts
 the module identity, the wiring, the edge detection, the three deduplication
 channels with repeated-edge suppression, the two toast timing modes, the
-three stop reasons (completion, pending question, error) with the turn/end
+the three stop reasons (completion, the three wait kinds — approval request,
+question, plan review — and error) with the turn/end
 classification (including the unclosed-turn retry that keeps a cancel from
 being misreported), the turn-number deduplication (a repeated edge for one
 turn reports once even after the 5 s window expired or a stale replay cleared
@@ -405,16 +579,42 @@ and an adversarial edge storm that must produce exactly one toast per turn,
 the chime
 sounding on every stop regardless of window state, the subagent filter (silent
 for all three stop reasons while the switch is off, all three back when it is
-on, forked sessions unaffected), the seven settings'
-defaults / read / write / restore, the oscillator parameters for every effect
+on, forked sessions unaffected), the eight settings'
+defaults / read / write / restore, the notification language (auto follows the
+interface locale, pinned Chinese / English override it, the settings copy stays
+on the interface language), the two toast-timing explanations (both rendered
+under the row's title, one per line, with the exact copy pinned),
+the seven work modes of the completion-unread
+level flag (recover a completion whose edge this load never saw, latch once per
+unread instance, release when the flag clears, never fire while a wait is
+pending), the approval quick-decision chain end to end (bundle URL from the boot
+graph, the dual-context file running as both page and worker, the notification
+click relay with its one-window navigate rule, one `answer('allowed-once' |
+'rejected')` per click, stale-toast and duplicate-click no-ops, and the plain
+fallback when the request carries no `answer`), the oscillator parameters for
+every effect
 and volume, the custom chime path (IndexedDB store, `decodeAudioData` playback
 at the chime volume, fallback when decoding or storing fails, and restore from
 IndexedDB on the next load), all notification permission paths plus the in-page
 permission-request button, the desktop window-activation request (only from DSH
-Desktop and only while the window is not in the foreground), the
-back-to-bottom click after a toast click (label match first, class-suffix
-fallback, bounded polling, and nothing clicked when the button never appears),
-the suspended-AudioContext revival on a user gesture, and disposal.
+Desktop and only while the window is not in the foreground), the landing after a toast click (the last row of your own messages is found in
+the transcript column, hidden rows are skipped, the scroll container is taken
+from `[data-conversation-scroll]` or the column's parent, the row is aligned
+24 px below the top, alignment is re-checked until it holds, a top/bottom clamp
+writes nothing, and a missing column / question / scroller gives up at the
+poll limit with the outcome recorded), the suspended-AudioContext revival on a
+user gesture, the **Check for updates** row (the version comparison including
+prereleases, every state the row can be in — up to date / newer release / local
+development install / no plugin manager / failure — the row sitting last on the
+page, and the two host round trips with their POST bodies), and disposal.
+
+`test/verify-host.mjs` runs the host half's own logic against stub `fetch`,
+stub `profileContext` and stub `pluginManager` services: the registry check
+(asking both registries, taking the highest answer, surviving one of them being
+down, failing honestly when both are), the refusal paths (a `link:` install, a
+composition without `pluginManager`), what `installBundle` is called with, the
+failure diagnostics, and that all three Connection routes (window activation,
+update check, update apply) register as `POST` with their exact paths.
 
 ## 🔧 Troubleshooting
 
