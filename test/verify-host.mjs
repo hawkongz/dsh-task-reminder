@@ -599,7 +599,7 @@ apply({
 			},
 		});
 	},
-});
+}, STUB_TRANSPORTS);
 check('三条宿主路由都注册上了（唤醒 / 检查更新 / 立即更新）', routes.length === 3
 	&& routes[0].path === ACTIVATION_PATH && routes[1].path === UPDATE_CHECK_PATH && routes[2].path === UPDATE_APPLY_PATH, JSON.stringify(routes.map((route) => route.path)));
 check('三条路由都只收 POST、都按 buffered 读请求体', routes.every((route) => JSON.stringify(route.methods) === JSON.stringify(['POST']) && route.requestBody === 'buffered'));
@@ -634,8 +634,10 @@ const registerActivationRoutes = (applyOptions) => {
 };
 /** 从一批注册里挑出唤醒路由（顺序：唤醒 / 检查更新 / 立即更新）。 */
 const activationRouteOf = (list) => list.find((route) => route.path === ACTIVATION_PATH);
-const desktopActivationRoute = activationRouteOf(registerActivationRoutes({ environment: desktopEnv, executable: 'C:/app/dsh.exe' }));
-const notDesktopActivationRoute = activationRouteOf(registerActivationRoutes({ environment: {}, executable: 'C:/node/node.exe' }));
+// platform 显式注入 'win32'：这条链路只在 Windows 上有意义，而 CI 跑在 Linux 上，
+// 不注入的话 `activationCommands('linux')` 返回空、路由只会回 501（1.6.2 发布时踩过）。
+const desktopActivationRoute = activationRouteOf(registerActivationRoutes({ platform: 'win32', environment: desktopEnv, executable: 'C:/app/dsh.exe' }));
+const notDesktopActivationRoute = activationRouteOf(registerActivationRoutes({ platform: 'win32', environment: {}, executable: 'C:/node/node.exe' }));
 const postActivation = (route, headers) => route.fetch(new Request('http://127.0.0.1/api/task-reminder/window-activation', { method: 'POST', headers }));
 const desktopActivation = await postActivation(desktopActivationRoute, { 'x-task-reminder-activation-id': 'click-42-1' });
 check('唤醒路由（桌面壳）：回 204，且只起一次首发进程（补发排在定时器里）',

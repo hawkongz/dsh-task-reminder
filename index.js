@@ -98,7 +98,9 @@ function isDesktopHost(environment = process.env, executable = process.execPath)
  */
 function executableProcessName(executable) {
 	try {
-		const name = basename(executable).replace(/\.exe$/i, '');
+		// 两种分隔符都认：生产上是 Windows 的 `C:\app\dsh.exe`，而同一套自检在
+		// Linux 上跑时会拿 Windows 路径喂进来（POSIX 的 basename 不认反斜杠）。
+		const name = basename(String(executable).replace(/\\/gu, '/')).replace(/\.exe$/i, '');
 		return name === '' ? null : name.replace(/'/gu, "''");
 	} catch {
 		return null;
@@ -844,7 +846,9 @@ let activationRequestSequence = 0;
  * 注册宿主侧的三条路由。桌面壳之外注册不上或没人调用，都是安静失败。
  * @param ctx - 宿主插件上下文。
  * @param options - 可注入的桩（自检用）：`activationRecorder` 换掉写文件的实现，
- *   让离线自检既不碰用户目录、也看得见每次唤醒记了什么。
+ *   让离线自检既不碰用户目录、也看得见每次唤醒记了什么；`platform` / `transports`
+ *   让同一套自检在任何操作系统上都能跑（Windows 唤醒链路与源查询都用桩，
+ *   生产不传这两个键，一律取 `process.platform` 与默认传输表）。
  */
 function apply(ctx, options = {}) {
 	// 生产写入 %USERPROFILE%\.dsh\... ；自检注入内存实现。
@@ -869,9 +873,12 @@ function apply(ctx, options = {}) {
 						const suppliedId = request?.headers?.get?.('x-task-reminder-activation-id');
 						const requestId = typeof suppliedId === 'string' && /^[A-Za-z0-9_.-]{1,100}$/.test(suppliedId)
 							? suppliedId : `host-${Date.now()}-${++activationRequestSequence}`;
-						const record = makeRecorder({ requestId, profile: profileDirOf(ctx), platform: process.platform }, connectionCtx);
+						// `options.platform` 只在自检里给（值就是 'win32' / 'darwin'）：CI 跑在
+						// Linux 上，没有它这一整条 Windows 唤醒链路就永远测不到。
+						const platform = options.platform ?? process.platform;
+						const record = makeRecorder({ requestId, profile: profileDirOf(ctx), platform }, connectionCtx);
 						record({ event: 'request', path: ACTIVATION_PATH });
-						const launched = launchDesktopWindow(process.platform, {
+						const launched = launchDesktopWindow(platform, {
 							record,
 							// 自检可以注入桩，避免真去起进程（生产这些键都是 undefined）。
 							spawn: options.spawn,
@@ -890,13 +897,13 @@ function apply(ctx, options = {}) {
 					path: UPDATE_CHECK_PATH,
 					methods: ['POST'],
 					requestBody: 'buffered',
-					fetch: () => respond(() => checkUpdate(ctx)),
+					fetch: () => respond(() => checkUpdate(ctx, options)),
 				}), 'task-reminder: update check route');
 				connectionCtx.effect(() => registry.register({
 					path: UPDATE_APPLY_PATH,
 					methods: ['POST'],
 					requestBody: 'buffered',
-					fetch: (request) => respond(() => applyUpdate(ctx, request)),
+					fetch: (request) => respond(() => applyUpdate(ctx, request, options)),
 				}), 'task-reminder: update apply route');
 			} catch (error) {
 				connectionCtx.logger?.('task-reminder')?.warn?.('update routes unavailable', error);
