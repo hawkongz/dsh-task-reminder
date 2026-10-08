@@ -394,7 +394,7 @@ function installNotificationClickRelay(scope) {
 		 * 版本号，随排障钩子暴露。必须与 package.json 的 version 一致：
 		 * 自检里有一条断言直接比这两处，版本漂了就会红。
 		 */
-		const PLUGIN_VERSION = '1.6.2';
+		const PLUGIN_VERSION = '1.6.3';
 
 		/**
 		 * 这份客户端代码的「排障代号」：改了留痕 / 跳转逻辑就 +1。

@@ -83,7 +83,7 @@ dsh plugin --profile web add @hawkongz/dsh-task-reminder
 
 一条命令同时完成两件事：把包装进 profile 目录，并把它追加进 profile 的 `dsh.profile.bundles`——不需要单独登记。想跟 GitHub 仓库最新代码，可换 `github:hawkongz/dsh-task-reminder`（带 `#<tag>` 钉某个发布标签）。本包不带构建脚本，pnpm 不会拦安装。
 
-> **发版当天注意：** pnpm 11 默认打开 `minimumReleaseAge`（1 天）。刚发布的版本当天解析不到，裸命令会装上上一版；想当天就装到新版就把版本号钉住，例如 `dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.2`。
+> **发版当天注意：** pnpm 11 默认打开 `minimumReleaseAge`（1 天）。刚发布的版本当天解析不到，裸命令会装上上一版；想当天就装到新版就把版本号钉住，例如 `dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.3`。
 
 然后重启宿主并硬刷新浏览器（宿主只在进程启动时读客户端产物，浏览器又会缓存旧 bundle，两步都省不掉）：
 
