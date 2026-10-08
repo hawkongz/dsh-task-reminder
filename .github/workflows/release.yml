@@ -9,12 +9,13 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # 建 GitHub Release 要写权限；发布 npm 走 OIDC（id-token），不需要 token。
+      contents: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
@@ -64,3 +65,36 @@ jobs:
             exit 0
           fi
           exit 1
+
+      # npm 发完之后，用 CHANGELOG 里这一版的小节建 GitHub Release —— Releases 页不再靠手补。
+      # 已有同名 release 就跳过（重推 tag 不会重复建）；CHANGELOG 里找不到小节时退回
+      # GitHub 自动生成的说明，不因为文档漏写而弄红构建。
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          tag="v${version}"
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            echo "${tag} already has a GitHub release — nothing to do."
+            exit 0
+          fi
+          set +e
+          VERSION="${version}" OUT="${RUNNER_TEMP}/release-notes.md" node -e '
+            const fs = require("node:fs");
+            const version = process.env.VERSION;
+            const lines = fs.readFileSync("CHANGELOG.md", "utf8").split(/\r?\n/);
+            const start = lines.findIndex((line) => line.startsWith("## [" + version + "]"));
+            if (start === -1) process.exit(0);
+            let end = lines.findIndex((line, index) => index > start && line.startsWith("## ["));
+            if (end === -1) end = lines.length;
+            fs.writeFileSync(process.env.OUT, lines.slice(start + 1, end).join("\n").trim() + "\n");
+          '
+          set -e
+          if [ -s "${RUNNER_TEMP}/release-notes.md" ]; then
+            gh release create "${tag}" --title "${tag}" --notes-file "${RUNNER_TEMP}/release-notes.md" --verify-tag
+          else
+            echo "::notice::CHANGELOG.md 里没有 ${version} 的小节 —— 改用 GitHub 自动生成的说明"
+            gh release create "${tag}" --title "${tag}" --generate-notes --verify-tag
+          fi
