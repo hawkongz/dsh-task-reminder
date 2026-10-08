@@ -41,16 +41,18 @@ dsh-task-reminder 是浏览器端插件（宿主半侧 `index.js` 只多做一�
 
 ## 设置项一览
 
-独立设置页：**设置 → 任务提醒**。七个设置项全部持久化在浏览器本地存储，重启后仍在。
+独立设置页：**设置 → 任务提醒**。八个设置项全部持久化在浏览器本地存储，重启后仍在。
 
 | 设置项 | 默认 | 持久化键 |
 | :--- | :--- | :--- |
 | 系统弹窗 | 开 | `dsh.task-reminder.notify` |
 | 弹窗时机（任何情况都弹 / 仅非前台窗口） | 任何情况都弹 | `dsh.task-reminder.notify-mode` |
+| 通知语言（简体中文 / English） | 跟随界面 | `dsh.task-reminder.notify-language` |
 | 完成提示音 | 开 | `dsh.task-reminder.sound` |
 | 提示音音效（四种合成 + 自定义） | 两声·经典 | `dsh.task-reminder.sound-choice` |
 | 提示音音量（0–100） | 80 | `dsh.task-reminder.volume` |
 | 子智能体提醒（默认关） | 关 | `dsh.task-reminder.subagent` |
+| 弹窗一直挂着（默认关） | 关 | `dsh.task-reminder.sticky` |
 | 自定义音效文件（本机音频，字节存 IndexedDB） | 无 | `dsh.task-reminder.custom-sound` |
 
 「恢复默认」一键写回上表默认值。四种音效（两声经典 / 三声上扬 / 上升琶音 / 圆润三角波）点选即按当前音量发声，没有单独的试听按钮。
@@ -81,7 +83,7 @@ dsh plugin --profile web add @hawkongz/dsh-task-reminder
 
 一条命令同时完成两件事：把包装进 profile 目录，并把它追加进 profile 的 `dsh.profile.bundles`——不需要单独登记。想跟 GitHub 仓库最新代码，可换 `github:hawkongz/dsh-task-reminder`（带 `#<tag>` 钉某个发布标签）。本包不带构建脚本，pnpm 不会拦安装。
 
-> **发版当天注意：** pnpm 11 默认打开 `minimumReleaseAge`（1 天）。刚发布的版本当天解析不到，裸命令会装上上一版；想当天就装到新版就把版本号钉住，例如 `dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.5.4`。
+> **发版当天注意：** pnpm 11 默认打开 `minimumReleaseAge`（1 天）。刚发布的版本当天解析不到，裸命令会装上上一版；想当天就装到新版就把版本号钉住，例如 `dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.2`。
 
 然后重启宿主并硬刷新浏览器（宿主只在进程启动时读客户端产物，浏览器又会缓存旧 bundle，两步都省不掉）：
 
@@ -109,7 +111,7 @@ dsh plugin --profile desktop add @hawkongz/dsh-task-reminder
 dsh --profile desktop --dump-config | Select-String task-reminder
 ```
 
-自检（不需要浏览器、不联网）：`npm test` 跑三套 —— 跨半侧契约 19 条、浏览器半侧 508 条、宿主半侧 66 条，共 593 条断言。跨半侧契约把两半放进同一个进程对拍包名 / 三条路由 / 版本号，把宿主的检查更新与升级答复喂进渲染侧状态机，并用同一张版本表对拍两半各自那份 semver 实现。浏览器半侧用桩服务覆盖模块身份、接线、边沿判定、三条通道去重与回合号重复边沿抑制、未闭合回合不误报完成、两种弹窗时机、三种停止原因与分类对账、每种音效的振荡器参数、通知权限路径、点弹窗落到你这次提问的位置、自定义音效与资源回收等全部路径；宿主半侧覆盖三条路由、检查更新 / 就地升级与桌面窗口唤醒链路。
+自检（不需要浏览器、不联网）：`npm test` 跑三套 —— 跨半侧契约 19 条、浏览器半侧 501 条、宿主半侧 66 条，共 591 条断言。跨半侧契约把两半放进同一个进程对拍包名 / 三条路由 / 版本号，把宿主的检查更新与升级答复喂进渲染侧状态机，并用同一张版本表对拍两半各自那份 semver 实现。浏览器半侧用桩服务覆盖模块身份、接线、边沿判定、三条通道去重与回合号重复边沿抑制、未闭合回合不误报完成、两种弹窗时机、三种停止原因与分类对账、每种音效的振荡器参数、通知权限路径、点弹窗落到你这次提问的位置、自定义音效与资源回收等全部路径；宿主半侧覆盖三条路由、检查更新 / 就地升级与桌面窗口唤醒链路。
 
 ## 排障：弹窗不响怎么办
 

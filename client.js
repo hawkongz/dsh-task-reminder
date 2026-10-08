@@ -30,9 +30,9 @@
  *    通道三：`ctx.uiSession.sessionStatus` 快照里每个会话的 running 位（与
  *    sidebar 运行指示灯同源；fork 出来的子会话列表投影不可靠——陈旧 /
  *    不翻，这条路是最可靠的一路）。转发事件万一没递到本插件，另外两条
- *    路仍能收到完成。三条通道都先过子智能体闸（默认关，见要点 9）。
+ *    路仍能收到完成。三条通道都先过子智能体闸（默认关，见要点 10）。
  * 2. 「等你回答」读 `ctx.uiSession.sessionStatus`（根级只读快照：
- *    sessionId → { running, pendingInteraction, completionUnread }）：
+ *    sessionId → { running, pendingInteraction }）：
  *    pendingInteraction 从无到有就是 Agent 阻塞在等用户（ask_user_question /
  *    plan-review）。同一个快照的 running 位同时是完成检测的第三通道
  *    （见要点 1）。只读订阅，绝不参与 user-questions/request 应答链。

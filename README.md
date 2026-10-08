@@ -220,9 +220,9 @@ registry form.) On DSH Desktop, run the same command with
 
 > **Installing on release day.** pnpm 11 enables `minimumReleaseAge` by default
 > (1440 minutes — one day), so a version published today cannot be resolved
-> yet: the bare command reports `… 1.5.2 (1.5.4 is available)` and installs the
+> yet: the bare command reports `… 1.6.1 (1.6.2 is available)` and installs the
 > previous release. To get today's version, pin it —
-> `dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.5.4` (pnpm then
+> `dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.2` (pnpm then
 > exempts that exact version) — or set `minimumReleaseAge: 0` in the profile's
 > `pnpm-workspace.yaml`, or install a day later. See
 > [Troubleshooting](#-troubleshooting) for the same symptom.
@@ -283,7 +283,7 @@ To install one exact release instead of whatever the registry resolves today
 `minimumReleaseAge` cooldown — see above), pin the version:
 
 ```powershell
-dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.5.4
+dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.2
 ```
 
 pnpm records that exemption in the profile's `pnpm-workspace.yaml`
@@ -333,7 +333,7 @@ dsh plugin --profile web add link:.\dsh-task-reminder
 dsh plugin --profile web add link:C:\Users\20105\OneDrive\Desktop\ds\dsh-task-reminder
 ```
 
-Remember the restart rule: edit `client.js`, run `node test/verify-client.mjs`,
+Remember the restart rule: edit `client.js`, run `npm test`,
 restart `dsh web`, hard-refresh the browser — the host does not hot-read a
 changed `client.js`.
 
@@ -349,15 +349,16 @@ changed `client.js`.
 | Toast timing (Always / Only when unfocused) | Always | `dsh.task-reminder.notify-mode` |
 | Notification language (Simplified Chinese / English) | Follows the interface | `dsh.task-reminder.notify-language` |
 | Subagent reminders | Off | `dsh.task-reminder.subagent` |
+| Keep notifications on screen | Off | `dsh.task-reminder.sticky` |
 | Completion sound | On | `dsh.task-reminder.sound` |
 | Chime effect (four synthesized + Custom) | Two-tone (classic) | `dsh.task-reminder.sound-choice` |
 | Custom chime file | none | `dsh.task-reminder.custom-sound` (metadata; audio bytes in IndexedDB) |
 | Chime volume (0–100) | 80 | `dsh.task-reminder.volume` |
 
 A restore-defaults button writes back: toast on (Always), notification language
-following the interface, subagent reminders off, sound on, first effect, volume
-80. An uploaded custom chime file is kept — use **Clear** in the Custom chime
-row to delete it.
+following the interface, subagent reminders off, notifications no longer kept on
+screen, sound on, first effect, volume 80. An uploaded custom chime file is kept
+— use **Clear** in the Custom chime row to delete it.
 
 **Toast timing** spells both modes out under the row's title, with the two modes
 stacked one above the other so each lines up with its own explanation — readable
@@ -375,18 +376,27 @@ pin one). It affects the toast copy only (title, body, the Approve / Reject
 button labels); the settings page itself always follows the interface language,
 so pinning English alerts does not turn the page English.
 
+**Keep notifications on screen** (off by default) adds `requireInteraction` to
+every toast kind, so the banner stays up until you dismiss it instead of
+sliding into the notification center. The switch exists because of a Windows
+behaviour: a toast whose banner was never clicked may never deliver a click to
+the page (Electron does not deliver clicks for notification-center entries,
+electron#29461), which showed up as "clicking the toast does nothing". Keeping
+the banner up makes the click land; the cost is that you close each toast
+yourself.
+
 ### Check for updates
 
 The last row on the page shows the version you are running and one button:
 
 | State | What the row says | Button |
 | :--- | :--- | :--- |
-| Not checked yet | `Current version v1.6.0` | **Check for updates** |
+| Not checked yet | `Current version v1.6.2` | **Check for updates** |
 | Checking | `Checking for updates…` | disabled |
-| Up to date | `Current version v1.6.0; this is the latest release` | **Check for updates** |
-| Newer release | `Current version v1.5.5; v1.6.0 is available. Restart DSH after updating` | **Update to v1.6.0** |
-| Updating | `Updating to v1.6.0…` | disabled |
-| Updated | `Updated to v1.6.0: restart DSH to load it` | **Reload page** |
+| Up to date | `Current version v1.6.2; this is the latest release` | **Check for updates** |
+| Newer release | `Current version v1.6.1; v1.6.2 is available. Restart DSH after updating` | **Update to v1.6.2** |
+| Updating | `Updating to v1.6.2…` | disabled |
+| Updated | `Updated to v1.6.2: restart DSH to load it` | **Reload page** |
 | Failed | `Update check failed: <reason>` / `Update failed: <reason>. If it did install, restart DSH and trust the version shown` | **Check for updates** |
 
 Updating never guesses. The host half asks **both** npm's official registry and
@@ -599,10 +609,7 @@ defaults / read / write / restore, the notification language (auto follows the
 interface locale, pinned Chinese / English override it, the settings copy stays
 on the interface language), the two toast-timing explanations (both rendered
 under the row's title, one per line, with the exact copy pinned),
-the seven work modes of the completion-unread
-level flag (recover a completion whose edge this load never saw, latch once per
-unread instance, release when the flag clears, never fire while a wait is
-pending), the approval quick-decision chain end to end (bundle URL from the boot
+the approval quick-decision chain end to end (bundle URL from the boot
 graph, the dual-context file running as both page and worker, the notification
 click relay with its one-window navigate rule, one `answer('allowed-once' |
 'rejected')` per click, stale-toast and duplicate-click no-ops, and the plain
@@ -641,8 +648,8 @@ update check, update apply) register as `POST` with their exact paths.
 * **A freshly published version will not install.** pnpm 11 defaults
   `minimumReleaseAge` to 1440 minutes (one day), so a release younger than that
   is not resolvable: `dsh plugin … add @hawkongz/dsh-task-reminder` prints
-  `… 1.5.2 (1.5.4 is available)` and installs the previous version. Pin the
-  release (`… add @hawkongz/dsh-task-reminder@1.5.4`), set
+  `… 1.6.1 (1.6.2 is available)` and installs the previous version. Pin the
+  release (`… add @hawkongz/dsh-task-reminder@1.6.2`), set
   `minimumReleaseAge: 0` in the profile's `pnpm-workspace.yaml`, or wait a day.
 * **Code changes have no effect.** The host reads client plugins only at
   process start and the browser caches the old bundle. Restart `dsh web`,
@@ -702,7 +709,7 @@ update check, update apply) register as `POST` with their exact paths.
 * **DSH Desktop: the toast opens the session but the window stays minimized.**
   Raising the window is host-half work added in 1.4.4, and the host reads
   plugins only at process start — a running app still holds the old `index.js`.
-  Check the profile shows 1.5.4 or newer (1.4.4 is the minimum that has the route)
+  Check the profile shows 1.6.2 or newer (1.4.4 is the minimum that has the route)
   (`dsh --profile desktop --dump-config | Select-String task-reminder`), then
   quit the app completely and open it again. A missing route is silent by
   design: the session still opens, only the window is not raised.
