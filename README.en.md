@@ -115,11 +115,11 @@ Title **Task stopped with an error**, the body is the gateway's own message (for
 
 ### The chime
 
-It sounds on every stop, whatever toast timing you picked: four effects synthesized on the spot (Two-tone (classic) / Rising three-tone / Rising arpeggio / Soft triangle), or an audio file you upload yourself.
+It sounds whenever a stop is ultimately announced (completion / waiting / error), whatever toast timing you picked: four effects synthesized on the spot (Two-tone (classic) / Rising three-tone / Rising arpeggio / Soft triangle), or an audio file you upload yourself. A cancelled turn, or a stop whose end-of-turn log has still not landed by the deadline, stays silent.
 
 ### One reminder per stop
 
-The plugin reads the session's own log to tell whether a stop was a completion, an error or a cancel: duplicate signals (the same stop arriving twice by different paths) are dropped, a cancelled turn is not reported, and a failed turn reports only the error. The classification and the edge cases are written up in [docs/how-it-works.md](docs/how-it-works.md).
+The plugin reads the session's own log to tell whether a stop was a completion, an error or a cancel: duplicate signals (the same stop arriving twice by different paths) are dropped, a cancelled turn is not reported, and a failed turn reports only the error. When the end-of-turn record for the current turn has not landed in the log yet, the plugin waits for it; if the deadline passes without it, nothing is shown or played (better to miss one than to report a completion that was not one), and a fallback completion that later turns out to have been a cancel is withdrawn. The classification and the edge cases are written up in [docs/how-it-works.md](docs/how-it-works.md).
 
 ## Settings at a glance
 
@@ -179,9 +179,9 @@ See the `--profile desktop` line in [Quick start](#quick-start-in-30-seconds) fo
 
 **Why is there no button on the approval toast?** It needs a Service Worker: DSH Desktop (`dsh-app://`) and insecure contexts (LAN http) fall back to a plain toast. Also, all DSH client plugins share the same `/plugins/` scope, so **install only one notification plugin of this kind** — if another plugin that uses the same trick is installed (for example `dsh-notify-me`), the two registrations replace each other and only one of them keeps its toast buttons; installing both also alerts you twice for every stop.
 
-**I clicked the toast but the desktop window did not come back.** Raising the window is host-half behaviour, and the host reads plugins only at process start — a running app still holds the old code. Check that the profile has 1.6.3 or newer (1.4.4 is the minimum version that has this route), then quit the app completely and open it again. A missing route is skipped silently: the session still opens, only the window is not raised.
+**I clicked the toast but the desktop window did not come back.** Raising the window is host-half behaviour, and the host reads plugins only at process start — a running app still holds the old code. Check that the profile has 1.6.4 or newer (1.4.4 is the minimum version that has this route), then quit the app completely and open it again. A missing route is skipped silently: the session still opens, only the window is not raised.
 
-**A freshly published version will not install (you end up with the previous one).** pnpm 11 enables a one-day cooldown (`minimumReleaseAge` is 1440 minutes) by default, so anything younger cannot be resolved. Pin the version and it installs: `dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.3`, or set `minimumReleaseAge: 0` in the profile's `pnpm-workspace.yaml`, or wait a full day.
+**A freshly published version will not install (you end up with the previous one).** pnpm 11 enables a one-day cooldown (`minimumReleaseAge` is 1440 minutes) by default, so anything younger cannot be resolved. Pin the version and it installs: `dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.4`, or set `minimumReleaseAge: 0` in the profile's `pnpm-workspace.yaml`, or wait a full day.
 
 **Code changes have no effect.** The host reads plugins only at process start, and the browser caches the old files: restart `dsh web` and hard-refresh (`Ctrl + F5`); in the desktop app, quit completely and open it again.
 
@@ -193,16 +193,16 @@ See the `--profile desktop` line in [Quick start](#quick-start-in-30-seconds) fo
 
 **Settings → Task reminder → Custom chime → Choose file** accepts audio from this machine (mp3 / wav / ogg / m4a — anything the browser can decode, up to 5 MB). Picking a file plays it once right away at the current volume, and every reminder after that uses it.
 
-The audio **lives in your own browser only**: it is not uploaded and does not enter the plugin package, and the host half is not involved at all. It is stored per browser and survives restarts, but "clear site data" or a different browser loses it — pick the file again there, and the row says honestly that the file is gone. **Clear** deletes it and puts the effect back on the first synthesized chime. If it cannot be stored or decoded (private mode, full quota, unsupported codec), the row states the reason and reminders fall back to a synthesized chime instead of going silent.
+The audio **lives in your own browser only**: it is not uploaded and does not enter the plugin package, and the host half is not involved at all. It is stored per browser and survives restarts, but "clear site data" or a different browser loses it — pick the file again there, and the row says honestly that the file is gone. **Clear** deletes it and puts the effect back on the first synthesized chime (a failed delete is reported honestly rather than pretending it worked). If it cannot be stored or decoded (private mode, full quota, unsupported codec), the row states the reason and reminders fall back to a synthesized chime instead of going silent.
 
 ### Check for updates and one-click upgrade
 
 The bottom row of the settings page shows the current version and one button. The check **asks npm's official registry and the mainland mirror at the same time** and takes the higher version either one answers with — a mirror that has not synced yet cannot turn a real release into "up to date", and if one of them is unreachable you still get the other's answer. Only when both are down does it report a failure honestly.
 
-The upgrade itself is handed to DSH's own plugin manager (not a hand-rolled pnpm command line), and when it is done you are told to restart DSH to load it. Two cases are refused honestly instead of half-done:
+The upgrade itself is handed to DSH's own plugin manager (not a hand-rolled pnpm command line), and when it is done you are told to restart DSH to load it. On current DSH, a plain install of an already-installed package is refused whenever HMR is present (`already-installed`), so the plugin follows the official upgrade path itself: try a plain install first; if it is refused, remove then install. If both fail it tries to reinstall the current version, so your profile is not left half-installed — you do not have to run any command by hand. Two cases are refused honestly instead of half-done:
 
-- **A local development install** (`link:` / `file:` in the profile): it still tells you a newer release exists, but offers no button that would overwrite your working copy;
-- **A composition without the plugin manager**: it says why, and gives you the manual upgrade command.
+- **A local development install** (`link:` / `file:` in the profile): it still tells you a newer release exists, but the only button is **Check for updates** (a re-check; it will not touch your working copy);
+- **A composition without the plugin manager**: it says why (the button likewise degrades to **Check for updates**) — upgrade manually.
 
 No uploads and no telemetry: the check is an ordinary version query, and the update is one package install in your own profile.
 
@@ -262,7 +262,7 @@ The package name can only carry a scope: npm judges the bare name `dsh-task-remi
 ### Pinning a specific version
 
 ```powershell
-dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.3
+dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.4
 ```
 
 You have to install this way while a new release is younger than pnpm's one-day cooldown (see [FAQ](#faq)). pnpm records that exemption in the profile's `pnpm-workspace.yaml` and installs it right away. To check which version a profile actually has:

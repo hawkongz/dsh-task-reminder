@@ -50,11 +50,12 @@
  *    会话持久日志最后一条 `turn/end` 的 reason 分类——completed /
  *    max-tokens 报完成，error 报错误（正文取 reason.error.message，即
  *    网关原文）且不出现完成弹窗，aborted / blocked / interrupted 不报
- *    （取消、询问已报、崩溃孤儿回合）。读的同时取最后一条 `turn/start`：
- *    最新回合还没闭合（start 比 end 新）说明手里是上一个回合的 turn/end，
- *    当次读不到、重试等它落盘——否则点停止会误报「完成」。分类读不到才
- *    退回完成弹窗，此时 5 秒内后到的 api-session/error 撤回完成弹窗只留
- *    错误（错误优先，不重复响音）。
+ *    （取消、询问已报、崩溃孤儿回合）。分类是一个状态机：能借到已 retain 的
+ *    binding 时同步读事件窗口（0 RPC）；否则一次 sessions.using 内读快照，
+ *    最新回合还没闭合（start 比 end 新）就订阅 eventSource 等本次 turn/end
+ *    落盘——到点仍是「未闭合」**不报**（点停止不会误报「完成」）；只有读不到
+ *    日志（unreadable）才退回完成弹窗，此时 5 秒内后到的 api-session/error
+ *    撤回完成弹窗只留错误，迟到分类也会纠正兜底。
  *    「同一次停止」的判据是**回合号**（1.5.4）：分类把 turn/end 的
  *    `data.turn` 一并带出，与每个会话记下的「最近一次结清的回合号」相等
  *    就丢掉——确定性去重，不再看 5 秒窗口。5 秒窗口只留给「错误优先」
@@ -243,6 +244,11 @@ function clickRouterOf(root) {
 
 /** 页面级的「保活通知」表挂在 window 上的键名。 */
 const TOAST_REGISTRY_KEY = '__dshTaskReminderToasts';
+/**
+ * 保活表上限：每条通知一个强引用（通知对象 + 点击闭包），不能无界增长。
+ * 20 条足够覆盖「通知中心里还留着没点掉的一批」，超出的按插入顺序丢最老的。
+ */
+const TOAST_REGISTRY_LIMIT = 20;
 
 /**
  * 从「实例内那份留痕」与「页面级那份留痕」里挑更新的一个。
@@ -270,18 +276,51 @@ function newerRecord(instance, shared) {
  *    fix(desktop): retain shown notifications so clicks reach their handlers）；
  * 2. 插件热重载会把旧模块作用域变成孤儿 —— 旧通知的 onclick 闭包跟着一起被
  *    回收，表现是「点了弹窗完全没反应」，连抬窗那一步都不会发生。
- * 挂在 window 上就能跨实例按住；点击 / 关闭 / 卸载时按类型释放。
+ * 挂在 window 上就能跨实例按住；按**对象身份**存（不是按类型留一条：通知 tag
+ * 已经每条独立，同类型可以同时挂着好几条，每一条都得保住点击）。
  * @param root - 页面全局（默认 window；自检可注入桩）。
- * @returns 保活表；拿不到全局时返回 null。
+ * @returns 保活表（Set）；拿不到全局时返回 null。
  */
 function toastRegistryOf(root) {
 	try {
 		const owner = root ?? window;
 		if (owner === null || owner === undefined) return null;
-		if (owner[TOAST_REGISTRY_KEY] === undefined) owner[TOAST_REGISTRY_KEY] = new Map();
+		if (owner[TOAST_REGISTRY_KEY] === undefined) owner[TOAST_REGISTRY_KEY] = new Set();
 		return owner[TOAST_REGISTRY_KEY];
 	} catch {
 		return null;
+	}
+}
+
+/**
+ * 把刚弹出的通知放进页面级保活表（按对象身份去重，超过上限丢最老的）。
+ * @param notification - 通知对象。
+ */
+function retainToast(notification) {
+	try {
+		const registry = toastRegistryOf();
+		if (registry === null || notification === null || notification === undefined) return;
+		registry.add(notification);
+		while (registry.size > TOAST_REGISTRY_LIMIT) {
+			const oldest = registry.values().next().value;
+			if (oldest === undefined) break;
+			registry.delete(oldest);
+		}
+	} catch {
+		// 保活失败不影响通知本身（最坏是点击送不到，和没有这张表时一样）。
+	}
+}
+
+/**
+ * 点击 / 关闭 / 等待消散后按对象身份释放保活引用。
+ * @param notification - 通知对象。
+ */
+function releaseToast(notification) {
+	try {
+		if (notification === null || notification === undefined) return;
+		toastRegistryOf()?.delete(notification);
+	} catch {
+		// 表没了就算了。
 	}
 }
 
@@ -394,14 +433,14 @@ function installNotificationClickRelay(scope) {
 		 * 版本号，随排障钩子暴露。必须与 package.json 的 version 一致：
 		 * 自检里有一条断言直接比这两处，版本漂了就会红。
 		 */
-		const PLUGIN_VERSION = '1.6.3';
+		const PLUGIN_VERSION = '1.6.4';
 
 		/**
 		 * 这份客户端代码的「排障代号」：改了留痕 / 跳转逻辑就 +1。
 		 * 现场只跑旧 bundle 时（设置页没刷新、profile 副本没同步），`report().build`
 		 * 会诚实地说明这点 —— 否则会拿旧代码的表现去判新代码的对错。
 		 */
-		const PLUGIN_BUILD = 'focus-question-4';
+		const PLUGIN_BUILD = 'refactor-1.6.4';
 
 		/** 八个可配置项的本地持久化键（createSnapshotStore 的 persist.name）。 */
 		const NOTIFY_PERSIST_KEY = 'dsh.task-reminder.notify';
@@ -481,11 +520,10 @@ function installNotificationClickRelay(scope) {
 		 * 四种合成音效。peak 是「显示音量 100」时的包络峰值：
 		 * 默认显示 80%（整档 +20 → master 1.0）时第一种的实际峰值 0.4375 / 0.3625。
 		 * 三角波同等峰值听起来更响，所以圆润那一档的 peak 给得低一些。
-		 * @type {ReadonlyArray<{ id: string, nameKey: string, type: OscillatorType, notes: ReadonlyArray<{ frequency: number, at: number, duration: number, peak: number }> }>}
+		 * @type {ReadonlyArray<{ nameKey: string, type: OscillatorType, notes: ReadonlyArray<{ frequency: number, at: number, duration: number, peak: number }> }>}
 		 */
 		const SOUND_CHOICES = Object.freeze([
 			Object.freeze({
-				id: 'two-tone',
 				nameKey: 'sound.choice.two-tone',
 				type: 'sine',
 				notes: Object.freeze([
@@ -494,7 +532,6 @@ function installNotificationClickRelay(scope) {
 				]),
 			}),
 			Object.freeze({
-				id: 'three-tone',
 				nameKey: 'sound.choice.three-tone',
 				type: 'sine',
 				notes: Object.freeze([
@@ -504,7 +541,6 @@ function installNotificationClickRelay(scope) {
 				]),
 			}),
 			Object.freeze({
-				id: 'arpeggio',
 				nameKey: 'sound.choice.arpeggio',
 				type: 'sine',
 				notes: Object.freeze([
@@ -515,7 +551,6 @@ function installNotificationClickRelay(scope) {
 				]),
 			}),
 			Object.freeze({
-				id: 'triangle',
 				nameKey: 'sound.choice.triangle',
 				type: 'triangle',
 				notes: Object.freeze([
@@ -542,25 +577,34 @@ function installNotificationClickRelay(scope) {
 		const CUSTOM_SOUND_RECORD_KEY = 'custom';
 		/** 自定义音频的字节上限：5MB 够十几秒 mp3，同时挡住误选的大文件。 */
 		const CUSTOM_SOUND_MAX_BYTES = 5 * 1024 * 1024;
-		/** 自定义音效各状态对应的设置页说明文案键（见 CUSTOM_STATUS_KEYS 的用法）。 */
+		/** 自定义音效各状态对应的设置页说明文案键（见 CUSTOM_SOUND_STATUS_KEYS 的用法）。 */
 		const CUSTOM_SOUND_STATUS_KEYS = Object.freeze({
 			idle: 'sound.custom.empty',
 			loading: 'sound.custom.loading',
 			ready: 'sound.custom.ready',
+			// missing 是防御损坏数据 / 半写状态：记录在、但 blob 没跟着。
 			missing: 'sound.custom.missing',
 			'decode-failed': 'sound.custom.decodeFailed',
 			'store-failed': 'sound.custom.storeFailed',
+			'read-failed': 'sound.custom.readFailed',
+			'clear-failed': 'sound.custom.clearFailed',
 			'too-large': 'sound.custom.tooLarge',
 			unsupported: 'sound.custom.unsupported',
 		});
 
 		/**
-		 * 系统通知 tag 的前缀。真正的 tag 是「前缀-类型」（等待 / 完成 / 出错），
-		 * 同一类型的新通知在系统通知中心里替换上一条 —— 通知是一次性的，留着
-		 * 一长串没看的旧弹窗只会让通知中心变脏；不同类型各占一个槽位，互不干扰。
+		 * 系统通知 tag 的前缀。真正的 tag 是「前缀-时间戳-序号」——**每条通知独立**，
+		 * 后一条不顶掉前一条。
+		 *
+		 * 1.6.2 从「按类型固定 tag + renotify」回退到这里，原因写在 notifier.show 上：
+		 * 被替换掉的那条在 Windows 通知中心里点不动（electron#29461），现场表现
+		 * 就是「点了通知窗口抬不起来」。序号用来兜住同一毫秒内多条通知（多会话
+		 * 同时停止）的 tag 碰撞——碰撞同样会触发「后一条替换前一条」。
 		 */
 		const NOTIFICATION_TAG = 'dsh-task-reminder';
-		/** 三类通知各自的 tag 后缀（见 NOTIFICATION_TAG 的说明）。 */
+		/** 单实例内通知 tag 的单调序号：保证同一毫秒的多条通知 tag 也互不相同。 */
+		let notificationSequence = 0;
+		/** 三类通知的 kind：现在只用于排障留痕（`stats.lastClick.kind`），不再拼进 tag。 */
 		const NOTIFY_KIND_WAITING = 'waiting';
 		const NOTIFY_KIND_COMPLETED = 'completed';
 		const NOTIFY_KIND_ERROR = 'error';
@@ -857,7 +901,7 @@ function installNotificationClickRelay(scope) {
 			'notify.approval.desktop': '桌面端（DSH Desktop）注册不了 Service Worker，审批通知只能是不带按钮的普通样式；其余功能不受影响。',
 			'notify.approval.insecure': '当前页面不是安全上下文（需要 https 或 http://127.0.0.1），浏览器不给注册 Service Worker，审批通知只能是不带按钮的普通样式。',
 			'notify.denied': '浏览器已拒绝本站点的通知权限，请到地址栏的站点权限里改为「允许」后再试。',
-			'notify.pending': '已发出权限申请：在弹出的浏览器对话框里选择「允许」后即可收到系统弹窗。',
+			'notify.pending': '尚未获得通知权限：点下方按钮申请（浏览器弹出对话框时选「允许」）。',
 			'notify.request': '申请通知权限',
 			'settings.sound.title': '完成提示音',
 			'sound.choice.title': '提示音音效',
@@ -874,6 +918,8 @@ function installNotificationClickRelay(scope) {
 			'sound.custom.missing': '上次选的音频在本机已丢失（换浏览器或清了站点数据），请重新选择；提醒暂用第一种合成音效',
 			'sound.custom.decodeFailed': '这个文件浏览器解不开（编码不支持或文件损坏）；提醒回落到第一种合成音效，请重新选择',
 			'sound.custom.storeFailed': '本地存储不可用（隐私模式或空间不足），文件没能保存；提醒回落到合成音效',
+			'sound.custom.readFailed': '读不到本机保存的音频（隐私模式或存储被清），提醒回落到合成音效；可重新选择文件',
+			'sound.custom.clearFailed': '清除没有成功（本地存储暂时不可用），文件还留着；请稍后再试',
 			'sound.custom.tooLarge': '文件太大（上限 {max} MB），请换一个小一点的音频',
 			'sound.custom.unsupported': '这个浏览器不支持 IndexedDB，无法在本地保存自定义音频；提醒继续用四种合成音效',
 			'sound.custom.pick': '选择文件',
@@ -942,7 +988,7 @@ function installNotificationClickRelay(scope) {
 			'notify.approval.desktop': 'DSH Desktop cannot register a Service Worker, so approval alerts arrive as plain buttonless toasts; everything else keeps working.',
 			'notify.approval.insecure': 'This page is not a secure context (https or http://127.0.0.1 required), so the browser refuses to register a Service Worker and approval alerts arrive as plain buttonless toasts.',
 			'notify.denied': 'The browser has denied notification permission for this site; allow it in the site permissions of the address bar and try again.',
-			'notify.pending': 'Permission requested: choose Allow in the browser prompt and system toasts start working.',
+			'notify.pending': 'Notification permission is not granted yet: use the button below to request it (choose Allow in the browser prompt).',
 			'notify.request': 'Request notification permission',
 			'settings.sound.title': 'Completion sound',
 			'sound.choice.title': 'Chime effect',
@@ -959,6 +1005,8 @@ function installNotificationClickRelay(scope) {
 			'sound.custom.missing': 'The audio picked earlier is gone from this browser; pick it again. Reminders use the first synthesized chime meanwhile',
 			'sound.custom.decodeFailed': 'This browser cannot decode that file (unsupported codec or damaged data); reminders fall back to the first synthesized chime — please pick another file',
 			'sound.custom.storeFailed': 'Local storage is unavailable (private mode or out of space), so the file was not saved; reminders fall back to a synthesized chime',
+			'sound.custom.readFailed': 'The audio saved on this machine cannot be read (private mode or cleared site data); reminders fall back to a synthesized chime — pick the file again if you want it back',
+			'sound.custom.clearFailed': 'The file could not be cleared (local storage is temporarily unavailable) and is still saved; try again later',
 			'sound.custom.tooLarge': 'The file is too large (limit {max} MB); please pick a smaller audio file',
 			'sound.custom.unsupported': 'This browser has no IndexedDB, so a custom audio file cannot be stored locally; reminders keep using the four synthesized chimes',
 			'sound.custom.pick': 'Choose file',
@@ -1012,12 +1060,15 @@ function installNotificationClickRelay(scope) {
 		}
 
 		/**
-		 * 归一化音量（0~100 的整数百分比）。
+		 * 归一化音量（0~100 的整数百分比，且对齐到 VOLUME_STEP）。
+		 * 手改过本地存储的 83 也落到刻度上（85）——步进器按 5 加减，值不该出现非刻度数。
 		 * @param value - 任意来源的值。
-		 * @returns 夹到 [VOLUME_MIN, VOLUME_MAX] 的整数。
+		 * @returns 夹到 [VOLUME_MIN, VOLUME_MAX] 且按步进对齐的整数。
 		 */
 		function clampVolume(value) {
-			return clampInteger(value, VOLUME_MIN, VOLUME_MAX, DEFAULTS.volume);
+			const clamped = clampInteger(value, VOLUME_MIN, VOLUME_MAX, DEFAULTS.volume);
+			const stepped = Math.round(clamped / VOLUME_STEP) * VOLUME_STEP;
+			return Math.min(VOLUME_MAX, Math.max(VOLUME_MIN, stepped));
 		}
 
 		/**
@@ -1204,11 +1255,13 @@ function installNotificationClickRelay(scope) {
 		 * 用户的真实回合静音。读列表抛错同理。
 		 * @param ctx - 客户端根上下文。
 		 * @param sessionId - 会话 id。
+		 * @param listSnapshot - 已取好的会话列表快照（批量 tick 里传入，省掉 N 次 getSnapshot）。
 		 * @returns 是子智能体会话时为 true。
 		 */
-		function isSubagentSession(ctx, sessionId) {
+		function isSubagentSession(ctx, sessionId, listSnapshot = null) {
 			try {
-				return ctx.sessions.list.getSnapshot().byId?.[sessionId]?.origin === 'subagent';
+				const snapshot = listSnapshot ?? ctx.sessions.list.getSnapshot();
+				return snapshot.byId?.[sessionId]?.origin === 'subagent';
 			} catch {
 				return false;
 			}
@@ -1235,15 +1288,38 @@ function installNotificationClickRelay(scope) {
 
 		/**
 		 * Web Audio 现场合成的提示音：按音效表排音，包络峰值乘上用户音量。
-		 * AudioContext 惰性创建：首次提醒通常已在用户交互之后，能直接响；
-		 * 被自动播放策略挂在 suspended 时，用户的第一次点击 / 按键会预热并
-		 * 把它拉活。切走标签页 / 失焦期间排下的音，回到前台时立即续播。
+		 * AudioContext 在插件装载时（`chime.warm()`）就建好，用户第一次点击 /
+		 * 按键 / 触摸再 resume 并付掉音频设备初始化 —— 首声延迟只剩设备冷启动
+		 * 那一截。切走标签页 / 失焦期间排下的音，回到前台时立即续播。
+		 * 插件卸载后 `dispose()` 置 closed：任何入口都不再新建 AudioContext、不再排音。
 		 * @returns { play, warm, resume, dispose } 播放、预热、拉活与回收。
 		 */
 		function createChime() {
 			let audio = null;
 			/** 输出管路是否已预热（只预一次）。 */
 			let primed = false;
+			/** 插件已卸载：任何入口都不再新建 AudioContext、不再排音。 */
+			let closed = false;
+			/**
+			 * 取当前音频上下文（没有就按需建一个）。
+			 * 统一 `webkitAudioContext` 兼容与「每实例只建一次」的语义 ——
+			 * 建一次是测试锁住的性能红线（首声延迟靠装载期 warm 付掉）。
+			 * @returns AudioContext；已卸载或浏览器不支持时为 null。
+			 */
+			function ensureAudio() {
+				if (closed) return null;
+				try {
+					if (audio === null) {
+						const Ctor = window.AudioContext ?? window.webkitAudioContext;
+						if (Ctor === undefined) return null;
+						audio = new Ctor();
+					}
+					return audio;
+				} catch {
+					// 音频不可用（隐私模式 / 被策略挡住）：安静退场，弹窗照发。
+					return null;
+				}
+			}
 			/**
 			 * 拉活 AudioContext。自动播放策略下，没有用户手势时浏览器会把
 			 * context 挂在 suspended，resume() 也直接拒绝；点击 / 按键等
@@ -1251,7 +1327,7 @@ function installNotificationClickRelay(scope) {
 			 * 策略炸掉，也不该在控制台留下未处理的 rejection。
 			 */
 			function revive() {
-				if (audio === null || audio.state !== 'suspended') return;
+				if (closed || audio === null || audio.state !== 'suspended') return;
 				try {
 					const reviving = audio.resume();
 					if (reviving !== null && typeof reviving === 'object' && typeof reviving.then === 'function') {
@@ -1292,9 +1368,8 @@ function installNotificationClickRelay(scope) {
 				try {
 					const volumePercent = clampVolume(volume);
 					if (volumePercent <= 0) return { scheduled: false, state: 'muted' }; // 0 = 静音：一条音都不排。
-					const Ctor = window.AudioContext ?? window.webkitAudioContext;
-					if (Ctor === undefined) return { scheduled: false, state: 'unsupported' };
-					audio ??= new Ctor();
+					if (closed) return { scheduled: false, state: 'closed' };
+					if (ensureAudio() === null) return { scheduled: false, state: 'unsupported' };
 					// 被自动播放策略挂在 suspended 时先尝试拉活；这一下拉不动也照排，
 					// 下一个用户手势恢复后这些音仍会播出来。
 					if (audio.state === 'suspended') revive();
@@ -1324,11 +1399,9 @@ function installNotificationClickRelay(scope) {
 					const volumePercent = clampVolume(volume);
 					if (volumePercent <= 0) return { scheduled: false, state: 'muted' }; // 0 = 静音：不排。
 					if (buffer === null || buffer === undefined) return { scheduled: false, state: 'custom-missing' };
-					const Ctor = window.AudioContext ?? window.webkitAudioContext;
-					if (Ctor === undefined) return { scheduled: false, state: 'unsupported' };
-					audio ??= new Ctor();
+					if (closed) return { scheduled: false, state: 'closed' };
+					if (ensureAudio() === null) return { scheduled: false, state: 'unsupported' };
 					if (audio.state === 'suspended') revive();
-					if (typeof audio.createBufferSource !== 'function') return { scheduled: false, state: 'unsupported' };
 					const now = audio.currentTime;
 					const master = (volumePercent + VOLUME_BOOST) / 100;
 					const peak = Math.max(0.0001, master);
@@ -1352,21 +1425,18 @@ function installNotificationClickRelay(scope) {
 				}
 			}
 			/**
-			 * 解码一段本地音频（Blob / File / ArrayBuffer）成 AudioBuffer。
+			 * 解码一段本地音频（Blob / File）成 AudioBuffer。
 			 * 用回调式 decodeAudioData：Safari 等实现上比 Promise 式稳；编码不支持
 			 * 或数据损坏时 reject，由调用方把状态写清楚并回落合成音效。
-			 * @param data - Blob / File / ArrayBuffer。
+			 * @param data - Blob / File（两个调用方都传浏览器文件/IndexedDB blob）。
 			 * @returns Promise<AudioBuffer>。
 			 */
 			function decode(data) {
 				return (async () => {
-					const input = data !== null && data !== undefined && typeof data.arrayBuffer === 'function'
-						? await data.arrayBuffer()
-						: data;
-					const Ctor = window.AudioContext ?? window.webkitAudioContext;
-					if (Ctor === undefined) throw new Error('unsupported');
-					audio ??= new Ctor();
-					if (typeof audio.decodeAudioData !== 'function') throw new Error('no-decoder');
+					if (closed) throw new Error('closed');
+					if (data === null || data === undefined || typeof data.arrayBuffer !== 'function') throw new Error('unsupported');
+					const input = await data.arrayBuffer();
+					if (ensureAudio() === null) throw new Error('unsupported');
 					return new Promise((resolve, reject) => {
 						try {
 							audio.decodeAudioData(input, (decoded) => resolve(decoded), (error) => reject(error ?? new Error('decode-failed')));
@@ -1386,23 +1456,27 @@ function installNotificationClickRelay(scope) {
 				 * 交互，完成提示音与切音效试听都能立即出声，没有首声延迟。
 				 * 同时播一条 gain=0 的极短音，强制音频线程与输出设备转起来
 				 * （浏览器首次播放前的设备初始化任何网页都躲不掉，只能提前付）。
+				 * 已经预热过就只做 resume（重复调用只花一次状态检查）。
 				 */
 				warm() {
 					try {
-						const Ctor = window.AudioContext ?? window.webkitAudioContext;
-						if (Ctor === undefined) return;
-						audio ??= new Ctor();
-						if (audio.state === 'suspended') revive();
+						if (closed) return;
+						const context = ensureAudio();
+						if (context === null) return;
+						// 挂起状态先拉活（用户手势里才放行；失败等下一次手势）。
+						if (context.state === 'suspended') revive();
 						if (primed) return;
-						primed = true;
 						try {
-							const primerOsc = audio.createOscillator();
-							const primerGain = audio.createGain();
+							const primerOsc = context.createOscillator();
+							const primerGain = context.createGain();
 							primerGain.gain.value = 0; // 听不见：只为把输出设备转起来
 							primerOsc.connect(primerGain);
-							primerGain.connect(audio.destination);
+							primerGain.connect(context.destination);
 							primerOsc.start();
-							primerOsc.stop(audio.currentTime + 0.01);
+							primerOsc.stop(context.currentTime + 0.01);
+							// 只有预热音真的排上了才记「已预过」：排失败（残缺 context /
+							// 设备被独占）时下一次手势还要再试一次。
+							primed = true;
 						} catch {
 							// 预热音失败无所谓：正式提示音照排。
 						}
@@ -1431,11 +1505,17 @@ function installNotificationClickRelay(scope) {
 					return playPreset(choice, volume);
 				},
 				dispose() {
+					closed = true;
 					const closing = audio;
 					audio = null;
 					if (closing !== null && typeof closing.close === 'function') {
 						try {
-							void closing.close();
+							const settled = closing.close();
+							// 只 catch 同步异常不够：close() 返回 Promise，拒绝会变成未处理
+							// rejection（控制台噪音）。
+							if (settled !== null && typeof settled === 'object' && typeof settled.catch === 'function') {
+								settled.catch(() => {});
+							}
 						} catch {
 							// 已经关干净了。
 						}
@@ -1539,6 +1619,20 @@ function installNotificationClickRelay(scope) {
 		}
 
 		/**
+		 * 把窗口叫回前台：桌面壳请宿主再启动一份应用，普通浏览器补一记
+		 * `window.focus()`。「点通知正文」的两条来路（页面通知 onclick / worker
+		 * 转信 navigate）共用这一套，别再各抄一份。
+		 */
+		function raiseDesktopWindow() {
+			requestDesktopActivation();
+			try {
+				if (typeof window.focus === 'function') window.focus();
+			} catch {
+				// 拉不起前台也不影响打开会话。
+			}
+		}
+
+		/**
 		 * 系统通知（Web Notification API）。支持探测、权限申请、弹出三步；
 		 * 每一步都容忍失败：弹窗发不出去时提示音照旧。
 		 * 权限状态每次现读（用户随时能在站点权限里改），不缓存。
@@ -1599,24 +1693,18 @@ function installNotificationClickRelay(scope) {
 						if (!granted()) return null;
 						const notification = new window.Notification(title, {
 							body,
-							// 每条通知独立 tag（1.5.5 的行为）：后一条不顶掉前一条。
-							// 回到这一版是因为「按类型固定 tag + renotify」在 Windows 上
-							// 会把上一条横幅替换掉 —— 被替换掉的那条在通知中心里点不动
-							// （Electron 在 Windows 上「通知中心里的条目」不投递 click，
-							// electron#29461），现场表现就是「点了通知窗口抬不起来」。
-							tag: `${NOTIFICATION_TAG}-${Date.now()}`,
+							// 每条通知独立 tag：后一条不顶掉前一条。加自增序号兜住
+							// 「同一毫秒多条停止」的碰撞——碰撞就等于后一条把前一条
+							// 替换掉，而被替换的那条在 Windows 通知中心里点不动
+							// （electron#29461），现场表现就是「点了通知窗口抬不起来」。
+							tag: `${NOTIFICATION_TAG}-${Date.now()}-${(notificationSequence += 1)}`,
 							silent: true,
 							// 由设置页的「弹窗一直挂着」开关决定（默认关），5 类通用。
 							requireInteraction: requireInteraction === true,
 						});
 						notification.onclick = () => {
 							// 先把窗口叫回来（桌面壳才需要、也才发得出去），再切会话。
-							requestDesktopActivation();
-							try {
-								if (typeof window.focus === 'function') window.focus();
-							} catch {
-								// 拉不起前台也不影响打开会话。
-							}
+							raiseDesktopWindow();
 							if (typeof onClick === 'function') onClick();
 							try {
 								notification.close();
@@ -1674,6 +1762,9 @@ function installNotificationClickRelay(scope) {
 			let state = 'idle';
 			let channel = null;
 			let started = false;
+			/** serviceWorker 上的 message 监听器：`navigator.serviceWorker` 跨实例存活，
+			 * 卸载时必须 removeEventListener，否则每次热重载累积一个旧实例 handler。 */
+			let serviceWorkerListener = null;
 			const stateHandlers = new Set();
 			const messageHandlers = new Set();
 			const setState = (next) => {
@@ -1746,7 +1837,8 @@ function installNotificationClickRelay(scope) {
 						}
 						try {
 							if (typeof serviceWorker.addEventListener === 'function') {
-								serviceWorker.addEventListener('message', (event) => accept(event?.data));
+								serviceWorkerListener = (event) => accept(event?.data);
+								serviceWorker.addEventListener('message', serviceWorkerListener);
 							}
 						} catch {
 							// 同上。
@@ -1826,7 +1918,7 @@ function installNotificationClickRelay(scope) {
 						}
 					}, () => {});
 				},
-				/** 卸载：退订、关频道。 */
+				/** 卸载：退订、关频道、移除 serviceWorker 监听器。 */
 				dispose() {
 					stateHandlers.clear();
 					messageHandlers.clear();
@@ -1836,6 +1928,16 @@ function installNotificationClickRelay(scope) {
 						// 已经关了。
 					}
 					channel = null;
+					try {
+						const serviceWorker = window.navigator?.serviceWorker;
+						if (serviceWorkerListener !== null && typeof serviceWorker?.removeEventListener === 'function') {
+							serviceWorker.removeEventListener('message', serviceWorkerListener);
+						}
+					} catch {
+						// 移除失败：页面换实例时最坏多一个旧 handler（都是 no-op）。
+					}
+					serviceWorkerListener = null;
+					registration = null;
 					started = false;
 				},
 			};
@@ -1880,7 +1982,6 @@ function installNotificationClickRelay(scope) {
 			step: 'check',
 			current: PLUGIN_VERSION,
 			latest: null,
-			registry: null,
 			// 本地开发安装的依赖声明（link: / file: …），非 null 时不往源上升级。
 			local: null,
 			// 宿主有没有「一键更新」的能力（要 pluginManager 服务 + 不是本地安装）。
@@ -1968,7 +2069,6 @@ function installNotificationClickRelay(scope) {
 						step: 'check',
 						current,
 						latest,
-						registry: typeof result.registry === 'string' && result.registry !== '' ? result.registry : null,
 						local: typeof result.local === 'string' && result.local !== '' ? result.local : null,
 						updatable: result.updatable === true,
 						error: null,
@@ -2048,7 +2148,23 @@ function installNotificationClickRelay(scope) {
 		 * @returns 说明字符串。
 		 */
 		function updateErrorText(error) {
-			const text = error instanceof Error ? error.message : String(error);
+			const name = error !== null && error !== undefined && typeof error.name === 'string' ? error.name : '';
+			const text = error instanceof Error
+				? error.message
+				: (error !== null && typeof error === 'object' && typeof error.message === 'string' ? error.message : String(error));
+			// 把内部错误码翻成用户能行动的话（宿主路由不存在时会走到 bad-json：SPA fallback
+			// 回了 200 HTML；连接超时是 AbortError / TimeoutError）。
+			const known = {
+				'bad-json': '宿主没有返回 JSON（可能没有更新路由，或 DSH 需要重启后才能提供）',
+				'bad-payload': '宿主答复格式不对',
+				'no-fetch': '当前环境不能发请求',
+			};
+			if (typeof known[text] === 'string') return known[text];
+			// fetch 因总超时被中止时浏览器抛 DOMException（name=TimeoutError）；
+			// 测试桩 / 老实现也可能抛 Error('TimeoutError')，两种都认。
+			if (name === 'TimeoutError' || name === 'AbortError' || text === 'TimeoutError' || text === 'AbortError' || /\btimeout\b|aborted/iu.test(text)) {
+				return '宿主没有及时答复（请求超时）';
+			}
 			return text.length > 160 ? `${text.slice(0, 160)}…` : text;
 		}
 		//#endregion
@@ -2129,16 +2245,25 @@ function installNotificationClickRelay(scope) {
 			background: 'var(--dsw-alias-bg-layer-2)',
 			flexWrap: 'wrap',
 		};
-		const STEP_BUTTON_STYLE = {
-			width: '28px',
-			height: '28px',
+		/**
+		 * 三套控件按钮的公共基座：透明底、继承色、正文级字号。
+		 * 尺寸 / 圆角 / 边框 / 选中态等差异留在各自的 STYLE 里 spread 覆盖。
+		 */
+		const CONTROL_BUTTON_BASE_STYLE = {
 			border: 'none',
-			borderRadius: '50%',
 			background: 'transparent',
 			color: 'var(--dsw-alias-label-primary)',
+			fontSize: '13px',
+			lineHeight: '20px',
+			cursor: 'pointer',
+		};
+		const STEP_BUTTON_STYLE = {
+			...CONTROL_BUTTON_BASE_STYLE,
+			width: '28px',
+			height: '28px',
+			borderRadius: '50%',
 			fontSize: '16px',
 			lineHeight: '1',
-			cursor: 'pointer',
 			padding: '0',
 		};
 		const STEP_VALUE_STYLE = {
@@ -2149,15 +2274,11 @@ function installNotificationClickRelay(scope) {
 			fontVariantNumeric: 'tabular-nums',
 		};
 		const SEGMENT_BUTTON_STYLE = {
+			...CONTROL_BUTTON_BASE_STYLE,
 			height: '30px',
 			padding: '0 14px',
-			border: 'none',
 			borderRadius: '15px',
-			background: 'transparent',
 			color: 'var(--dsw-alias-label-secondary)',
-			fontSize: '13px',
-			lineHeight: '20px',
-			cursor: 'pointer',
 			whiteSpace: 'nowrap',
 		};
 		const SEGMENT_ACTIVE_STYLE = {
@@ -2166,15 +2287,11 @@ function installNotificationClickRelay(scope) {
 			boxShadow: '0 1px 2px rgba(0, 0, 0, 0.12)',
 		};
 		const ACTION_BUTTON_STYLE = {
+			...CONTROL_BUTTON_BASE_STYLE,
 			height: '32px',
 			padding: '0 14px',
 			border: '1px solid var(--dsw-alias-border-l2)',
 			borderRadius: '16px',
-			background: 'transparent',
-			color: 'var(--dsw-alias-label-primary)',
-			fontSize: '13px',
-			lineHeight: '20px',
-			cursor: 'pointer',
 			whiteSpace: 'nowrap',
 		};
 		/** 自定义音效行的控件排布：「选择文件」（+ 有文件时的「清除」）。 */
@@ -2290,22 +2407,25 @@ function installNotificationClickRelay(scope) {
 		 * @param props.t - 本地化函数。
 		 * @returns 设置页元素。
 		 */
+		/** 订阅一个 snapshot store 的当前值：把 14 处重复的 useSyncExternalStore 收敛成一行。 */
+		const useStore = (store) => React.useSyncExternalStore(store.subscribe, store.getSnapshot);
+
 		function ReminderSection(props) {
-			const notify = React.useSyncExternalStore(props.notifyStore.subscribe, props.notifyStore.getSnapshot);
-			const notifyMode = React.useSyncExternalStore(props.notifyModeStore.subscribe, props.notifyModeStore.getSnapshot);
-			const sound = React.useSyncExternalStore(props.soundStore.subscribe, props.soundStore.getSnapshot);
-			const soundChoice = React.useSyncExternalStore(props.soundChoiceStore.subscribe, props.soundChoiceStore.getSnapshot);
-			const volume = React.useSyncExternalStore(props.volumeStore.subscribe, props.volumeStore.getSnapshot);
-			const subagent = React.useSyncExternalStore(props.subagentStore.subscribe, props.subagentStore.getSnapshot);
-			const sticky = React.useSyncExternalStore(props.stickyStore.subscribe, props.stickyStore.getSnapshot);
-			const notifyLanguage = React.useSyncExternalStore(props.notifyLanguageStore.subscribe, props.notifyLanguageStore.getSnapshot);
+			const notify = useStore(props.notifyStore);
+			const notifyMode = useStore(props.notifyModeStore);
+			const sound = useStore(props.soundStore);
+			const soundChoice = useStore(props.soundChoiceStore);
+			const volume = useStore(props.volumeStore);
+			const subagent = useStore(props.subagentStore);
+			const sticky = useStore(props.stickyStore);
+			const notifyLanguage = useStore(props.notifyLanguageStore);
 			// 这一行显示的是**生效语言**（默认跟随界面时＝界面语言），不是配置值本身。
-			const notifyLanguageEffective = React.useSyncExternalStore(props.effectiveLanguageStore.subscribe, props.effectiveLanguageStore.getSnapshot);
-			const customMeta = React.useSyncExternalStore(props.customMetaStore.subscribe, props.customMetaStore.getSnapshot);
-			const customStatus = React.useSyncExternalStore(props.customStatusStore.subscribe, props.customStatusStore.getSnapshot);
-			const permission = React.useSyncExternalStore(props.permissionStore.subscribe, props.permissionStore.getSnapshot);
-			const bridgeState = React.useSyncExternalStore(props.bridgeStateStore.subscribe, props.bridgeStateStore.getSnapshot);
-			const update = React.useSyncExternalStore(props.updateStore.subscribe, props.updateStore.getSnapshot);
+			const notifyLanguageEffective = useStore(props.effectiveLanguageStore);
+			const customMeta = useStore(props.customMetaStore);
+			const customStatus = useStore(props.customStatusStore);
+			const permission = useStore(props.permissionStore);
+			const bridgeState = useStore(props.bridgeStateStore);
+			const update = useStore(props.updateStore);
 			const updateFace = updatePresentation(update);
 			// 隐藏的文件选择框：那个按钮点它，选中文件后走 onChange（浏览器只允许
 			// 用户手势直接打开文件选择框，程序不能凭空读本地文件）。
@@ -2321,10 +2441,11 @@ function installNotificationClickRelay(scope) {
 				&& sticky === DEFAULTS.sticky;
 			// 说明只有真正需要解释的行使给（音效、自定义音效、音量、恢复默认）：
 			// 开关与二选一本身自解释，写一长串说明只会让页面变吵。
-			const switchRow = (rowKey, titleKey, value, setValue) => React.createElement(SettingRow, {
+			const switchRow = (rowKey, titleKey, value, setValue, desc) => React.createElement(SettingRow, {
 				key: rowKey,
 				rowKey,
 				title: t(titleKey),
+				desc,
 				control: React.createElement(Switch, {
 					checked: value === true,
 					onChange: (next) => setValue(next === true),
@@ -2357,7 +2478,9 @@ function installNotificationClickRelay(scope) {
 				}));
 				// 通知语言：只影响通知文案，设置页本身永远跟随界面语言。
 				// 没有「跟随界面」这一档：默认（auto）时这里显示的就是界面语言，
-				// 点哪一档就是钉住哪一档。
+				// 点哪一档就是钉住哪一档。但点**已经选中**的那一档不算「改设置」：
+				// auto 下点它不能静默变成钉住（那样之后界面语言变了却不跟随，且
+				// 没有回到 auto 的入口）。
 				children.push(React.createElement(SettingRow, {
 					key: 'notify-language',
 					rowKey: 'notify-language',
@@ -2366,24 +2489,19 @@ function installNotificationClickRelay(scope) {
 						value: notifyLanguageEffective,
 						label: t('notify.language.title'),
 						options: NOTIFY_LANGUAGES.map((language) => ({ id: language.id, label: t(language.nameKey) })),
-						onChange: (next) => props.setNotifyLanguage(next),
+						onChange: (next) => {
+							const pinned = props.notifyLanguageStore.getSnapshot();
+							const effective = props.effectiveLanguageStore.getSnapshot();
+							if (pinned === NOTIFY_LANGUAGE_AUTO && next === effective) return;
+							props.setNotifyLanguage(next);
+						},
 					}),
 				}));
 			}
 			// 子智能体提醒：放在弹窗时机之后，因为它只是「再多提醒一些什么」。
 			children.push(switchRow('subagent', 'subagent.title', subagent, props.setSubagent));
 			// 「弹窗一直挂着」：非自解释（为什么要有这个开关、代价是什么），所以给一句说明。
-			children.push(React.createElement(SettingRow, {
-				key: 'notify-sticky',
-				rowKey: 'notify-sticky',
-				title: t('notify.sticky.title'),
-				desc: t('notify.sticky.description'),
-				control: React.createElement(Switch, {
-					checked: sticky === true,
-					onChange: (next) => props.setSticky(next === true),
-					label: t('notify.sticky.title'),
-				}),
-			}));
+			children.push(switchRow('notify-sticky', 'notify.sticky.title', sticky, props.setSticky, t('notify.sticky.description')));
 			children.push(switchRow('sound', 'settings.sound.title', sound, props.setSound));
 			children.push(React.createElement(SettingRow, {
 				key: 'sound-choice',
@@ -2403,12 +2521,25 @@ function installNotificationClickRelay(scope) {
 			}));
 			// 自定义音效：选择 / 清除本机音频，并如实显示当前状态（读取中 / 就绪 /
 			// 解不开 / 存不下 / 文件丢了）。音频本体在 IndexedDB，元数据只用于显示。
-			const customKey = props.customSupported !== true
+			const customStatusKey = props.customSupported !== true
 				? 'sound.custom.unsupported'
 				: (CUSTOM_SOUND_STATUS_KEYS[customStatus] ?? 'sound.custom.empty');
-			const customDesc = customKey === 'sound.custom.ready' && customMeta !== null
-				? t(customKey, { name: customMeta.name, size: Math.max(1, Math.round(customMeta.size / 1024)) })
-				: t(customKey, { max: Math.round(CUSTOM_SOUND_MAX_BYTES / (1024 * 1024)) });
+			const customParams = { name: customMeta?.name ?? '', size: Math.max(1, Math.round((customMeta?.size ?? 0) / 1024)), max: Math.round(CUSTOM_SOUND_MAX_BYTES / (1024 * 1024)) };
+			const customReadyText = customMeta === null ? null : t('sound.custom.ready', customParams);
+			let customDesc;
+			if (customStatusKey === 'sound.custom.ready' && customReadyText !== null) {
+				customDesc = customReadyText;
+			} else if (customReadyText !== null && customStatus !== 'idle' && customStatus !== 'loading') {
+				// 状态是错误 / 提示（too-large、decode-failed、clear-failed…）但旧文件还在：
+				// 两行都给 —— 只报错会把「当前文件：xxx」盖掉，用户以为文件已经变了（F08）。
+				// 用两个 block span 而不是拼一个带 \n 的字符串：DOM 会把 \n 折叠成空格。
+				customDesc = [
+					React.createElement('span', { key: 'current-file', style: MODE_DESC_LINE_STYLE }, customReadyText),
+					React.createElement('span', { key: 'custom-status', style: MODE_DESC_LINE_STYLE }, t(customStatusKey, customParams)),
+				];
+			} else {
+				customDesc = t(customStatusKey, customParams);
+			}
 			children.push(React.createElement(SettingRow, {
 				key: 'sound-custom',
 				rowKey: 'sound-custom',
@@ -2596,7 +2727,8 @@ function installNotificationClickRelay(scope) {
 			// 音频本体（几十 KB ~ 数 MB）进 IndexedDB，见 createCustomSoundStore。
 			const customMetaStore = createSnapshotStore(normalizeCustomMeta(DEFAULTS.customSound), { persist: { name: CUSTOM_SOUND_PERSIST_KEY } });
 			// 自定义音效的当前状态只活在内存里，供设置页如实提示：
-			// idle / loading / ready / missing / decode-failed / store-failed / too-large。
+			// idle / loading / ready / missing / decode-failed / store-failed /
+			// read-failed / clear-failed / too-large / unsupported。
 			const customStatusStore = createSnapshotStore('idle');
 			// 通知权限状态只活在内存里（浏览器随时可能被用户改），供设置页提示。
 			const notifier = createNotifier();
@@ -2608,21 +2740,23 @@ function installNotificationClickRelay(scope) {
 			// 设置页最底部「检查更新」的状态：不持久化，每次打开设置页都从「还没查」开始。
 			const updateStore = createSnapshotStore(UPDATE_IDLE);
 			/**
-			 * 卸载标记。`ctx.timer` 的兜底定时器会随插件卸载一起取消，但**分类本身是
-			 * 异步的**（RPC + 裸 `setTimeout` 重试），没有这个标记时：卸载（热重载 /
-			 * 停用 / 页面换新实例）之后落地的那次分类仍会弹窗、放音 —— 在一个已经不属于
-			 * 自己的实例上。所有「等异步结果再动提醒」的路径都先看它。
+			 * 卸载标记。`ctx.timer` 的 deadline 会随插件卸载一起取消，卸载 effect 也
+			 * 会取消所有在途分类 token；但这个标记是最后一道闸：卸载（热重载 / 停用 /
+			 * 页面换新实例）之后落地的异步结果一律不弹窗、不放音、不计数 —— 在一个
+			 * 已经不属于自己的实例上。所有「等异步结果再动提醒」的路径都先看它。
 			 */
 			let disposed = false;
 
 			/**
 			 * 调一条宿主更新路由。桌面壳里 `window.fetch` 经 dsh-app 协议转发到宿主，
 			 * 浏览器里就是同源请求（cookie 默认随请求带上，和 /api 的 RPC 同一条通道）。
-			 * 宿主永远回 200 + JSON；这里只把「连不上 / 不是 JSON」变成一句能显示的说明。
+			 * 宿主永远回 200 + JSON；这里把「连不上 / 不是 JSON / 超时」变成一句能显示的说明。
 			 * @param path - 以 `/` 开头的宿主路由。
 			 * @param body - 可选请求体（更新时带目标版本）。
 			 * @returns 宿主答复对象。
 			 */
+			/** 更新请求的总超时：宿主路由卡住时设置页不能永远停在「正在检查」。 */
+			const UPDATE_REQUEST_TIMEOUT_MS = 15000;
 			const callUpdateRoute = (path, body) => {
 				if (typeof window.fetch !== 'function') {
 					return Promise.reject(new Error('no-fetch'));
@@ -2632,32 +2766,53 @@ function installNotificationClickRelay(scope) {
 					options.headers = { 'content-type': 'application/json' };
 					options.body = JSON.stringify(body);
 				}
+				try {
+					if (typeof AbortSignal === 'function' && typeof AbortSignal.timeout === 'function') {
+						options.signal = AbortSignal.timeout(UPDATE_REQUEST_TIMEOUT_MS);
+					}
+				} catch {
+					// 老浏览器没有 AbortSignal.timeout：不带 signal，退回原来「可能一直等」的行为。
+				}
 				return window.fetch(updateRouteUrl(path), options).then((response) => {
 					if (response === null || response === undefined || response.ok !== true) {
 						throw new Error(`http${response === null || response === undefined ? '' : ` ${String(response.status)}`}`);
 					}
-					return response.json();
+					return response.json().catch(() => {
+						// 200 但不是 JSON（例如前端 SPA 把 /api 吃了）：说人话，别抛 SyntaxError。
+						throw new Error('bad-json');
+					});
 				}).then((payload) => {
 					if (payload === null || typeof payload !== 'object') throw new Error('bad-payload');
 					return payload;
 				});
 			};
+			/** 更新动作是否在途（渲染层已 disabled，这里再兜一层防重复请求）。 */
+			const updateBusy = () => {
+				const phase = updateStore.getSnapshot().phase;
+				return phase === 'checking' || phase === 'updating';
+			};
+			/**
+			 * 跑一次更新动作：亮起「进行中」→ 打宿主路由 → 成功 / 失败各推进一格。
+			 * 检查与更新只差事件名、路由与请求体，收在一处避免两套 then 结构漂移。
+			 * @param action - `{ startType, okType, failType, path, body? }`。
+			 * @returns 路由落地的 Promise。
+			 */
+			const runUpdateAction = (action) => {
+				updateStore.set(updateReducer(updateStore.getSnapshot(), { type: action.startType }));
+				return callUpdateRoute(action.path, action.body).then(
+					(result) => updateStore.set(updateReducer(updateStore.getSnapshot(), { type: action.okType, result })),
+					(error) => updateStore.set(updateReducer(updateStore.getSnapshot(), { type: action.failType, reason: updateErrorText(error) })),
+				);
+			};
 			/** 检查更新：先亮「检查中」，宿主的答复（或失败）落地再推状态。 */
 			const checkUpdate = () => {
-				updateStore.set(updateReducer(updateStore.getSnapshot(), { type: 'check-start' }));
-				return callUpdateRoute(UPDATE_CHECK_ROUTE).then(
-					(result) => updateStore.set(updateReducer(updateStore.getSnapshot(), { type: 'check-result', result })),
-					(error) => updateStore.set(updateReducer(updateStore.getSnapshot(), { type: 'check-failed', reason: updateErrorText(error) })),
-				);
+				if (updateBusy()) return Promise.resolve();
+				return runUpdateAction({ startType: 'check-start', okType: 'check-result', failType: 'check-failed', path: UPDATE_CHECK_ROUTE });
 			};
 			/** 立即更新到刚查到的那个版本；成功后按钮变成「刷新页面」。 */
 			const applyUpdate = () => {
-				const state = updateStore.getSnapshot();
-				updateStore.set(updateReducer(state, { type: 'update-start' }));
-				return callUpdateRoute(UPDATE_APPLY_ROUTE, { version: state.latest }).then(
-					(result) => updateStore.set(updateReducer(updateStore.getSnapshot(), { type: 'update-result', result })),
-					(error) => updateStore.set(updateReducer(updateStore.getSnapshot(), { type: 'update-failed', reason: updateErrorText(error) })),
-				);
+				if (updateBusy()) return Promise.resolve();
+				return runUpdateAction({ startType: 'update-start', okType: 'update-result', failType: 'update-failed', path: UPDATE_APPLY_ROUTE, body: { version: updateStore.getSnapshot().latest } });
 			};
 			/**
 			 * 「刷新页面」：web 里刷新后浏览器半侧就是新版了（宿主半侧要重启 DSH）；
@@ -2685,16 +2840,28 @@ function installNotificationClickRelay(scope) {
 			// 一次停止只报一次、报对一次：停止边沿到达时读会话持久日志最后一条
 			// turn/end 的 reason 分类（completed / max-tokens → 完成，error →
 			// 错误且不出现完成弹窗，aborted / blocked / interrupted → 不报）。
-			// 分类读不到时退回完成弹窗，用对账窗口兜底：5 秒内后到的
+			// 分类读不到（unreadable）时退回完成弹窗，用对账窗口兜底：5 秒内后到的
 			// api-session/error 撤回完成弹窗只留错误、不重响提示音；读不到
 			// 回合号的完成→完成重复边沿也退回这张窗口去重（无号边沿不能变得
 			// 可重复），有回合号的完成→完成去重见 lastReportedTurn。
-			// 分类时限放宽到 700ms、重试加到 3 次：turn/end 落盘不在回合边界
-			// 同步 flush，取消（aborted）的 turn/end 常要再等一两拍才读得到。
-			const CLASSIFY_TIMEOUT_MS = 700;
-			const CLASSIFY_RETRIES = 3;
-			const CLASSIFY_RETRY_MS = 120;
+			// 分类等待是一个状态机（见 complete / classifyWithEvents），只有**一个**
+			// 时钟，不再有「独立 700ms 兜底 + 3×120ms 重试」两套互相竞争的定时器：
+			// - 快路径：DSH 已 retain 的 binding 上同步读事件窗口（0 RPC），
+			//   判定 closed 就当场结算 —— 通知/提示音在边沿回调返回前发出；
+			// - 否则一次 sessions.using：读快照；最新回合未闭合（最后一条
+			//   turn/start 比 turn/end 新）就订阅 eventSource 等 append，每来
+			//   一条重读，closed 立即结算；
+			// - CLASSIFY_DEADLINE_MS 到点仍未 closed 时：unclosed（确凿证据：本次
+			//   回合的 turn/end 还没落盘）静默不报；unreadable（读不到日志 /
+			//   using 失败 / RPC 挂住）才按完成兜底。
+			const CLASSIFY_DEADLINE_MS = 700;
 			const recentReports = new Map(); // sessionId → { kind, notification, at, turn, cancel }
+			/**
+			 * `trackReport` 的 5 秒遗忘定时器句柄。它们不进 ctx.timer（只是账本清理，
+			 * 不是提醒逻辑），但要能在卸载时 clear：否则热重载后旧实例的定时器还会
+			 * 醒一次。`entry.cancel` 负责单条回收。
+			 */
+			const reportForgetTimers = new Set();
 			// 每个会话「最近一次结清的停止边沿」所属回合号：
 			//   分类读得 turn/end 的 data.turn 且与这里相等 → 同一次停止（通道重复 /
 			//   列表陈旧回放），确定性丢掉，不再靠 5 秒窗口 —— 桌面端通道一稀疏，
@@ -2713,9 +2880,10 @@ function installNotificationClickRelay(scope) {
 			// （任一通道 running 位转 true）立刻作废：回答后 Agent 接着干活的
 			// 回合结束必须照常提醒（1.5.2 修的就是「豁免挂太久把完成静音」）。
 			const questionGrace = new Map(); // sessionId → 豁免截止时刻（ms）
-			// 同一次停止的分类在途标记（token）：分类是异步的（RPC 读持久日志），
-			// 窗口期内列表陈旧回放把边沿表冲回 true 再翻 false 会产生第二次边沿，
-			// 此时直接忽略——同一次停止只走一次分类。
+			// 同一次停止的分类在途 token：分类可能等一次 using / eventSource append，
+			// 窗口期内列表陈旧回放把边沿表冲回 true 再翻 false 会产生第二次边沿；
+			// 新回合（running=true）或卸载会取消 token（cancelled + 清 deadline +
+			// 解开事件等待），被取消的结果不弹不放不计数。
 			const completing = new Map(); // sessionId → token
 			// 有待答交互（ask_user_question / plan-review）的会话集合，按出现边沿提醒。
 			const pendingQuestions = new Set();
@@ -2730,6 +2898,11 @@ function installNotificationClickRelay(scope) {
 				sounds: 0,
 				notifications: 0,
 				stopDuplicates: 0,
+				// 停止分类状态机的两个兜底/纠正计数（排障用）：
+				// 截止时仍是 unclosed（本次回合没闭合）→ 静默不报的次数。
+				suppressedUnclosed: 0,
+				// 已按 unreadable 兜底报了完成，之后迟到分类判定为取消 → 撤回那条完成。
+				lateCorrections: 0,
 				// 在通知上直接裁决的次数（审批快捷按钮）。
 				decisions: 0,
 				// 点通知正文「打开会话」成功的次数（失败只记 lastJump，不计数）。
@@ -2789,18 +2962,16 @@ function installNotificationClickRelay(scope) {
 			let customBuffer = null;
 			let customRevision = 0;
 			/**
-			 * 把一条自定义音频记录解码成播放用的 AudioBuffer。
+			 * 把一条自定义音频记录解码成播放用的 AudioBuffer（只用于装载期恢复）。
 			 * @param revision - 取用时的版本号（结果落地时据此判断是否已作废）。
 			 * @param blob - 音频字节（Blob / File）。
-			 * @param preview - 解码成功后是否当场按当前音量试听（用户刚选完文件时为真）。
 			 */
-			const adoptCustomRecord = (revision, blob, preview) => {
+			const adoptCustomRecord = (revision, blob) => {
 				if (revision === customRevision) customStatusStore.set('loading');
 				void chime.decode(blob).then((buffer) => {
 					if (revision !== customRevision) return; // 期间又换文件 / 清了：这次结果作废
 					customBuffer = buffer;
 					customStatusStore.set('ready');
-					if (preview === true) chime.playBuffer(buffer, volumeStore.getSnapshot());
 				}).catch(() => {
 					if (revision !== customRevision) return;
 					customBuffer = null;
@@ -2808,9 +2979,9 @@ function installNotificationClickRelay(scope) {
 				});
 			};
 			/**
-			 * 写入自定义音效：校验 → 存 IndexedDB → 记元数据 → 切到自定义档 →
-			 * 解码成功即试听一次。任何一步失败都如实写状态并回落合成音效，
-			 * 不静默假装成功。
+			 * 写入自定义音效：校验通过后把「存 IndexedDB」与「解码」**并行**跑 ——
+			 * 解码成功就能试听（不必等写盘），写盘结果只决定「保存成功 / 失败提示」。
+			 * 任何一步失败都如实写状态并回落合成音效，不静默假装成功。
 			 * @param file - 文件选择框给出的 File。
 			 */
 			const setCustomSound = (file) => {
@@ -2833,26 +3004,72 @@ function installNotificationClickRelay(scope) {
 				// name 上面已兜成非空（'audio'），normalizeCustomMeta 必定返回元数据；
 				// 这里不再写一个永远不会成立的 null 分支。
 				const revision = (customRevision += 1);
-				customStatusStore.set('loading');
-				void customSounds.put({ ...meta, blob: file }).then((stored) => {
-					if (revision !== customRevision) return;
-					if (stored !== true) {
-						customStatusStore.set('store-failed');
+				const previousBuffer = customBuffer;
+				customStatusStore.set('loading'); // 整个异步窗口只亮一次「读取中」
+				let stored = null; // null=写盘中；true/false=写盘结果
+				let decoded; // undefined=解码中；{ buffer } 或 'failed'
+				let committed = false;
+				let previewPlayed = false;
+				/** 写盘失败：不切档、不动元数据，播放继续用之前那份。 */
+				const failStore = () => {
+					if (revision !== customRevision || committed) return;
+					committed = true;
+					customBuffer = previousBuffer;
+					customStatusStore.set('store-failed');
+				};
+				/** 两端结果都到齐后落一次账；解码先到就先试听（写盘还没失败的前提下）。 */
+				const commit = () => {
+					if (revision !== customRevision || committed) return;
+					if (decoded !== undefined && decoded !== 'failed' && !previewPlayed) {
+						previewPlayed = true;
+						chime.playBuffer(decoded.buffer, volumeStore.getSnapshot());
+					}
+					if (stored === null || decoded === undefined) return; // 还有一端没回来
+					committed = true;
+					if (stored !== true) return failStore(); // 理论上 failStore 已处理；兜底
+					customMetaStore.set(meta);
+					soundChoiceStore.set(CUSTOM_SOUND_CHOICE); // 保存成功即切到自定义档
+					if (decoded === 'failed') {
+						customBuffer = null;
+						customStatusStore.set('decode-failed');
 						return;
 					}
-					customMetaStore.set(meta);
-					soundChoiceStore.set(CUSTOM_SOUND_CHOICE); // 选完文件即切到自定义档
-					adoptCustomRecord(revision, file, true);
+					customBuffer = decoded.buffer;
+					customStatusStore.set('ready');
+				};
+				void customSounds.put({ ...meta, blob: file }).then((storedResult) => {
+					stored = storedResult === true;
+					if (stored === false) failStore();
+					else commit();
+				});
+				void chime.decode(file).then((buffer) => {
+					decoded = { buffer };
+					commit();
+				}).catch(() => {
+					decoded = 'failed';
+					commit();
 				});
 			};
-			/** 清除自定义音效：删 IndexedDB 记录与元数据，并切回第一种合成音效。 */
+			/**
+			 * 清除自定义音效：删 IndexedDB 记录、清元数据，并切回第一种合成音效。
+			 * 删除可能失败（隐私模式 / 存储异常）：失败时**保留元数据**并写
+			 * `clear-failed`，否则设置页显示「已清除」、下次装载又从 IndexedDB 复活。
+			 */
 			const clearCustomSound = () => {
-				customRevision += 1;
-				customBuffer = null;
-				customMetaStore.set(null);
-				customStatusStore.set('idle');
-				if (soundChoiceStore.getSnapshot() === CUSTOM_SOUND_CHOICE) soundChoiceStore.set(DEFAULT_SOUND_CHOICE);
-				void customSounds.remove();
+				const revision = (customRevision += 1);
+				void customSounds.remove().then((removed) => {
+					if (revision !== customRevision) return; // 期间又选了新文件：这次清除结果已不代表现状
+					if (removed === false) {
+						// 删除失败 = 文件其实还在：元数据 / IndexedDB 记录 / 当前播放都保持原样，
+						// 只如实写状态。否则设置页显示「已清除」而提醒却已无声/回落到合成音（F01）。
+						customStatusStore.set('clear-failed');
+						return;
+					}
+					customBuffer = null;
+					customMetaStore.set(null);
+					customStatusStore.set('idle');
+					if (soundChoiceStore.getSnapshot() === CUSTOM_SOUND_CHOICE) soundChoiceStore.set(DEFAULT_SOUND_CHOICE);
+				});
 			};
 
 			// 在途权限申请的序号：每次写回开关、每次自动申请都使它失效，
@@ -2863,6 +3080,15 @@ function installNotificationClickRelay(scope) {
 				permissionStore.set(typeof result === 'string' ? result : notifier.permission());
 			};
 			/**
+			 * 申请一次通知权限：只有「结果落地时仍是最后一次申请」才写回权限状态。
+			 * 设置页开关（用户手势）与装载期的自动申请共用这一条路径。
+			 * @returns Promise<权限字符串>。
+			 */
+			const requestNotifyPermission = () => {
+				const seq = (notifyRequestSeq += 1);
+				return notifier.request().then((result) => applyPermissionResult(seq, result));
+			};
+			/**
 			 * 写回系统弹窗开关；从关到开时若权限还是 default，借这个用户手势申请。
 			 * @param next - 目标值。
 			 * @returns 申请权限的 Promise（无需申请时返回 undefined）。
@@ -2870,7 +3096,7 @@ function installNotificationClickRelay(scope) {
 			const setNotify = (next) => {
 				const on = next === true;
 				notifyStore.set(on);
-				const seq = (notifyRequestSeq += 1);
+				notifyRequestSeq += 1; // 任何一次开关写回都让在途申请作废
 				if (!on || !notifier.supported) {
 					if (notifier.supported) permissionStore.set(notifier.permission());
 					return undefined;
@@ -2880,7 +3106,7 @@ function installNotificationClickRelay(scope) {
 					permissionStore.set(current);
 					return undefined;
 				}
-				return notifier.request().then((result) => applyPermissionResult(seq, result));
+				return requestNotifyPermission();
 			};
 			/** 写回弹窗时机（坏值归一化到默认档）。 */
 			const setNotifyMode = (next) => notifyModeStore.set(resolveNotifyMode(next));
@@ -2904,7 +3130,7 @@ function installNotificationClickRelay(scope) {
 			};
 			/** 写回音量百分比。 */
 			const setVolume = (next) => volumeStore.set(clampVolume(next));
-			/** 恢复默认：七个配置全部写回出厂值，权限提示同步刷新。 */
+			/** 恢复默认：八个配置全部写回出厂值，权限提示同步刷新。 */
 			const resetAll = () => {
 				notifyStore.set(DEFAULTS.notify);
 				notifyModeStore.set(DEFAULTS.notifyMode);
@@ -3226,12 +3452,14 @@ function installNotificationClickRelay(scope) {
 			 * @param title - 弹窗标题（按停止原因选）。
 			 * @param body - 弹窗正文（会话名 / 问题 / 错误信息）。
 			 * @param sessionId - 相关会话。
-			 * @param kind - 通知类型（NOTIFY_KIND_*）：只用于留痕与保活表的键，不再决定 tag
-			 *   （tag 已回到「每条独立」，见 notifier.show）。
+			 * @param kind - 通知类型（NOTIFY_KIND_*）：只用于排障留痕（点击记录的 kind），
+			 *   不再决定 tag（tag 每条独立，见 notifier.show）。
 			 */
 			const notify = (title, body, sessionId, kind) => {
 				const suffix = typeof kind === 'string' && kind !== '' ? kind : NOTIFY_KIND_COMPLETED;
-				const notification = notifier.show(title, body, () => {
+				// 点击闭包要能按对象身份释放保活引用：先声明、show 之后再赋值。
+				let notification = null;
+				notification = notifier.show(title, body, () => {
 					// 点击留痕：先分清「handler 到底跑没跑」。Electron 在 Windows 上
 					// 「在系统通知中心里点」不投递 click 是已知问题（electron#29461），
 					// lastClick 为空就说明问题不在插件这一侧。
@@ -3242,7 +3470,7 @@ function installNotificationClickRelay(scope) {
 					// 「点了没反应」最常见的伴生条件之一。
 					clickDiag.count += 1;
 					clickDiag.last = { ...stats.lastClick, build: PLUGIN_BUILD, count: clickDiag.count };
-					toastRegistryOf()?.delete(suffix);
+					releaseToast(notification);
 					// 再问页面级转发表（当前实例）；插件已经卸载、表里没人时退回本
 					// 闭包的 ctx —— 后者多半也是死的，但比什么都不做多一次机会。
 					const handler = clickRouterOf()?.handler ?? null;
@@ -3259,8 +3487,10 @@ function installNotificationClickRelay(scope) {
 				}, stickyStore.getSnapshot() === true);
 				if (notification !== null) {
 					stats.notifications += 1;
-					// 保活（见 toastRegistryOf）：同类只留最近一条，点击/卸载时释放。
-					toastRegistryOf()?.set(suffix, notification);
+					// 保活（见 toastRegistryOf）：按对象身份留住每一条，点击/关闭时按身份释放。
+					// 不能按类型只留最近一条 —— tag 已经每条独立，同类型可以同时挂好几条，
+					// 被挤掉的那条点击就再也送不到页面。
+					retainToast(notification);
 				}
 				return notification;
 			};
@@ -3322,7 +3552,10 @@ function installNotificationClickRelay(scope) {
 			};
 			/** 关掉某个会话下所有还没结清的审批通知（等待消散时用）。 */
 			const closeApprovalToastsOfSession = (sessionId) => {
-				for (const [key, entry] of [...approvalToasts]) {
+				// 稳态（没有审批通知）是快照 tick 里每会话都会调到的：空表直接返回，
+				// 也不为遍历复制数组（删当前项对 Map 迭代是安全的）。
+				if (approvalToasts.size === 0) return;
+				for (const [key, entry] of approvalToasts) {
 					if (entry.sessionId === sessionId) closeApprovalToast(key);
 				}
 			};
@@ -3336,6 +3569,7 @@ function installNotificationClickRelay(scope) {
 				const toast = waitingToasts.get(sessionId);
 				if (toast === undefined) return;
 				waitingToasts.delete(sessionId);
+				releaseToast(toast);
 				try {
 					toast.close();
 				} catch {
@@ -3418,11 +3652,12 @@ function installNotificationClickRelay(scope) {
 			 * 的最前面 —— 边沿表、分类、提示音、弹窗、待答集合、grace 全都不参与，
 			 * 子智能体与父会话各自独立，父会话自己的完成照常提醒。
 			 * @param sessionId - 会话 id。
+			 * @param listSnapshot - 已取好的会话列表快照（批量 tick 里传入，省掉 N 次 getSnapshot）。
 			 * @returns true = 该提醒。
 			 */
-			const shouldRemindFor = (sessionId) => {
+			const shouldRemindFor = (sessionId, listSnapshot = null) => {
 				if (subagentStore.getSnapshot() === true) return true;
-				return !isSubagentSession(ctx, sessionId);
+				return !isSubagentSession(ctx, sessionId, listSnapshot);
 			};
 
 			/**
@@ -3439,7 +3674,13 @@ function installNotificationClickRelay(scope) {
 				// 又跑起来了 = 上一轮交互之后的「紧随完成」豁免作废。三条通道都要
 				// 作废：1.5.1 只在转发事件那条通道里清，桌面端 0 条转发事件时豁免
 				// 会一直挂到会话结束，把真正的回合完成静音（1.5.2 修的就是这里）。
-				if (running === true) questionGrace.delete(sessionId);
+				if (running === true) {
+					questionGrace.delete(sessionId);
+					// 新回合开始：在途分类的 deadline / 事件等待立即作废（F-03）。
+					// 之后真正的停止边沿会重新走一次完整的分类状态机；同一次停止的
+					// 重复边沿由回合号判据在更前面挡掉。
+					cancelInFlight(sessionId);
+				}
 				return running !== true && wasRunning;
 			};
 
@@ -3464,50 +3705,161 @@ function installNotificationClickRelay(scope) {
 			};
 
 			/**
-			 * 读会话持久日志最后一条 turn/end 的原因与所属回合号。turn/end 落盘
-			 * 不在回合边界同步 flush，RPC 读存储会强制 flush；读不到就重试几次，
-			 * 仍读不到返回 null（调用方走兜底）。
-			 * 同时取最后一条 `turn/start`：最新回合还没闭合（start 比 end 新）时，
-			 * 最后一条 turn/end 属于上一个回合（停止场景常是上一个回合的
-			 * completed）——此时当次读不到，交给重试等本次回合的 turn/end 落盘，
-			 * 避免把取消误报成「完成」。
-			 * 回合号（`turn/end` 的 data.turn）一并带出：调用方用它做「同一次停止」
-			 * 的确定性去重；老日志没有号时 turn 为 null，调用方退回 5 秒窗口。
-			 * @param sessionId - 会话 id。
-			 * @returns `{ reason, turn }`（turn 读不到号时为 null），或 null。
+			 * 读事件窗口并分类：只看最后一条 turn/end 与最后一条 turn/start。
+			 * - closed：最新回合已结清，返回 { status:'closed', reason, turn }；
+			 * - unclosed：turn/start 比 turn/end 新（最新回合还没闭合），返回
+			 *   { status:'unclosed' } —— 这是「本次停止的 turn/end 还没落盘 /
+			 *   这条边沿是陈旧回放」的确凿证据，到点仍这样时静默不报；
+			 * - unreadable：窗口里没有 turn/end 或没有 reason（读不到日志），
+			 *   才允许按完成兜底。
+			 * 回合号（turn/end 的 data.turn）一并带出：调用方做「同一次停止」的
+			 * 确定性去重；老日志没有号时 turn 为 null，退回 5 秒对账窗口。
+			 * @param binding - 已 retain 的 binding（或 using 回调里的 reference.binding）。
+			 * @returns 分类结果；拿不到事件窗口时返回 null。
 			 */
-			const readTurnEndReason = async (sessionId) => {
-				for (let attempt = 0; ; attempt += 1) {
-					if (disposed) return null; // 插件已卸载：结果无处可报，剩下几次重试直接省掉
-					let classified = null;
-					try {
-						classified = await ctx.sessions.using(sessionId, { source: 'task-reminder' }, async (reference) => {
-							const binding = await reference.ready;
-							const entries = binding.eventSource.getSnapshot().entries ?? [];
-							let lastEnd = null; // 最后一条 turn/end
-							let lastStart = null; // 最后一条 turn/start
-							for (let i = entries.length - 1; i >= 0; i -= 1) {
-								const entry = entries[i];
-								if (entry?.type !== 'event') continue;
-								if (lastEnd === null && entry.event?.type === 'turn/end') lastEnd = entry.event;
-								if (lastStart === null && entry.event?.type === 'turn/start') lastStart = entry.event;
-								if (lastEnd !== null && lastStart !== null) break;
+			const classifyBinding = (binding) => {
+				let entries;
+				try {
+					const eventSource = binding?.eventSource;
+					if (eventSource === null || eventSource === undefined || typeof eventSource.getSnapshot !== 'function') return null;
+					const snapshot = eventSource.getSnapshot();
+					entries = Array.isArray(snapshot?.entries) ? snapshot.entries : null;
+				} catch {
+					return null;
+				}
+				if (entries === null) return null;
+				let lastEnd = null; // 最后一条 turn/end
+				let lastStart = null; // 最后一条 turn/start
+				for (let i = entries.length - 1; i >= 0; i -= 1) {
+					const entry = entries[i];
+					if (entry?.type !== 'event') continue;
+					if (lastEnd === null && entry.event?.type === 'turn/end') lastEnd = entry.event;
+					if (lastStart === null && entry.event?.type === 'turn/start') lastStart = entry.event;
+					if (lastEnd !== null && lastStart !== null) break;
+				}
+				// 窗口里没有 turn/end：读不到日志（会话刚开 / 窗口还没载入），不是 unclosed。
+				if (lastEnd === null) return { status: 'unreadable' };
+				const endTurn = lastEnd.data?.turn;
+				const startTurn = lastStart?.data?.turn;
+				// 最新回合还没闭合：最后一条 turn/end 属于上一个回合，本次停止还没有证据。
+				if (typeof endTurn === 'number' && typeof startTurn === 'number' && endTurn < startTurn) return { status: 'unclosed' };
+				const reason = lastEnd.data?.reason;
+				if (reason === null || reason === undefined) return { status: 'unreadable' };
+				return { status: 'closed', reason, turn: typeof endTurn === 'number' ? endTurn : null };
+			};
+
+			/**
+			 * 快路径：DSH 已 retain 的 binding 上同步读事件窗口 —— 0 RPC、无 await。
+			 * 只有判定 closed 才由调用方当场结算；unclosed / unreadable / 拿不到
+			 * binding 都交给一次 sessions.using 的慢路径（它还能订阅 eventSource
+			 * 等本次回合的 turn/end 落盘）。`typeof` 守卫：旧宿主没有这个方法时
+			 * 静默回退 using 路径。
+			 * @param sessionId - 会话 id。
+			 * @returns 分类结果，或拿不到 binding 时的 null。
+			 */
+			const classifyBorrowed = (sessionId) => {
+				if (typeof ctx.sessions.binding !== 'function') return null;
+				try {
+					const binding = ctx.sessions.binding(sessionId);
+					if (binding === null || binding === undefined) return null;
+					return classifyBinding(binding);
+				} catch {
+					// binding 已被释放 / 旧宿主实现不支持：回退 using 路径。
+					return null;
+				}
+			};
+
+			/**
+			 * 慢路径：一次 sessions.using 内完成「读 + 等」。
+			 * 先读一次快照：closed 立即返回；unclosed（或暂时 unreadable）且
+			 * eventSource 可订阅时，订阅 append 等本次回合的 turn/end 落盘，每来
+			 * 一条重读，closed 立即返回。deadline 由 complete() 里的单一定时器
+			 * 统一负责（到点用 token.last 结算），这里只负责等到事件或被打断。
+			 * **最多一次 using** —— 不再有「重试再发 RPC + 120ms sleep」。
+			 * @param sessionId - 会话 id。
+			 * @param token - 本次分类的 token（deadline / 取消共用）。
+			 * @returns Promise<分类结果 | null>。
+			 */
+			const classifyWithEvents = async (sessionId, token) => {
+				try {
+					return await ctx.sessions.using(sessionId, { source: 'task-reminder' }, (reference) => new Promise((resolve) => {
+						let done = false;
+						let unsubscribe = null;
+						/**
+						 * 收工：只结算一次，退订并解开 deadline 对等待的引用。
+						 * @param result - 分类结果（或 null = unreadable）。
+						 */
+						const finish = (result) => {
+							if (done) return;
+							done = true;
+							token.cancelWait = null;
+							if (unsubscribe !== null) {
+								try { unsubscribe(); } catch { /* 订阅已随会话释放 */ }
+								unsubscribe = null;
 							}
-							if (lastEnd === null) return null;
-							// 最新回合还没闭合：最后一条 turn/end 是上一个回合的，当次读不到。
-							const endTurn = lastEnd.data?.turn;
-							const startTurn = lastStart?.data?.turn;
-							if (typeof endTurn === 'number' && typeof startTurn === 'number' && endTurn < startTurn) return null;
-							const reason = lastEnd.data?.reason;
-							if (reason === null || reason === undefined) return null;
-							return { reason, turn: typeof endTurn === 'number' ? endTurn : null };
-						});
-					} catch {
-						// retain / open 失败（会话不在册、Host 侧拒绝等）：当次读不到。
-					}
-					if (classified !== null && classified !== undefined) return classified;
-					if (attempt >= CLASSIFY_RETRIES) return null;
-					await new Promise((resolve) => { setTimeout(resolve, CLASSIFY_RETRY_MS); });
+							resolve(result);
+						};
+						// deadline / running=true 取消时解开等待（外层负责结算）。
+						token.cancelWait = () => finish(null);
+						let binding = null;
+						try {
+							// DSH 的 using() 在调用回调前已经 await 过 reference.ready，
+							// 这里不再重复 await（旧实现的多余 await 已删）。
+							binding = reference?.binding ?? null;
+						} catch {
+							binding = null;
+						}
+						/** 读一次当前窗口并更新 token.last。 */
+						const read = () => {
+							const classified = classifyBinding(binding);
+							token.last = classified;
+							return classified;
+						};
+						// 分类已被取消（新回合开始 / 卸载）：不再读，直接收工。
+						if (token.cancelled) {
+							finish(null);
+							return;
+						}
+						const first = read();
+						// deadline 已经先结算过（RPC 慢，兜底完成已发）：只读一次交回去，
+						// 由外层做「迟到分类纠正」，不再等事件。
+						if (token.settled) {
+							finish(first);
+							return;
+						}
+						if (first !== null && first.status === 'closed') {
+							finish(first);
+							return;
+						}
+						if (first === null || first.status !== 'unclosed') {
+							// unreadable：按产品取舍立即走完成兜底（不再等 deadline）。
+							// 只有 unclosed 才值得等本次回合的 turn/end 落盘。
+							finish(first);
+							return;
+						}
+						const eventSource = binding?.eventSource ?? null;
+						if (eventSource === null || typeof eventSource.subscribe !== 'function') {
+							// 订阅不了（旧宿主 / 事件源缺失）：把最新观测交回去，由 deadline
+							// 语义决定报不报（unclosed 静默、unreadable 兜底）。
+							finish(first);
+							return;
+						}
+						try {
+							unsubscribe = eventSource.subscribe(() => {
+								const next = read();
+								if (next !== null && next.status === 'closed') finish(next);
+							});
+						} catch {
+							finish(first);
+							return;
+						}
+						// 订阅之后、第一条事件之前再读一次：订阅与首读之间的 append 不能漏。
+						const again = read();
+						if (again !== null && again.status === 'closed') finish(again);
+					}));
+				} catch {
+					// retain / open 失败（会话不在册、Host 侧拒绝等）：unreadable，走兜底。
+					return null;
 				}
 			};
 
@@ -3526,14 +3878,16 @@ function installNotificationClickRelay(scope) {
 			 */
 			const approvalBodyText = (pending) => {
 				const english = resolvedNotifyLanguage() === NOTIFY_LANGUAGE_EN;
+				/** 只有非空字符串才算「取到了」（空串 / 非字符串都继续往下回退）。 */
+				const pick = (value) => (typeof value === 'string' && value !== '' ? value : null);
 				let reason = null;
 				const display = pending.displayReason;
 				if (display !== null && typeof display === 'object') {
-					const localized = (english ? display.en : display.zh) ?? display.en;
-					if (typeof localized === 'string' && localized !== '') reason = localized;
+					// 先按通知语言取；那一档缺失 / 空串时退回另一档（en 是宿主原文）。
+					reason = pick(english ? display.en : display.zh) ?? pick(display.en) ?? pick(display.zh);
 				}
-				if (reason === null && typeof pending.reason === 'string' && pending.reason !== '') reason = pending.reason;
-				const tool = typeof pending.toolName === 'string' && pending.toolName !== '' ? pending.toolName : null;
+				if (reason === null) reason = pick(pending.reason);
+				const tool = pick(pending.toolName);
 				if (tool === null) return reason;
 				if (reason === null) return tool;
 				return `${tool}${english ? ': ' : '：'}${reason}`;
@@ -3568,12 +3922,18 @@ function installNotificationClickRelay(scope) {
 				// 排障轨迹：最近几条停止报告（复现双弹时看 sessionId 是否相同）。
 				stats.recentStops.push({ kind, sessionId, at: entry.at });
 				if (stats.recentStops.length > 6) stats.recentStops.shift();
-				// 遗忘定时器不进 ctx.timer：它只是账本清理，卸载时随 map 一起丢弃；
+				// 遗忘定时器不进 ctx.timer：它只是账本清理，卸载时统一 clear；
 				// 到点时若条目已换人（新报告）或已不在册，就不删。
 				const handle = setTimeout(() => {
+					reportForgetTimers.delete(handle);
 					if (recentReports.get(sessionId) === entry) recentReports.delete(sessionId);
 				}, REPORT_GRACE_MS);
-				entry.cancel = () => { clearTimeout(handle); };
+				reportForgetTimers.add(handle);
+				entry.cancel = () => {
+					clearTimeout(handle);
+					reportForgetTimers.delete(handle);
+				};
+				return entry;
 			};
 
 			/** 对账窗口内的近期报告；没有或已过期返回 undefined。 */
@@ -3588,11 +3948,14 @@ function installNotificationClickRelay(scope) {
 			 * @param sessionId - 会话 id。
 			 * @param source - 触发来源（event / list / status），仅用于排障。
 			 * @param turn - 这次停止所属的回合号（兜底路径读不到时为 null/undefined）。
+			 * @param provisionalToken - 兜底完成时为本次分类的 token：记下这条通知，
+			 *   迟到分类若判定为取消可据此撤回（见 correctLateClassification）。
+			 * @returns `{ reported, notification }`：这次是否真的报了一条、通知对象（被门控时为 null）。
 			 */
-			const reportCompletion = (sessionId, source, turn) => {
+			const reportCompletion = (sessionId, source, turn, provisionalToken = null) => {
 				const knownTurn = typeof turn === 'number' ? turn : null;
 				const prior = freshReport(sessionId);
-				if (prior?.kind === 'error') return; // 本停止已按错误报过（错误优先，不区分回合号）
+				if (prior?.kind === 'error') return { reported: false, notification: null }; // 本停止已按错误报过（错误优先，不区分回合号）
 				// 完成→完成去重：只挡「这次读不到回合号 / 票据读不到回合号 / 两边同号」
 				// 的重复。票据与本次是两个不同的回合号＝新回合，照报——桌面端通道一
 				// 稀疏，上一轮的完成票据没人清，用 5 秒窗口会把 5 秒内的新回合吞掉
@@ -3600,7 +3963,7 @@ function installNotificationClickRelay(scope) {
 				// 挡在更前面，这里只是无号边沿的兜底。
 				if (prior?.kind === 'completion' && (knownTurn === null || prior.turn === null || prior.turn === knownTurn)) {
 					stats.stopDuplicates += 1;
-					return;
+					return { reported: false, notification: null };
 				}
 				stats.completed += 1;
 				stats.lastCompletion = { sessionId, source, at: Date.now() };
@@ -3608,7 +3971,14 @@ function installNotificationClickRelay(scope) {
 				// 票据与「弹窗发不发得出去」无关：门控关掉时也要记，否则同一次停止晚到
 				// 的错误会被当成一次新停止、再响一声（关掉弹窗 / 仅非前台时会双响）。
 				const canNotify = shouldNotify();
-				trackReport(sessionId, 'completion', canNotify ? notify(toastT('toast.completed.title'), titleOf(ctx, sessionId), sessionId, NOTIFY_KIND_COMPLETED) : null, knownTurn);
+				const notification = canNotify ? notify(toastT('toast.completed.title'), titleOf(ctx, sessionId), sessionId, NOTIFY_KIND_COMPLETED) : null;
+				const entry = trackReport(sessionId, 'completion', notification, knownTurn);
+				if (provisionalToken !== null) {
+					provisionalToken.fallbackReported = true;
+					provisionalToken.fallbackAt = entry.at;
+					provisionalToken.fallbackNotification = notification;
+				}
+				return { reported: true, notification };
 			};
 
 			/**
@@ -3628,7 +3998,13 @@ function installNotificationClickRelay(scope) {
 				const canNotify = shouldNotify();
 				if (prior?.kind === 'completion') {
 					// 兜底网：错误后到——撤回完成弹窗只留错误；音已响过，不重响。
-					if (canNotify && prior.notification !== null) prior.notification.close();
+					// 撤回**不**受当前门控影响：那条完成通知已经发出去了，现在门控关掉
+					// （用户回到前台 / 刚关了弹窗开关）也不能把「完成」的假象留在屏上；
+					// 只有「要不要发错误通知」才看 canNotify。
+					if (prior.notification !== null) {
+						releaseToast(prior.notification);
+						try { prior.notification.close(); } catch { /* 已经关掉了 */ }
+					}
 				} else {
 					chimeNow();
 				}
@@ -3638,16 +4014,111 @@ function installNotificationClickRelay(scope) {
 			};
 
 			/**
+			 * 按分类结果结算一次停止边沿（status = closed）：
+			 * 回合号去重 → 记下已结清回合号 → error / 静默类 / 完成。
+			 * @param sessionId - 会话 id。
+			 * @param source - 触发来源，仅排障。
+			 * @param result - 分类结果（status='closed'）。
+			 * @param grace - 这次完成是否被「询问回答后紧随完成」豁免。
+			 */
+			const settleClosedClassification = (sessionId, source, result, grace) => {
+				const reason = result.reason ?? null;
+				const turn = typeof result.turn === 'number' ? result.turn : null;
+				if (turn !== null && lastReportedTurn.get(sessionId) === turn) {
+					// 同一个回合＝同一次停止（通道重复触发 / 列表陈旧回放）：
+					// 确定性丢掉，和 5 秒窗口无关。
+					stats.stopDuplicates += 1;
+					return;
+				}
+				// 这次停止边沿到此结清：报过的、按分类有意不报的（取消 / 询问已报 /
+				// 崩溃孤儿 / 询问豁免）都记下回合号，重复边沿不会再弹第二条。
+				if (turn !== null) lastReportedTurn.set(sessionId, turn);
+				if (reason?.kind === 'error') {
+					const failure = reason.error;
+					reportError(sessionId, typeof failure?.message === 'string' ? failure.message : '');
+					return;
+				}
+				// aborted（取消）/ blocked（询问已报）/ interrupted（崩溃孤儿）：不报。
+				if (reason?.kind === 'aborted' || reason?.kind === 'blocked' || reason?.kind === 'interrupted') return;
+				// completed / max-tokens / 读不到：按完成报（grace 期内不报）。
+				if (!grace) reportCompletion(sessionId, source, turn);
+			};
+
+			/**
+			 * unreadable 兜底完成之后，迟到分类的纠正：
+			 * - error → 走 reportError（它会把刚才的完成通知撤回、只留错误，且不重响）；
+			 * - aborted / blocked / interrupted → 撤掉那条完成通知（没被点过才关）并计数；
+			 * - completed / max-tokens → 无需纠正（兜底本来就报的完成），只补记回合号。
+			 * @param sessionId - 会话 id。
+			 * @param result - 迟到的分类结果。
+			 * @param token - 本次分类的 token（持有兜底通知）。
+			 */
+			const correctLateClassification = (sessionId, result, token) => {
+				if (result === null || result === undefined || result.status !== 'closed') return;
+				const reason = result.reason ?? null;
+				const turn = typeof result.turn === 'number' ? result.turn : null;
+				// 迟到的回合号也要记：否则这条边沿的重复回放会再弹一条。
+				if (turn !== null) lastReportedTurn.set(sessionId, turn);
+				if (reason?.kind === 'error') {
+					const failure = reason.error;
+					reportError(sessionId, typeof failure?.message === 'string' ? failure.message : '');
+					return;
+				}
+				if (reason?.kind !== 'aborted' && reason?.kind !== 'blocked' && reason?.kind !== 'interrupted') return;
+				stats.lateCorrections += 1;
+				const notification = token.fallbackNotification ?? null;
+				if (notification === null) return;
+				// 用户点过的那条不关：点击已经发生，关闭反而制造「点了就消失」。
+				const click = stats.lastClick;
+				const clicked = click !== null && typeof click.at === 'number' && click.sessionId === sessionId && click.at >= token.fallbackAt;
+				if (clicked) return;
+				try {
+					notification.close();
+				} catch {
+					// 已经关掉 / 被系统收掉。
+				}
+			};
+
+			/**
+			 * 取消某个会话在途的停止分类（新回合开始 / 卸载）：置 cancelled、清
+			 * deadline、解开事件等待；异步结果回来时看到 cancelled 一律不弹不放不计数。
+			 * @param sessionId - 会话 id。
+			 */
+			const cancelInFlight = (sessionId) => {
+				const token = completing.get(sessionId);
+				if (token === undefined) return;
+				completing.delete(sessionId);
+				token.cancelled = true;
+				if (token.deadline !== null) {
+					token.deadline();
+					token.deadline = null;
+				}
+				const cancelWait = token.cancelWait;
+				token.cancelWait = null;
+				if (cancelWait !== null) {
+					try { cancelWait(); } catch { /* 已经收工 */ }
+				}
+			};
+
+			/**
 			 * 一轮对话任务结束（running → 非 running）：读会话持久日志最后一条
-			 * turn/end 的 reason 决定报什么——完成 / 错误 / 不报（取消、询问
-			 * 已报、崩溃孤儿回合）。读不到原因（兜底时限内）按完成报，由
-			 * reportError 的对账网接手晚到的错误。询问待答期间与询问回答后
-			 * 紧随的那次完成不报（一次交互一次提醒）。
-			 * 分类是异步的：在途期间（completing 里有本会话的 token）到达的重复
-			 * 边沿直接忽略——同一次停止只走一次分类、只报一次。
-			 * 「同一次停止」的判据是回合号（1.5.4）：分类读得的 turn 与
-			 * lastReportedTurn 相等就丢掉，不再靠 5 秒窗口——时间窗会把「上一轮
-			 * 刚停、新任务开始、5 秒内又完成」的新回合当成重复边沿整条吞掉。
+			 * turn/end 的 reason 决定报什么 —— 完成 / 错误 / 不报（取消、询问
+			 * 已报、崩溃孤儿回合）。询问待答期间与询问回答后紧随的那次完成不报
+			 * （一次交互一次提醒）。
+			 *
+			 * 分类状态机（旧实现的「独立 700ms 兜底 + 3×120ms 重试」双轨已合并）：
+			 * 1. 快路径：`ctx.sessions.binding()` 若拿得到已 retain 的 binding，
+			 *    同步读 eventSource 分类；closed 就在本次调用内同步弹窗/放音
+			 *    （0 RPC，连微任务都不过）。
+			 * 2. 慢路径：一次 `sessions.using` 里读快照；unclosed 就订阅事件等
+			 *    turn/end 落盘，closed 立即结算；最多一次 RPC。
+			 * 3. 单次 deadline（CLASSIFY_DEADLINE_MS）：到点仍没 closed 时，
+			 *    unclosed → 静默（suppressedUnclosed+1）；unreadable / RPC 挂住
+			 *    → 按完成兜底（现有产品取舍），并允许迟到分类纠正。
+			 * 4. 在途 token：running=true（新回合）或卸载会置 cancelled 并清
+			 *    deadline；被取消的结果不得弹窗、放音或计数。
+			 * 「同一次停止」的判据仍是回合号（1.5.4）：分类读得的 turn 与
+			 * lastReportedTurn 相等就丢掉，不看时间窗。
 			 * @param sessionId - 会话 id。
 			 * @param source - 触发来源（event / list / status），仅用于排障。
 			 */
@@ -3656,46 +4127,92 @@ function installNotificationClickRelay(scope) {
 				if (pendingQuestions.has(sessionId)) return; // 询问待答：那次停止由询问弹窗负责
 				if (completing.has(sessionId)) return; // 同一次停止的分类已在途（重复边沿）
 				const grace = takeQuestionGrace(sessionId);
-				let settled = false;
-				const token = {};
+				// 快路径：0 RPC / 0 await。只有 closed 才能当场结算；unclosed 要等
+				// 本次回合的 turn/end 落盘，unreadable 要等慢路径能读到的窗口。
+				const borrowed = classifyBorrowed(sessionId);
+				if (borrowed !== null && borrowed.status === 'closed') {
+					// 借来的 eventSource 是客户端缓存，可能比宿主持久日志慢一拍：
+					// 若它的回合号不比已结清的更靠前，不能断定这是新停止（可能是陈旧
+					// 窗口里上一个回合的 turn/end）——交给会强制 flush 的 using 路径再
+					// 读一次；那边读到同号会按回合号判据丢弃，读到新号就照报。
+					const borrowedTurn = typeof borrowed.turn === 'number' ? borrowed.turn : null;
+					const reportedTurn = lastReportedTurn.get(sessionId);
+					if (borrowedTurn === null || typeof reportedTurn !== 'number' || borrowedTurn > reportedTurn) {
+						settleClosedClassification(sessionId, source, borrowed, grace);
+						return;
+					}
+				}
+				const token = {
+					cancelled: false,
+					settled: false,
+					fallbackReported: false,
+					fallbackAt: 0,
+					fallbackNotification: null,
+					last: borrowed, // 快路径已经观测到的 unclosed / unreadable（可为 null）
+					deadline: null,
+					cancelWait: null,
+				};
 				completing.set(sessionId, token);
-				const fallbackCancel = ctx.timer.timeout(() => {
-					if (settled || disposed) return;
-					settled = true;
+				/**
+				 * 结算 token（自然分类结果 / deadline 到点共用）：只结算一次。
+				 * @param result - closed / unclosed / unreadable 分类结果（null = unreadable）。
+				 */
+				const settleToken = (result) => {
+					if (token.settled || token.cancelled) return;
+					token.settled = true;
+					if (token.deadline !== null) {
+						token.deadline();
+						token.deadline = null;
+					}
+					// deadline 到点时可能还在等 eventSource：解开等待，让 using 回调返回、
+					// 释放 retain；否则这个 promise 会一直挂着（会话 scope 也就释放不掉）。
+					const cancelWait = token.cancelWait;
+					token.cancelWait = null;
+					if (cancelWait !== null) {
+						try { cancelWait(); } catch { /* 已经收工 */ }
+					}
 					if (completing.get(sessionId) === token) completing.delete(sessionId);
-					reportCompletion(sessionId, source); // 兜底：读不到原因（也就读不到回合号）→ 退回 5 秒完成→完成去重
-				}, CLASSIFY_TIMEOUT_MS);
+					if (disposed) return;
+					if (result !== null && result.status === 'unclosed') {
+						// 明确证据：本次回合的 turn/end 还没落盘 / 这条边沿是陈旧回放。
+						// 不弹不放 —— 旧实现把它当「读不到」报完成，是 F-01 的误报来源。
+						stats.suppressedUnclosed += 1;
+						return;
+					}
+					if (result !== null && result.status === 'closed') {
+						settleClosedClassification(sessionId, source, result, grace);
+						return;
+					}
+					// unreadable / null / 被 deadline 打断：按完成兜底（provisional：
+					// 迟到分类可以纠正，见 correctLateClassification）。
+					reportCompletion(sessionId, source, null, token);
+				};
+				token.deadline = ctx.timer.timeout(() => {
+					if (token.cancelled || token.settled) return;
+					if (completing.get(sessionId) !== token) return; // token 已被新分类接管
+					token.deadline = null;
+					settleToken(token.last);
+				}, CLASSIFY_DEADLINE_MS);
 				void (async () => {
+					let result = null;
 					try {
-						const classified = await readTurnEndReason(sessionId);
-						// 兜底已经按完成报过：这次分类的结果不再补报，也不补记回合号
-						// （此刻日志可能又往前走了，补记会把下一个回合误当成已结清）。
-						if (settled) return;
-						settled = true;
-						fallbackCancel();
-						// 插件已经卸载（热重载 / 停用）：这次分类不作数，别再往一个死实例上弹窗放音。
-						if (disposed) return;
-						const reason = classified?.reason ?? null;
-						const turn = typeof classified?.turn === 'number' ? classified.turn : null;
-						if (turn !== null && lastReportedTurn.get(sessionId) === turn) {
-							// 同一个回合＝同一次停止（通道重复触发 / 列表陈旧回放）：
-							// 确定性丢掉，和 5 秒窗口无关。
-							stats.stopDuplicates += 1;
+						result = await classifyWithEvents(sessionId, token);
+					} catch {
+						result = null;
+					}
+					try {
+						if (disposed || token.cancelled) {
+							if (completing.get(sessionId) === token) completing.delete(sessionId);
 							return;
 						}
-						// 这次停止边沿到此结清：报过的、按分类有意不报的（取消 / 询问已报 /
-						// 崩溃孤儿 / 询问豁免）都记下回合号，重复边沿不会再弹第二条。
-						if (turn !== null) lastReportedTurn.set(sessionId, turn);
-						if (reason?.kind === 'error') {
-							const failure = reason.error;
-							reportError(sessionId, typeof failure?.message === 'string' ? failure.message : '');
+						if (token.settled) {
+							// deadline 已经兜底报过完成：迟到的分类只做纠正，不再补报。
+							if (token.fallbackReported) correctLateClassification(sessionId, result, token);
 							return;
 						}
-						// aborted（取消）/ blocked（询问已报）/ interrupted（崩溃孤儿）：不报。
-						if (reason?.kind === 'aborted' || reason?.kind === 'blocked' || reason?.kind === 'interrupted') return;
-						// completed / max-tokens / 读不到：按完成报（grace 期内不报）。
-						if (!grace) reportCompletion(sessionId, source, turn);
-					} finally {
+						settleToken(result);
+					} catch {
+						// 结算链路出错不能让未处理的 rejection 冒到控制台；状态机已收工。
 						if (completing.get(sessionId) === token) completing.delete(sessionId);
 					}
 				})();
@@ -3723,12 +4240,7 @@ function installNotificationClickRelay(scope) {
 					if (message.navigate !== true) return;
 					const sessionId = typeof message.sessionId === 'string' && message.sessionId !== '' ? message.sessionId : null;
 					if (sessionId === null) return;
-					requestDesktopActivation();
-					try {
-						if (typeof window.focus === 'function') window.focus();
-					} catch {
-						// 拉不起前台也不影响打开会话。
-					}
+					raiseDesktopWindow();
 					jumpToSession(sessionId, 'sw');
 				});
 				actionBridge.start(selfBundleUrl());
@@ -3742,13 +4254,12 @@ function installNotificationClickRelay(scope) {
 
 			// 通道一：宿主转发事件 api-session/status(sessionId, running) —— running
 			// 掉回非 running 就是一轮对话任务结束。running = true 时作废该会话的
-			// grace、对账票据与在途分类标记（新任务开始，旧停止的对账到此为止）。
+			// 对账票据（新任务开始，旧停止的对账到此为止）；grace 与在途分类由
+			// noteRunning 统一处理（三条通道一致）。
 			ctx.effect(() => ctx.remote.$on('api-session/status', (sessionId, running) => {
 				stats.events += 1;
 				stats.lastEvent = { sessionId, running: running === true, at: Date.now(), source: 'event' };
 				if (running === true) {
-					questionGrace.delete(sessionId);
-					completing.delete(sessionId); // 新任务开始：在途分类守卫作废
 					const prior = recentReports.get(sessionId);
 					if (prior !== undefined) {
 						if (prior.cancel !== null) prior.cancel();
@@ -3794,9 +4305,12 @@ function installNotificationClickRelay(scope) {
 			// 会话（默认关）在整条循环最前面就跳过：不记边沿、不记待答。
 			ctx.effect(() => ctx.uiSession.sessionStatus.subscribe(() => {
 				const snapshot = ctx.uiSession.sessionStatus.getSnapshot();
+				// 列表快照整个 tick 只取一次：旧实现每个会话都调一次
+				// sessions.list.getSnapshot()（50 会话 = 50 次/tick，白花）。
+				const listSnapshot = ctx.sessions.list.getSnapshot();
 				for (const [sessionId, status] of snapshot) {
 					// 子智能体（默认关）：边沿、待答、grace 一概不碰。
-					if (!shouldRemindFor(sessionId)) continue;
+					if (!shouldRemindFor(sessionId, listSnapshot)) continue;
 					// running 位也计入边沿表（三条通道共用一张表，天然去重）。
 					if (noteRunning(sessionId, status?.running === true)) complete(sessionId, 'status');
 					const pending = status?.pendingInteraction;
@@ -3805,18 +4319,19 @@ function installNotificationClickRelay(scope) {
 						// 这一轮挂起消散（用户已回答 / 交互关闭）：紧随的那次完成
 						// 不报——一次交互一次提醒。还没结清的审批通知也一并收掉，
 						// 免得留下一个点了没用的陈旧按钮。
-						if (pendingQuestions.delete(sessionId)) {
-							markQuestionSettled(sessionId);
-							closeApprovalToastsOfSession(sessionId);
-						}
-						// 等待类通知（提问 / 方案待确认 / 退回普通样式的审批）同样收掉：
-						// 留着就是「点了再也没有对应等待」的陈旧条目，点它什么都不发生。
-						closeWaitingToast(sessionId);
+						if (pendingQuestions.delete(sessionId)) markQuestionSettled(sessionId);
+						// 空表跳过（快照 tick 每会话都会走到这里，稳态不该花两次 map 查找）。
+						if (waitingToasts.size > 0) closeWaitingToast(sessionId);
+						if (approvalToasts.size > 0) closeApprovalToastsOfSession(sessionId);
 						continue;
 					}
 					if (pendingQuestions.has(sessionId)) continue; // 已提醒过这一轮
 					pendingQuestions.add(sessionId);
 					questionGrace.delete(sessionId); // 新一轮挂起：旧的 grace 作废
+					// 挂起换了一条新交互（旧请求被顶替）：旧审批按钮/旧等待横幅先收掉，
+					// 否则通知中心里留着一条点了只会 no-op 的陈旧条目。
+					closeApprovalToastsOfSession(sessionId);
+					closeWaitingToast(sessionId);
 					stats.questions += 1;
 					stats.lastQuestion = { sessionId, kind: pending.kind, at: Date.now() };
 					chimeNow();
@@ -3844,18 +4359,22 @@ function installNotificationClickRelay(scope) {
 							// 同一会话若还留着上一条没结清的等待通知（异常路径兜底），先收掉再记。
 							const stale = waitingToasts.get(sessionId);
 							if (stale !== undefined && stale !== toast) {
-								try { stale.close(); } catch {}
+								releaseToast(stale);
+								try { stale.close(); } catch { /* 已经关掉了 */ }
 							}
 							waitingToasts.set(sessionId, toast);
 						}
 					}
 				}
 				// 快照里已经完全没有的会话（被删除 / 归档）从待答集合里清掉，
-				// 之后它再挂起问题时才算新的出现边沿。
-				for (const sessionId of [...pendingQuestions]) {
+				// 之后它再挂起问题时才算新的出现边沿。清理走 Map 本身（删当前项安全），
+				// 不再每次 tick 分配一份全量数组。
+				for (const sessionId of pendingQuestions) {
 					if (!snapshot.has(sessionId)) {
 						pendingQuestions.delete(sessionId);
 						closeWaitingToast(sessionId);
+						closeApprovalToastsOfSession(sessionId);
+						questionGrace.delete(sessionId);
 					}
 				}
 			}), 'dsh-task-reminder: pending questions');
@@ -3883,19 +4402,25 @@ function installNotificationClickRelay(scope) {
 
 			// 自动播放策略：没有用户手势时浏览器把 AudioContext 挂在 suspended，
 			// resume() 也会被拒，完成提示音就此无声；第一次播放还要现建音频设备，
-			// 首声会迟一拍。用户在页面上的第一次点击 / 按键就同时做两件事：
-			// 预热（把设备初始化挪到手势里，之后零延迟）与拉活。
+			// 首声会迟一拍。用户在页面上的第一次点击 / 按键 / 触摸就同时做两件事：
+			// 预热（warm 内部已经负责 resume 与设备初始化）与拉活。
 			ctx.effect(() => {
 				if (typeof window.addEventListener !== 'function') return () => {};
 				const revive = () => {
+					// warm() 内部会 resume（挂起时），这里不再单独调 resume ——
+					// 旧实现一次手势 resume 两次。
 					chime.warm();
-					chime.resume();
 				};
 				window.addEventListener('pointerdown', revive, { capture: true });
 				window.addEventListener('keydown', revive, { capture: true });
+				if (typeof window.addEventListener === 'function') {
+					// 触屏设备：手指抬起也算用户激活（滚动页面时不一定有 pointerdown 被吞）。
+					window.addEventListener('touchend', revive, { capture: true, passive: true });
+				}
 				return () => {
 					window.removeEventListener('pointerdown', revive, { capture: true });
 					window.removeEventListener('keydown', revive, { capture: true });
+					window.removeEventListener('touchend', revive, { capture: true });
 				};
 			}, 'dsh-task-reminder: audio autoplay revival');
 
@@ -3912,8 +4437,7 @@ function installNotificationClickRelay(scope) {
 					if (notifyStore.getSnapshot() !== true) return;
 					if (!notifier.supported || notifier.permission() !== 'default') return;
 					storage.setItem(PERMISSION_ASKED_KEY, '1');
-					const seq = (notifyRequestSeq += 1);
-					void notifier.request().then((result) => applyPermissionResult(seq, result));
+					void requestNotifyPermission();
 				} catch {
 					// 存储不可用（隐私模式等）就安静退场，设置页的申请按钮仍然可用。
 				}
@@ -3945,24 +4469,35 @@ function installNotificationClickRelay(scope) {
 						customStatusStore.set('missing');
 						return;
 					}
-					adoptCustomRecord(revision, blob, false);
+					adoptCustomRecord(revision, blob);
 				}).catch(() => {
 					if (cancelled || revision !== customRevision) return;
-					customStatusStore.set(cached === null ? 'idle' : 'store-failed');
+					// 读失败不是写失败：别用「文件没能保存」的文案吓人，单独如实说明。
+					customStatusStore.set(cached === null ? 'idle' : 'read-failed');
 				});
 				return () => { cancelled = true; };
 			}, 'dsh-task-reminder: custom sound restore');
 			// 回收对账票据与它们的遗忘定时器、grace 标记、结清回合号（卸载时不再有
-			// 延迟回调落地）。先立 `disposed`：在途的分类 / 解码回来时据此直接收手。
+			// 延迟回调落地）。先立 `disposed`：在途的分类 / 解码回来时据此直接收手；
+			// 再取消所有在途分类 token（清 deadline、解开事件等待），否则它们要等
+			// deadline 到点才会被回收。
 			ctx.effect(() => () => {
 				disposed = true;
+				for (const sessionId of [...completing.keys()]) cancelInFlight(sessionId);
+				completing.clear();
 				for (const entry of recentReports.values()) {
 					if (entry.cancel !== null) entry.cancel();
 				}
 				recentReports.clear();
+				for (const handle of reportForgetTimers) clearTimeout(handle);
+				reportForgetTimers.clear();
 				questionGrace.clear();
-				completing.clear();
 				lastReportedTurn.clear();
+				// 带按钮的审批通知是 Service Worker 的持久通知：卸载前按 tag 收掉，
+				// 否则通知中心里留着一条点了只会 no-op 的「同意/拒绝」。
+				for (const entry of approvalToasts.values()) {
+					try { actionBridge.closeTag(entry.tag); } catch { /* 桥已不可用 */ }
+				}
 				approvalToasts.clear();
 				for (const sessionId of [...waitingToasts.keys()]) closeWaitingToast(sessionId);
 			}, 'dsh-task-reminder: report reconciliation');
@@ -4230,7 +4765,6 @@ function installNotificationClickRelay(scope) {
 				NOTIFY_PERSIST_KEY,
 				NOTIFICATION_TAG,
 				NOTIFY_KIND_COMPLETED,
-				NOTIFY_KIND_ERROR,
 				NOTIFY_KIND_WAITING,
 				NOTIFY_LANGUAGE_AUTO,
 				NOTIFY_LANGUAGE_EN,
@@ -4274,6 +4808,7 @@ function installNotificationClickRelay(scope) {
 				compareVersions,
 				conversationColumnInfo,
 				createActionBridge,
+				createCustomSoundStore,
 				createNotifier,
 				en,
 				findLatestQuestionRow,
@@ -4296,6 +4831,7 @@ function installNotificationClickRelay(scope) {
 				titleOf,
 				updatePresentation,
 				updateReducer,
+				updateErrorText,
 				updateRouteUrl,
 				zh,
 			},

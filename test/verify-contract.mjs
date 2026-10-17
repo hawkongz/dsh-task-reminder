@@ -158,7 +158,11 @@ check('请求体读不动也按「没给版本」处理（现查一次），不�
 
 console.log('');
 console.log('版本比较对拍');
-/** 只看符号：数字段逐位、预发布小于正式版、构建元数据、认不出的值，判定必须一致。 */
+/**
+ * 只看符号：数字段逐位、预发布小于正式版、构建元数据、认不出的值，判定必须一致。
+ * 边界表（H13）：前导零、大写 V、数字预发布前导零、双有构建元数据、超 2^53 的
+ * 数字段、首尾空白、段数不齐——两半是各自实现，必须对同一张表给出同一结论。
+ */
 const VERSION_PAIRS = [
 	['1.6.1', '1.6.0'],
 	['1.6.0', '1.6.0'],
@@ -174,13 +178,35 @@ const VERSION_PAIRS = [
 	['1.7.0-beta', '1.7.0-beta.1'],
 	['latest', '1.6.0'],
 	['', '1.6.0'],
+	// —— H13 边界补充 ——
+	['1.06.0', '1.6.0'],
+	['01.6.0', '1.6.0'],
+	['V1.6.0', '1.6.0'],
+	['V1.6.0', 'v1.6.0'],
+	['1.6.0-01', '1.6.0-1'],
+	['1.6.0-1', '1.6.0-alpha'],
+	['1.6.0-0', '1.6.0'],
+	['1.6.0+build.5', '1.6.0+build.6'],
+	['1.6.0-beta+exp.sha.5114f85', '1.6.0-beta+exp.sha.0000aaa'],
+	[' 1.6.0 ', '1.6.0'],
+	['\t1.6.0\n', '1.6.0'],
+	['1.2.3.4', '1.2.3.4.0'],
+	['9007199254740993.0.0', '9007199254740992.0.0'],
+	['1.999999999999999999999', '2.0.0'],
+	['99999999999999999999', '99999999999999999998'],
+	['1.0.0-alpha.1', '1.0.0-alpha.1'],
+	['1.0.0-alpha', '1.0.0-alpha.0'],
 ];
 const signOf = (value) => (value < 0 ? -1 : value > 0 ? 1 : 0);
 const disagreements = VERSION_PAIRS
 	.map(([left, right]) => ({ left, right, host: signOf(host.compareVersions(left, right)), page: signOf(page.compareVersions(left, right)) }))
 	.filter((row) => row.host !== row.page);
-check('两半的版本比较对同一张表给出同样的结论（数字段 / 预发布 / 构建元数据 / 认不出的值）',
+check('两半的版本比较对同一张表给出同样的结论（含前导零 / 大写 V / 预发布前导零 / 构建元数据 / 超 2^53 / 空白）',
 	disagreements.length === 0, JSON.stringify(disagreements));
+check('H13 宿主 compareVersions 与渲染侧一样只返回 -1 / 0 / 1（契约表只比符号，但归一化后更不容易被误用）',
+	VERSION_PAIRS.every(([left, right]) => [-1, 0, 1].includes(host.compareVersions(left, right))
+		&& [-1, 0, 1].includes(page.compareVersions(left, right))),
+	JSON.stringify(VERSION_PAIRS.map(([left, right]) => [left, right, host.compareVersions(left, right), page.compareVersions(left, right)])));
 check('两半都认不出时都按「相等」处理（宁可少报一次有新版，也不让用户白升）',
 	page.compareVersions('latest', '1.6.0') === 0 && host.compareVersions('latest', '1.6.0') === 0
 	&& page.compareVersions('', '1.6.0') === 0 && host.compareVersions('', '1.6.0') === 0);

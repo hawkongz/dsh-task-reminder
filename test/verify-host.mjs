@@ -14,6 +14,7 @@
  * 用法：node test/verify-host.mjs
  */
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { diagnostics, apply } from '../index.js';
@@ -73,7 +74,10 @@ globalThis.fetch = (url, options) => {
 	const answer = match === undefined ? undefined : registryAnswers[match];
 	if (answer === undefined) return Promise.reject(new Error(`stub: no answer for ${target}`));
 	if (typeof answer === 'object' && answer !== null) return Promise.reject(new Error(answer.error));
-	return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ 'dist-tags': { latest: answer } }) });
+	return Promise.resolve(new Response(JSON.stringify({ 'dist-tags': { latest: answer } }), {
+		status: 200,
+		headers: { 'content-type': 'application/json' },
+	}));
 };
 
 /** 一个临时 profile 目录（写不写 link: 依赖由用例决定）。 */
@@ -97,17 +101,37 @@ const makeCtx = (options = {}) => ({
 	},
 });
 
-/** 记录安装调用的 pluginManager 桩。 */
-const makeManager = (result) => {
+/**
+ * 记录安装/卸载调用的 pluginManager 桩。
+ *
+ * `result` 可以是固定答复，也可以是 `(spec, options, installIndex)` 函数
+ * （installIndex 从 1 开始、只数 installBundle 调用，用来脚本化「先失败、
+ * 卸载、再装」的 H1 两步升级分支）。不给 `options.removeBundle` 就没有
+ * removeBundle 方法，模拟不支持两步升级的旧宿主。
+ */
+const makeManager = (result, options = {}) => {
 	const calls = [];
-	return {
+	let installIndex = 0;
+	const manager = {
 		calls,
 		installBundle: (spec, installOptions) => {
-			calls.push({ spec, installOptions });
-			if (typeof result === 'function') return result(spec, installOptions);
+			installIndex += 1;
+			calls.push({ kind: 'install', spec, installOptions, installIndex });
+			if (typeof result === 'function') {
+				const answer = result(spec, installOptions, installIndex);
+				return typeof answer?.then === 'function' ? answer : Promise.resolve(answer);
+			}
 			return Promise.resolve(result);
 		},
 	};
+	if (options.removeBundle !== undefined) {
+		manager.removeBundle = (name) => {
+			calls.push({ kind: 'remove', name });
+			const answer = typeof options.removeBundle === 'function' ? options.removeBundle(name) : options.removeBundle;
+			return typeof answer?.then === 'function' ? answer : Promise.resolve(answer);
+		};
+	}
+	return manager;
 };
 
 /**
@@ -202,12 +226,114 @@ check('直连传输自己发 HTTPS，不经 fetch、也不经环境代理（真�
 		return /ECONNREFUSED|EACCES|ECONNRESET|socket hang up|请求超时/.test(String(error?.message ?? error));
 	}
 })(), '直连传输没有按预期失败');
-check('错误说明带上 cause（undici 只会说一句 fetch failed）', (() => {
+check('错误说明带上 cause（undici 只会说一句 fetch failed），且同一个 code 不重复拼', (() => {
 	const error = new TypeError('fetch failed');
 	error.cause = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:7897'), { code: 'ECONNREFUSED' });
 	const text = messageOf(error);
-	return text.includes('fetch failed') && text.includes('ECONNREFUSED') && text.includes('127.0.0.1:7897');
+	return text.includes('fetch failed') && text.includes('ECONNREFUSED') && text.includes('127.0.0.1:7897')
+		&& (text.match(/ECONNREFUSED/g) ?? []).length === 1;
 })(), messageOf(Object.assign(new TypeError('fetch failed'), { cause: new Error('x') })));
+check('messageOf：cause 的 message 不含 code 时仍然补上 code', (() => {
+	const error = new TypeError('fetch failed');
+	error.cause = Object.assign(new Error('getaddrinfo ENOTFOUND registry.invalid'), { code: 'ENOTFOUND' });
+	const text = messageOf(error);
+	return text.includes('ENOTFOUND') && (text.match(/ENOTFOUND/g) ?? []).length === 1;
+})(), messageOf(Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('x'), { code: 'CODE' }) })));
+
+// ---------------------------------------------------------------------------
+// 更新检查的健壮性（H4）：总时限、响应大小上限、胜者后 abort 败者。
+// 直连的总时限用一个「只 accept、永远不回 TLS 握手」的本地 TCP 服务验证；
+// 代理路的时限/大小上限用 fetch 桩验证，全程不联网。
+// ---------------------------------------------------------------------------
+
+console.log('');
+console.log('检查更新健壮性');
+/** AbortSignal.timeout 的 timer 是 unref 的：纯桩测试里没有 socket 句柄时，要自己保活循环；
+ * 另外加一个兜底超时，实现若回归会“测试失败”而不是把 CI 挂住。 */
+const withKeepAlive = async (promise, timeoutMs = 3000) => {
+	const keepAlive = setTimeout(() => {}, timeoutMs + 1000);
+	const fallback = new Promise((resolve) => {
+		const timer = setTimeout(() => resolve(new Error('keep-alive timeout')), timeoutMs);
+		timer.unref?.();
+	});
+	try {
+		return await Promise.race([promise, fallback]);
+	} finally {
+		clearTimeout(keepAlive);
+	}
+};
+const stalledSockets = new Set();
+const stalledServer = createServer((socket) => {
+	stalledSockets.add(socket);
+	socket.on('close', () => stalledSockets.delete(socket));
+});
+await new Promise((resolve) => stalledServer.listen(0, '127.0.0.1', resolve));
+const stalledPort = stalledServer.address().port;
+const stalledStartedAt = Date.now();
+const stalledError = await readRegistryDirect(`https://127.0.0.1:${stalledPort}/`, undefined, 250)
+	.then(() => null, (error) => error);
+const stalledElapsed = Date.now() - stalledStartedAt;
+for (const socket of stalledSockets) socket.destroy();
+await new Promise((resolve) => {
+	const fallback = setTimeout(resolve, 1000);
+	fallback.unref?.();
+	stalledServer.close(() => { clearTimeout(fallback); resolve(); });
+});
+check('直连传输有总时限（不是只看 socket 空闲）：卡住的 TLS 握手在 250ms 级失败，而不是 8s',
+	stalledError !== null && stalledElapsed < 3000 && /总时限|请求超时/.test(String(stalledError?.message ?? stalledError)),
+	JSON.stringify({ elapsed: stalledElapsed, error: String(stalledError?.message ?? stalledError) }));
+
+const stubFetch = globalThis.fetch;
+globalThis.fetch = (url, options) => new Promise((resolve, reject) => {
+	options?.signal?.addEventListener('abort', () => {
+		const error = new Error('aborted');
+		error.name = 'AbortError';
+		reject(error);
+	}, { once: true });
+});
+const proxiedStartedAt = Date.now();
+const proxiedTimeoutError = await withKeepAlive(readRegistryProxied('https://registry.npmjs.org/', undefined, 150))
+	.then(() => null, (error) => error);
+const proxiedElapsed = Date.now() - proxiedStartedAt;
+globalThis.fetch = stubFetch;
+check('代理传输的总时限可注入并生效（150ms 内失败，不用等默认 8s）',
+	proxiedTimeoutError !== null && proxiedElapsed < 3000,
+	JSON.stringify({ elapsed: proxiedElapsed, error: String(proxiedTimeoutError?.message ?? proxiedTimeoutError) }));
+
+globalThis.fetch = () => Promise.resolve(new Response('x'.repeat(5 * 1024 * 1024 + 1024), {
+	status: 200,
+	headers: { 'content-type': 'application/json' },
+}));
+const oversizedError = await readRegistryProxied('https://registry.npmjs.org/').then(() => null, (error) => error);
+globalThis.fetch = stubFetch;
+check('代理传输拒绝超大响应（5MB 上限，不把整份 registry 元数据读进内存）',
+	oversizedError !== null && /过大|上限/.test(String(oversizedError?.message ?? oversizedError)),
+	String(oversizedError?.message ?? oversizedError));
+
+globalThis.fetch = () => Promise.resolve(new Response(JSON.stringify({ 'dist-tags': { latest: 'not-a-version' } }), {
+	status: 200,
+	headers: { 'content-type': 'application/json' },
+}));
+const badLatestError = await readRegistryProxied('https://registry.npmjs.org/').then(() => null, (error) => error);
+globalThis.fetch = stubFetch;
+check('代理传输与直连共用同一份「可读版本号」校验（两条实现不再各写一遍）',
+	badLatestError !== null && String(badLatestError?.message ?? badLatestError).includes('没有给出可读的版本号'),
+	String(badLatestError?.message ?? badLatestError));
+
+const abortedRegistries = [];
+const fastTransport = (registry) => Promise.resolve({ registry, latest: packageVersion });
+const slowTransport = (registry, signal) => new Promise((resolve, reject) => {
+	const abort = () => {
+		abortedRegistries.push(registry);
+		reject(new Error('aborted'));
+	};
+	if (signal?.aborted === true) abort();
+	else signal?.addEventListener('abort', abort, { once: true });
+});
+const racedCheck = await checkUpdate(makeCtx({ dir: cleanDir }), { transports: [fastTransport, slowTransport] });
+check('胜出的传输出现后 abort 败者（每个源两条传输只留赢家，不再白等 8s）',
+	racedCheck.ok === true && abortedRegistries.length === REGISTRIES.length,
+	JSON.stringify({ aborted: abortedRegistries, result: racedCheck }));
 
 // ---------------------------------------------------------------------------
 // 立即更新
@@ -246,6 +372,96 @@ check('本地开发安装拒绝一键更新，并说清原因', refused.ok === f
 
 const noManagerApply = await applyUpdate(makeCtx({ dir: cleanDir }), body({ version: '1.9.0' }), STUB_TRANSPORTS);
 check('没有 pluginManager 时拒绝并说清原因', noManagerApply.ok === false && noManagerApply.error.includes('pluginManager'), JSON.stringify(noManagerApply));
+
+// ---------------------------------------------------------------------------
+// H1：DSH 0.2.1 起 `installBundle` 对「已安装的包」抛 already-installed
+// （plugin-manager/lib/index.js:1991；官方 Update 的路径是 remove + install）。
+// 这一步用桩覆盖三步：首次安装失败 → removeBundle → 再次安装成功；以及
+// 目标安装失败后按 current 装回、remove 失败、旧宿主没有 removeBundle、
+// cancelled 不算成功、缺 exitCode 不误判。
+// ---------------------------------------------------------------------------
+const installCallsOf = (manager) => manager.calls.filter((call) => call.kind === 'install');
+
+const rejectedAlreadyInstalled = makeManager((spec, installOptions, nth) => {
+	if (nth === 1) return Promise.reject(new Error('Installation failed: already-installed (HMR)'));
+	return { application: 'applied', packageResult: { exitCode: 0, output: 'installed after remove' } };
+}, { removeBundle: { application: 'applied' } });
+const rejectedTwoStep = await applyUpdate(makeCtx({ dir: cleanDir, manager: rejectedAlreadyInstalled }), body({ version: '1.8.5' }), STUB_TRANSPORTS);
+check('H1 宿主以 reject 报 already-installed 时也走两步升级，不直接把异常丢给用户',
+	rejectedTwoStep.ok === true && rejectedAlreadyInstalled.calls.some((call) => call.kind === 'remove'),
+	JSON.stringify(rejectedTwoStep));
+
+const twoStepManager = makeManager((spec, installOptions, nth) => (nth === 1
+	? { application: 'failed', error: { code: 'already-installed' }, packageResult: { exitCode: 0 }, changed: false }
+	: { application: 'restart-required', packageResult: { exitCode: 0, output: 'Progress: resolved 1' }, changed: true }),
+{ removeBundle: { application: 'applied', changed: true } });
+const twoStep = await applyUpdate(makeCtx({ dir: cleanDir, manager: twoStepManager }), body({ version: '1.8.5' }), STUB_TRANSPORTS);
+check('H1 两步升级：already-installed → removeBundle → 重装成功（只认 applied / restart-required 为成功）',
+	twoStep.ok === true && twoStep.application === 'restart-required' && twoStep.latest === installedVersion(),
+	JSON.stringify(twoStep));
+check('H1 两步升级的调用次序：install@target → remove(包名) → install@target（requestId 各不相同）', (() => {
+	const order = twoStepManager.calls.map((call) => (call.kind === 'remove' ? `remove:${call.name}` : call.spec));
+	const ids = installCallsOf(twoStepManager).map((call) => call.installOptions?.requestId);
+	return JSON.stringify(order) === JSON.stringify([`${PACKAGE_NAME}@1.8.5`, `remove:${PACKAGE_NAME}`, `${PACKAGE_NAME}@1.8.5`])
+		&& ids.length === 2 && typeof ids[0] === 'string' && typeof ids[1] === 'string' && ids[0] !== ids[1];
+})(), JSON.stringify(twoStepManager.calls));
+
+const rollbackManager = makeManager((spec, installOptions, nth) => {
+	if (nth === 1) return { application: 'failed', error: { code: 'already-installed' }, packageResult: { exitCode: 0 } };
+	if (nth === 2) return { application: 'failed', error: { code: 'registry', diagnostic: 'target install failed' }, packageResult: { exitCode: 1, output: 'ERR_PNPM' } };
+	return { application: 'restart-required', packageResult: { exitCode: 0, output: 'rolled back' } };
+}, { removeBundle: { application: 'applied' } });
+const rollback = await applyUpdate(makeCtx({ dir: cleanDir, manager: rollbackManager }), body({ version: '1.8.5' }), STUB_TRANSPORTS);
+check('H1 回滚：目标安装失败 → 按 current 装回并如实报失败',
+	rollback.ok === false && rollback.error.includes('target install failed')
+	&& rollback.error.includes(`装回 v${String(installedVersion())}`), JSON.stringify(rollback));
+check('H1 回滚的第三次 install 用的是 current 版本（不是目标版本）',
+	installCallsOf(rollbackManager).at(-1)?.spec === `${PACKAGE_NAME}@${String(installedVersion())}`,
+	JSON.stringify(installCallsOf(rollbackManager).map((call) => call.spec)));
+
+const rollbackFailsManager = makeManager((spec, installOptions, nth) => {
+	if (nth === 1) return { application: 'failed', error: { code: 'already-installed' } };
+	if (nth === 2) return { application: 'failed', error: { diagnostic: 'target boom' } };
+	return { application: 'failed', error: { diagnostic: 'rollback boom' } };
+}, { removeBundle: { application: 'applied' } });
+const rollbackFailed = await applyUpdate(makeCtx({ dir: cleanDir, manager: rollbackFailsManager }), body({ version: '1.8.5' }), STUB_TRANSPORTS);
+check('H1 回滚失败：明确告知插件已被卸载、需要手动重装（不假装成功）',
+	rollbackFailed.ok === false && rollbackFailed.error.includes('rollback boom')
+	&& /手动|重新安装/.test(rollbackFailed.error), JSON.stringify(rollbackFailed));
+
+const removeFailsManager = makeManager({ application: 'failed', error: { code: 'already-installed' } }, {
+	removeBundle: { application: 'failed', error: { code: 'locked', diagnostic: 'profile locked' } },
+});
+const removeFailed = await applyUpdate(makeCtx({ dir: cleanDir, manager: removeFailsManager }), body({ version: '1.8.5' }), STUB_TRANSPORTS);
+check('H1 卸载旧版本失败：直接回可读失败，不再尝试安装',
+	removeFailed.ok === false && removeFailed.error.includes('profile locked')
+	&& installCallsOf(removeFailsManager).length === 1, JSON.stringify(removeFailed));
+
+const noRemoveManager = makeManager({ application: 'failed', error: { code: 'already-installed' } });
+const noRemove = await applyUpdate(makeCtx({ dir: cleanDir, manager: noRemoveManager }), body({ version: '1.8.5' }), STUB_TRANSPORTS);
+check('H1 旧宿主没有 removeBundle：说明无法原地升级并给手动路径，不当成成功也不炸',
+	noRemove.ok === false && /already-installed|原地升级|手动/.test(noRemove.error) && noRemoveManager.calls.length === 1,
+	JSON.stringify(noRemove));
+
+const cancelledManager = makeManager({ application: 'cancelled', changed: false });
+const cancelledUpdate = await applyUpdate(makeCtx({ dir: cleanDir, manager: cancelledManager }), body({ version: '1.8.5' }), STUB_TRANSPORTS);
+check('H11 cancelled 不算成功（否则页面会显示「已更新」但什么都没装）',
+	cancelledUpdate.ok === false && cancelledUpdate.application === 'cancelled'
+	&& /取消|cancelled/i.test(cancelledUpdate.error), JSON.stringify(cancelledUpdate));
+
+const appliedManager = makeManager({ application: 'applied', packageResult: { exitCode: 0 } });
+const applied = await applyUpdate(makeCtx({ dir: cleanDir, manager: appliedManager }), body({ version: '1.8.5' }), STUB_TRANSPORTS);
+check('H11 application=applied（有 HMR 的宿主）也算成功', applied.ok === true && applied.application === 'applied', JSON.stringify(applied));
+
+const missingExitCodeManager = makeManager({ application: 'restart-required', packageResult: { output: 'no exit code here' } });
+const missingExitCode = await applyUpdate(makeCtx({ dir: cleanDir, manager: missingExitCodeManager }), body({ version: '1.8.5' }), STUB_TRANSPORTS);
+check('H11 packageResult 没有 exitCode 不再误判为失败',
+	missingExitCode.ok === true, JSON.stringify(missingExitCode));
+
+const badExitCodeManager = makeManager({ application: 'restart-required', packageResult: { exitCode: 1, output: 'ERR' } });
+const badExitCode = await applyUpdate(makeCtx({ dir: cleanDir, manager: badExitCodeManager }), body({ version: '1.8.5' }), STUB_TRANSPORTS);
+check('H11 明确的非 0 exitCode 判失败并带上退出码',
+	badExitCode.ok === false && badExitCode.error.includes('1'), JSON.stringify(badExitCode));
 
 // ---------------------------------------------------------------------------
 // 桌面壳唤醒：首发 + 两次补发（0 / 700 / 2200ms），三种启动方式轮换，
@@ -328,9 +544,19 @@ check('助手那一发：-ExecutionPolicy Bypass / -WindowStyle Hidden / 脚本�
 	})(), JSON.stringify(helperCommands[1].args.slice(0, 8)));
 check('encodePowerShellCommand 就是 UTF-16LE 的 base64（-EncodedCommand 的格式）',
 	Buffer.from(encodePowerShellCommand('exit 0'), 'base64').toString('utf16le') === 'exit 0');
+check('H7 activationCommands 缓存：同一 (platform, 桌面壳环境, exe) 重复调用返回同一份命令（EncodedCommand 不重算）',
+	activationCommands('win32', desktopEnv, 'C:\\App Dir\\DeepSeek Harness.exe') === helperCommands
+	&& activationCommands('win32', desktopEnv, 'C:\\App Dir\\DeepSeek Harness.exe') === helperCommands,
+	'缓存未命中（每次请求都会重算 4590 字符脚本 + base64）');
+check('H7 缓存按 executable 区分：不同 exe → 不同 $processName（缓存不会串味）', (() => {
+	const nodeCommands = activationCommands('win32', desktopEnv, 'C:/node/node.exe');
+	const index = nodeCommands[1].args.indexOf('-EncodedCommand');
+	const decoded = Buffer.from(nodeCommands[1].args[index + 1], 'base64').toString('utf16le');
+	return nodeCommands !== helperCommands && decoded.includes("$processName = 'node'");
+})(), '不同 exe 共用了同一份缓存');
 
 const winIssued = launchDesktopWindow('win32', { spawn: stubSpawn, schedule: fakeSchedule, environment: desktopEnv });
-check('桌面壳（win32）：首发一次、返回已发出', winIssued === true && spawnCalls.length === 1 && spawnCalls[0].args[0] === 'dsh://open', JSON.stringify(spawnCalls));
+check('桌面壳（win32）：首发一次、返回已发出', winIssued.issued === true && spawnCalls.length === 1 && spawnCalls[0].args[0] === 'dsh://open', JSON.stringify({ issued: winIssued.issued, calls: spawnCalls }));
 check('首发之外补发两次（第一次点击最容易输，但补发只在没抬起来时才真的动手抢）', scheduled.length === ACTIVATION_SCHEDULE_MS.length - 1, JSON.stringify(scheduled.map((entry) => entry.delay)));
 check('补发时刻按常量表排（0 / 700 / 2200ms）', scheduled.every((entry, index) => entry.delay === ACTIVATION_SCHEDULE_MS[index + 1]), JSON.stringify(scheduled.map((entry) => entry.delay)));
 scheduled.forEach((entry) => entry.fn());
@@ -375,7 +601,8 @@ const runActivation = (calls) => {
 	const trace = [];
 	launchDesktopWindow('win32', {
 		spawn: spawnRecorder(calls),
-		schedule: (fn, delay) => { timers.push({ fn, delay }); return timers.length; },
+		schedule: (fn, delay) => { const handle = { fn, delay, cleared: false }; timers.push(handle); return handle; },
+		clearSchedule: (handle) => { handle.cleared = true; },
 		environment: desktopEnv,
 		executable: 'C:/App/dsh.exe',
 		record: (entry) => trace.push(entry),
@@ -396,6 +623,9 @@ check('助手报「已在前台」（exit 0）之后：剩下的补发不再起�
 check('「成功就停」写进唤醒日志（settled + 原因，事后能复盘这次为什么只抢了两下）',
 	settledRun.trace.some((entry) => entry.event === 'settled' && entry.reason === 'foreground'),
 	JSON.stringify(settledRun.trace.map((entry) => entry.event)));
+check('「成功就停」同时清掉未到点的补发定时器（不是等它到点空跑）',
+	settledRun.timers[1].cleared === true,
+	JSON.stringify(settledRun.timers.map((timer) => ({ delay: timer.delay, cleared: timer.cleared }))));
 
 const retryCalls = [];
 const retryRun = runActivation(retryCalls);
@@ -453,10 +683,14 @@ launchDesktopWindow('darwin', {
 	environment: desktopEnv,
 });
 check('macOS 走 open dsh://open，同样首发 + 补发', darwinCalls.length === 1 && darwinCalls[0].file === 'open' && darwinScheduled.length === ACTIVATION_SCHEDULE_MS.length - 1, JSON.stringify({ calls: darwinCalls, scheduled: darwinScheduled }));
+check('H9 macOS 非桌面宿主：没有可用启动方式（不再无条件 open dsh://open）',
+	JSON.stringify(activationCommands('darwin', {}, 'C:/node/node.exe')) === '[]'
+	&& JSON.stringify(activationCommands('darwin', desktopEnv, 'C:/node/node.exe').map((command) => command.kind)) === JSON.stringify(['open-url']),
+	JSON.stringify({ plain: activationCommands('darwin', {}, 'C:/node/node.exe'), desktop: activationCommands('darwin', desktopEnv, 'C:/node/node.exe').map((command) => command.kind) }));
 
 const linuxCalls = [];
 const linuxIssued = launchDesktopWindow('linux', { spawn: (file, args) => { linuxCalls.push({ file, args }); return stubChild; }, schedule: () => 1, environment: desktopEnv });
-check('不支持的平台：不起进程、返回 false（路由据此回 501）', linuxIssued === false && linuxCalls.length === 0, JSON.stringify(linuxCalls));
+check('不支持的平台：不起进程、返回未发出（路由据此回 501）', linuxIssued.issued === false && linuxCalls.length === 0, JSON.stringify(linuxCalls));
 
 const throwingCalls = [];
 const throwingIssued = launchDesktopWindow('win32', {
@@ -464,7 +698,7 @@ const throwingIssued = launchDesktopWindow('win32', {
 	schedule: () => 1,
 	environment: desktopEnv,
 });
-check('spawn 抛错：返回 false，但补发照排（竞速不因一次失败放弃）', throwingIssued === false && throwingCalls.length === 1, `${throwingIssued} / ${throwingCalls.length}`);
+check('spawn 抛错：返回未发出，但补发照排（竞速不因一次失败放弃）', throwingIssued.issued === false && throwingCalls.length === 1, `${String(throwingIssued.issued)} / ${throwingCalls.length}`);
 
 const notDesktopSpawnCalls = [];
 const notDesktopIssued = launchDesktopWindow('win32', {
@@ -472,7 +706,114 @@ const notDesktopIssued = launchDesktopWindow('win32', {
 	schedule: fakeSchedule,
 	environment: {},
 });
-check('不是桌面壳宿主：不起进程、返回 false（普通浏览器不走这条路）', notDesktopIssued === false && notDesktopSpawnCalls.length === 0, JSON.stringify(notDesktopSpawnCalls));
+check('不是桌面壳宿主：不起进程、返回未发出（普通浏览器不走这条路）', notDesktopIssued.issued === false && notDesktopSpawnCalls.length === 0, JSON.stringify(notDesktopSpawnCalls));
+
+// ---------------------------------------------------------------------------
+// H2/H3：定时器与子进程的生命周期。补发定时器必须能被插件卸载（以及
+// 「成功就停」）真正撤掉，而不是只在回调里空跑；helper 的管道要在子进程
+// 结束后销毁，并有一个 10s 级的 kill 看门狗兜住卡死的 PowerShell。
+// ---------------------------------------------------------------------------
+
+console.log('');
+console.log('定时器与子进程生命周期');
+const disposalSpawns = [];
+const disposalTimers = [];
+const disposalTraces = [];
+const disposalRoutes = [];
+const disposalEffects = [];
+apply({
+	inject: (names, callback) => callback({
+		connection: { fetch: { register: (route) => { disposalRoutes.push(route); return () => { const index = disposalRoutes.indexOf(route); if (index >= 0) disposalRoutes.splice(index, 1); }; } } },
+		effect: (fn, label) => {
+			const disposer = fn();
+			disposalEffects.push({ label, disposer });
+			return disposer;
+		},
+		logger: () => ({ warn: () => {} }),
+	}),
+	get: () => undefined,
+}, {
+	platform: 'win32',
+	environment: desktopEnv,
+	executable: 'C:/app/dsh.exe',
+	spawn: (file) => { disposalSpawns.push(file); return { pid: 1, stdout: null, stderr: null, on() { return this; }, unref() {}, kill() {} }; },
+	schedule: (fn, delay) => { const handle = { fn, delay, cleared: false }; disposalTimers.push(handle); return handle; },
+	clearSchedule: (handle) => { handle.cleared = true; },
+	activationRecorder: (context) => (entry) => disposalTraces.push({ ...context, ...entry }),
+});
+const disposalActivationRoute = disposalRoutes.find((route) => route.path === ACTIVATION_PATH);
+const disposalResponse = await disposalActivationRoute.fetch(new Request('http://127.0.0.1/api/task-reminder/window-activation', { method: 'POST' }));
+check('卸载前：点击回 204、首发 spawn 一次、700/2200ms 两发都在定时器里', disposalResponse.status === 204
+	&& disposalSpawns.length === 1 && disposalTimers.length === ACTIVATION_SCHEDULE_MS.length - 1,
+	JSON.stringify({ status: disposalResponse.status, spawns: disposalSpawns, timers: disposalTimers.map((timer) => timer.delay) }));
+for (const effect of disposalEffects) effect.disposer();
+check('卸载：三条路由全部反注册（注册/回收可靠）', disposalRoutes.length === 0);
+check('卸载：还没到点的补发定时器被清理（不是只在回调里空跑）',
+	disposalTimers.every((timer) => timer.cleared === true),
+	JSON.stringify(disposalTimers.map((timer) => timer.cleared)));
+const spawnsBeforeLateTimers = disposalSpawns.length;
+for (const timer of disposalTimers) timer.fn(); // 模拟「已入队、卸载后才执行」的回调
+check('卸载后遗留定时器回调不再 spawn 子进程（attempt 有 cancelled 守卫）',
+	disposalSpawns.length === spawnsBeforeLateTimers && disposalTraces.some((entry) => entry.event === 'cancelled'),
+	JSON.stringify({ spawns: disposalSpawns, events: disposalTraces.map((entry) => entry.event) }));
+
+const pendingTimers = [];
+const killChild = { pid: 77, stdout: null, stderr: null, killed: false, on() { return this; }, unref() {}, kill() { this.killed = true; } };
+const killTrace = [];
+launchDesktopWindow('win32', {
+	spawn: () => killChild,
+	schedule: (fn, delay) => { const timer = { fn, delay }; pendingTimers.push(timer); return timer; },
+	clearSchedule: () => {},
+	environment: desktopEnv,
+	executable: 'C:/app/dsh.exe',
+	killTimeoutMs: 20,
+	record: (entry) => killTrace.push(entry),
+});
+pendingTimers[0].fn(); // 700ms：前台助手那一发
+let killedByWatchdog = false;
+for (let index = 0; index < 50 && !killedByWatchdog; index += 1) {
+	if (killChild.killed === true) {
+		killedByWatchdog = true;
+		break;
+	}
+	await new Promise((resolve) => setTimeout(resolve, 20));
+}
+check('H3 助手 kill 看门狗：超时没退出的 PowerShell 会被 kill（并留 kill-timeout 痕迹）',
+	killedByWatchdog && killTrace.some((entry) => entry.event === 'kill-timeout'),
+	JSON.stringify({ killed: killChild.killed, events: killTrace.map((entry) => entry.event) }));
+
+const pipedDestroy = { stdout: false, stderr: false };
+const pipedChildWithClose = {
+	pid: 778,
+	stdout: {
+		on: (event, handler) => { if (event === 'data') pipedChildWithClose.onStdout = handler; },
+		destroy: () => { pipedDestroy.stdout = true; },
+	},
+	stderr: {
+		on: (event, handler) => { if (event === 'data') pipedChildWithClose.onStderr = handler; },
+		destroy: () => { pipedDestroy.stderr = true; },
+	},
+	on: (event, handler) => {
+		if (event === 'exit') pipedChildWithClose.onExit = handler;
+		if (event === 'close') pipedChildWithClose.onClose = handler;
+	},
+	unref: () => {},
+	kill: () => {},
+};
+const pipedSchedule = [];
+launchDesktopWindow('win32', {
+	spawn: (file) => (file === 'powershell.exe' ? pipedChildWithClose : stubChild),
+	schedule: (fn, delay) => { pipedSchedule.push({ fn, delay }); return pipedSchedule.length; },
+	environment: desktopEnv,
+	executable: 'C:/app/dsh.exe',
+});
+pipedSchedule[0].fn(); // 助手那一发
+pipedChildWithClose.onStdout?.('#< CLIXML\r\n<Objs Version="1.1.0.1"><Obj S="progress" RefId="0" /></Objs>\r\n');
+pipedChildWithClose.onStderr?.('real error\r\n');
+pipedChildWithClose.onExit?.(3, null);
+pipedChildWithClose.onClose?.(3, null);
+check('H3 helper 结束后销毁 stdout/stderr 管道（不再让已结束的 pipe 占着句柄）',
+	pipedDestroy.stdout === true && pipedDestroy.stderr === true, JSON.stringify(pipedDestroy));
 
 // ---------------------------------------------------------------------------
 // 唤醒日志：宿主半侧原先完全不留痕 —— 「点了弹窗没抬窗」时，页面只能说
@@ -570,13 +911,13 @@ check('唤醒留痕：平台不支持也记一笔 unsupported（并带上桌面�
 	JSON.stringify(unsupportedTrace));
 check('唤醒留痕：record 自己抛错也不影响首发结果（诊断不能反过来搞坏唤醒）', (() => {
 	const calls = [];
-	const issued = launchDesktopWindow('win32', {
+	const launched = launchDesktopWindow('win32', {
 		spawn: (file, args) => { calls.push({ file, args }); return stubChild; },
 		schedule: fakeSchedule,
 		environment: desktopEnv,
 		record: () => { throw new Error('log exploded'); },
 	});
-	return issued === true && calls.length === 1;
+	return launched.issued === true && calls.length === 1;
 })(), '日志抛错时首发结果被改坏');
 
 // ---------------------------------------------------------------------------
@@ -663,6 +1004,11 @@ check('唤醒路由（不是桌面壳宿主）：回 501、不起进程，日志
 	notDesktopActivation.status === 501 && activationEntries.some((entry) => entry.event === 'unsupported' && entry.desktopHost === false)
 	&& activationEntries.at(-1)?.status === 501,
 	JSON.stringify({ status: notDesktopActivation.status, last: activationEntries.at(-1) }));
+// H9：macOS 上「不是桌面壳宿主」也必须回 501（此前会 204 + open dsh://open）。
+const darwinNotDesktopRoute = activationRouteOf(registerActivationRoutes({ platform: 'darwin', environment: {}, executable: 'C:/node/node.exe' }));
+const darwinNotDesktop = await postActivation(darwinNotDesktopRoute, undefined);
+check('H9 唤醒路由（macOS 非桌面壳宿主）：回 501、不起 open',
+	darwinNotDesktop.status === 501, JSON.stringify({ status: darwinNotDesktop.status }));
 check('没有 connection 服务时安静跳过（不影响插件装载）', (() => {
 	try {
 		apply({ inject: (names, callback) => callback({ effect: () => {} }) });
@@ -671,14 +1017,51 @@ check('没有 connection 服务时安静跳过（不影响插件装载）', (() 
 		return false;
 	}
 })(), '缺 connection 服务时 apply 抛了错');
-check('路由表注册抛错也被吞掉（桌面壳之外的组合照样能装载）', (() => {
+// H5：effect 桩必须按 cordis 的真实语义「execute 立即执行、返回值是 disposer」，
+// 否则 register 从未被调用，这条断言就永远是绿的。
+const registrationWarnings = [];
+let registrationAttempts = 0;
+check('路由表注册抛错被吞掉（effect 桩真实执行 → register 真的被调用并抛错）', (() => {
 	try {
-		apply({ inject: (names, callback) => callback({ connection: { fetch: { register: () => { throw new Error('boom'); } } }, effect: () => {} }) });
+		apply({
+			inject: (names, callback) => callback({
+				connection: { fetch: { register: () => { registrationAttempts += 1; throw new Error('boom'); } } },
+				effect: (fn) => { const disposer = fn(); return disposer; },
+				logger: (name) => ({ warn: (...args) => registrationWarnings.push({ name, args }) }),
+			}),
+		});
 		return true;
 	} catch {
 		return false;
 	}
 })(), '注册抛错时 apply 没兜住');
+check('H5 三条路由各自 try/catch：全部注册失败时三条都真的尝试过、各自记一条 warn，apply 不抛',
+	registrationAttempts === 3 && registrationWarnings.length === 3,
+	JSON.stringify({ attempts: registrationAttempts, warnings: registrationWarnings.length }));
+
+// H10：一条路由注册失败不能拖累另外两条（此前共用一个 try：激活路由抛错会让
+// 检查更新/立即更新两条路由一起不注册）。
+const partialRoutes = [];
+const partialWarnings = [];
+apply({
+	inject: (names, callback) => callback({
+		connection: {
+			fetch: {
+				register: (route) => {
+					if (route.path === ACTIVATION_PATH) throw new Error('activation route boom');
+					partialRoutes.push(route);
+					return () => {};
+				},
+			},
+		},
+		effect: (fn) => fn(),
+		logger: (name) => ({ warn: (...args) => partialWarnings.push({ name, args }) }),
+	}),
+});
+check('H10 一条路由注册失败不拖累另外两条：检查更新 / 立即更新仍然注册，失败那条单独记 warn',
+	partialRoutes.length === 2 && partialRoutes[0].path === UPDATE_CHECK_PATH && partialRoutes[1].path === UPDATE_APPLY_PATH
+	&& partialWarnings.length === 1 && String(partialWarnings[0].args?.[0] ?? '').includes('activation'),
+	JSON.stringify({ routes: partialRoutes.map((route) => route.path), warnings: partialWarnings.length }));
 const throwingRoutes = [];
 apply({
 	inject: (names, callback) => callback({

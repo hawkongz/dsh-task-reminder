@@ -367,7 +367,7 @@ class FakeAudioContext {
  * IndexedDB 桩：只实现插件用到的那条路径（open → 一个对象仓库 → get / put / delete），
  * 全部在微任务里落地。failOpen / failPut 用来演练「打不开」「写不进去」两条失败分支。
  */
-const idbBacking = { records: new Map(), openCount: 0, failOpen: false, failPut: false };
+const idbBacking = { records: new Map(), openCount: 0, failOpen: false, failPut: false, failDelete: false };
 const idbRequest = () => ({ result: undefined, error: null, onsuccess: null, onerror: null });
 const settleIdb = (request, result) => {
 	Promise.resolve().then(() => {
@@ -399,6 +399,10 @@ const fakeObjectStore = () => ({
 	},
 	delete(key) {
 		const request = idbRequest();
+		if (idbBacking.failDelete) {
+			failIdb(request, new Error('delete blocked'));
+			return request;
+		}
 		idbBacking.records.delete(key);
 		settleIdb(request, undefined);
 		return request;
@@ -558,6 +562,7 @@ const {
 	compareVersions,
 	conversationColumnInfo,
 	createActionBridge,
+	createCustomSoundStore,
 	createNotifier,
 	en,
 	findLatestQuestionRow,
@@ -659,7 +664,7 @@ check('弹窗时机文案注明两种语义', zh['notify.mode.always'] === '任�
 	&& en['notify.mode.always'] === 'Always' && en['notify.mode.unfocused'] === 'Only when unfocused');
 check('音效/音量/恢复默认各有文案', ['sound.choice.title', 'sound.choice.description', 'volume.title', 'volume.description', 'reset.title', 'reset.description', 'reset.descriptionDefault'].every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
 check('四种音效各有名字文案', SOUND_CHOICES.every((choice) => typeof zh[choice.nameKey] === 'string' && zh[choice.nameKey] !== '' && typeof en[choice.nameKey] === 'string' && en[choice.nameKey] !== ''));
-check('自定义音效有档位名与全部状态文案', ['sound.choice.custom', 'sound.custom.title', 'sound.custom.empty', 'sound.custom.ready', 'sound.custom.loading', 'sound.custom.missing', 'sound.custom.decodeFailed', 'sound.custom.storeFailed', 'sound.custom.tooLarge', 'sound.custom.unsupported', 'sound.custom.pick', 'sound.custom.clear'].every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
+check('自定义音效有档位名与全部状态文案', ['sound.choice.custom', 'sound.custom.title', 'sound.custom.empty', 'sound.custom.ready', 'sound.custom.loading', 'sound.custom.missing', 'sound.custom.decodeFailed', 'sound.custom.storeFailed', 'sound.custom.readFailed', 'sound.custom.clearFailed', 'sound.custom.tooLarge', 'sound.custom.unsupported', 'sound.custom.pick', 'sound.custom.clear'].every((key) => typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''));
 check('自定义档下标排在四种合成音效之后', CUSTOM_SOUND_CHOICE === SOUND_CHOICES.length && CUSTOM_SOUND_CHOICE === 4, String(CUSTOM_SOUND_CHOICE));
 check('自定义音效的元数据持久化键符合约定', CUSTOM_SOUND_PERSIST_KEY === 'dsh.task-reminder.custom-sound');
 check('自定义音频有字节上限（正整数，防误选大文件）', Number.isInteger(CUSTOM_SOUND_MAX_BYTES) && CUSTOM_SOUND_MAX_BYTES > 0, String(CUSTOM_SOUND_MAX_BYTES));
@@ -678,7 +683,7 @@ check('resolveNotifyMode 接受合法值', resolveNotifyMode('always') === 'alwa
 check('resolveNotifyMode 坏值退回默认时机', resolveNotifyMode('nonsense') === 'always' && resolveNotifyMode(undefined) === 'always' && resolveNotifyMode(null) === 'always' && resolveNotifyMode(42) === 'always');
 
 check('四种音效', Array.isArray(SOUND_CHOICES) && SOUND_CHOICES.length === 4, String(SOUND_CHOICES.length));
-check('音效 id 互不重复', new Set(SOUND_CHOICES.map((choice) => choice.id)).size === SOUND_CHOICES.length, SOUND_CHOICES.map((choice) => choice.id).join());
+check('音效名文案键互不重复（运行时只按下标选档，不再维护 id）', new Set(SOUND_CHOICES.map((choice) => choice.nameKey)).size === SOUND_CHOICES.length, SOUND_CHOICES.map((choice) => choice.nameKey).join());
 check('每种音效至少两个音、参数都为正', SOUND_CHOICES.every((choice) => choice.notes.length >= 2
 	&& choice.notes.every((noteSpec) => noteSpec.frequency > 0 && noteSpec.duration > 0 && noteSpec.peak > 0 && noteSpec.peak <= 1 && noteSpec.at >= 0)));
 check('音效波形只有正弦与三角', SOUND_CHOICES.every((choice) => choice.type === 'sine' || choice.type === 'triangle'));
@@ -700,6 +705,7 @@ check('resolveSoundChoice 四舍五入到整数档', resolveSoundChoice(1.4) ===
 check('normalizeCustomMeta 保留合法元数据', JSON.stringify(normalizeCustomMeta({ name: 'ding.mp3', size: 1234.6, type: 'audio/mpeg', at: 7 })) === JSON.stringify({ name: 'ding.mp3', size: 1235, type: 'audio/mpeg', at: 7 }), JSON.stringify(normalizeCustomMeta({ name: 'ding.mp3', size: 1234.6, type: 'audio/mpeg', at: 7 })));
 check('normalizeCustomMeta 坏值一律视为没有自定义音效', normalizeCustomMeta(null) === null && normalizeCustomMeta('ding.mp3') === null && normalizeCustomMeta({}) === null && normalizeCustomMeta({ name: '' }) === null && normalizeCustomMeta({ name: '   ' }) === null && normalizeCustomMeta({ name: 'a.mp3', size: -5, type: 7, at: 'x' }).size === 0);
 check('clampVolume 夹住 0~100', clampVolume(0) === 0 && clampVolume(100) === 100 && clampVolume(140) === 100 && clampVolume(-5) === 0);
+check('clampVolume 按 5 的步进对齐（手改存储的 83 也落到刻度上）', clampVolume(83) === 85 && clampVolume(78) === 80 && clampVolume(2) === 0 && clampVolume(98) === 100, JSON.stringify({ a: clampVolume(83), b: clampVolume(78), c: clampVolume(2), d: clampVolume(98) }));
 check('clampVolume 坏值退回默认音量', clampVolume(Number.NaN) === DEFAULTS.volume && clampVolume('loud') === DEFAULTS.volume && clampVolume(null) === DEFAULTS.volume);
 check('音量区间覆盖 0~100 且步进为正', VOLUME_MIN === 0 && VOLUME_MAX === 100 && VOLUME_STEP > 0);
 
@@ -767,16 +773,25 @@ const setRunning = (id, running) => {
 };
 
 /**
- * 停止分类读取的假事件窗口：改 fakeTurnEndReason 即改变「最后一条 turn/end
- * 的原因」；fakeEventEntries 非空时整窗替换（供注入「旧 turn/end + 未闭合
- * turn/start」这类窗口）；fakeUsingThrows 模拟 retain/open 失败（插件应走
- * 兜底）；fakeUsingGate 非空时 using 等这个 Promise 落地再返回（可控闸门，
- * 用于把分类摁在途再放重复边沿）。
+ * 停止分类读取的假事件窗口 / 假 binding：
+ * - 改 fakeTurnEndReason 即改变「最后一条 turn/end 的原因」；
+ * - fakeEventEntries 非空时整窗替换（供注入「旧 turn/end + 未闭合 turn/start」
+ *   这类窗口）；
+ * - fakeUsingThrows 模拟 retain/open 失败（插件应走 unreadable 兜底）；
+ * - fakeUsingGates 逐次消费：第 N 次 using 等第 N 个 Promise 落地再返回（可控
+ *   闸门，用于把分类摁在途、演练取消与迟到纠正）；
+ * - fakeBorrowedBindings 模拟「会话已被 UI retain」时的 0-RPC 快路径。
+ * 事件窗口订阅者（eventSource.subscribe）在 append / 整窗替换时同步通知 ——
+ * 与 DSH 的 MutableSessionEventSource 一致，新的状态机靠它等 turn/end 落盘。
  */
 let fakeTurnEndReason = { kind: 'completed' };
 let fakeUsingThrows = false;
 let fakeEventEntries = null;
-let fakeUsingGate = null;
+const fakeUsingGates = [];
+const fakeBorrowedBindings = new Map();
+let usingCalls = 0;
+/** 事件窗口订阅者（eventSource.subscribe 的桩）。 */
+const fakeEventListeners = new Set();
 /**
  * 合成持久日志里「最新回合」的回合号（1.5.4 起停止去重按回合号判「同一次停止」）。
  * 凡是代表「会话开始了一个新回合」的测试动作，这里就 +1：
@@ -787,9 +802,38 @@ let fakeUsingGate = null;
  */
 let fakeTurn = 1;
 const nextTurn = () => { fakeTurn += 1; };
-const fakeEventWindow = () => ({
-	entries: fakeEventEntries ?? [{ type: 'event', event: { type: 'turn/end', seq: 1, time: 1, data: { turn: fakeTurn, reason: fakeTurnEndReason } } }],
-});
+const fakeEventEntriesNow = () => fakeEventEntries ?? [{ type: 'event', event: { type: 'turn/end', seq: 1, time: 1, data: { turn: fakeTurn, reason: fakeTurnEndReason } } }];
+const fakeEventWindow = () => ({ entries: fakeEventEntriesNow() });
+/** 事件源桩：getSnapshot 缓存由假窗口给出，subscribe 在 append 时同步通知。 */
+const fakeEventSource = {
+	getSnapshot: fakeEventWindow,
+	subscribe(listener) {
+		fakeEventListeners.add(listener);
+		return () => fakeEventListeners.delete(listener);
+	},
+};
+/** 事件窗口变更后同步通知订阅者（与 DSH 的 MutableSessionEventSource 一致）。 */
+const notifyFakeEvents = () => {
+	for (const listener of [...fakeEventListeners]) listener();
+};
+/** 往假事件窗口追加一条事件并通知订阅者（模拟 turn/end 落盘）。 */
+const appendFakeEvent = (event) => {
+	fakeEventEntries = [...fakeEventEntriesNow(), { type: 'event', event }];
+	notifyFakeEvents();
+};
+/** 假 binding（using 回调里的 reference.binding）：事件源共用同一个假窗口。 */
+const fakeBinding = (sessionId) => ({ sessionId, eventSource: fakeEventSource });
+/** 让某个会话走 0-RPC 快路径：模拟它已被 UI retain，事件窗口钉在给定 entries。 */
+const setBorrowedBinding = (sessionId, entries) => {
+	fakeBorrowedBindings.set(sessionId, {
+		sessionId,
+		eventSource: {
+			getSnapshot: () => ({ entries }),
+			subscribe: fakeEventSource.subscribe,
+		},
+	});
+};
+const clearBorrowedBindings = () => fakeBorrowedBindings.clear();
 
 const sessionsStub = {
 	list: {
@@ -799,10 +843,16 @@ const sessionsStub = {
 			return () => listListeners.delete(listener);
 		},
 	},
+	binding(sessionId) {
+		return fakeBorrowedBindings.get(sessionId) ?? undefined;
+	},
 	using(sessionId, options, operation) {
+		usingCalls += 1;
 		if (fakeUsingThrows) return Promise.reject(new Error('stub: retain failed'));
-		const reference = { ready: Promise.resolve({ eventSource: { getSnapshot: fakeEventWindow } }) };
-		if (fakeUsingGate !== null) return fakeUsingGate.then(() => Promise.resolve(operation(reference)));
+		const binding = fakeBinding(sessionId);
+		const reference = { ready: Promise.resolve(binding), binding };
+		const gate = fakeUsingGates.length > 0 ? fakeUsingGates.shift() : null;
+		if (gate !== null) return gate.then(() => Promise.resolve(operation(reference)));
 		return Promise.resolve(operation(reference));
 	},
 };
@@ -1122,16 +1172,18 @@ check('排障状态记录完成来源为 event', windowStub.__dshTaskReminder.st
 // 保活：非持久通知的 JS 对象一旦被回收，点击就再也到不了 onclick；插件热重载
 // 还会让旧模块作用域变孤儿、连 onclick 闭包一起收走。所以通知对象压在页面级
 // 保活表（window.__dshTaskReminderToasts）里，跨实例按住，点击时才释放。
+// 注意存的是**对象身份**（Set），不是按类型留最近一条：通知 tag 已经每条独立，
+// 同类型可以同时挂好几条，每一条都得保住点击。
 const toastRegistry = windowStub.__dshTaskReminderToasts;
-check('通知对象压在页面级保活表里（按类型留最近一条）', toastRegistry instanceof Map
-	&& toastRegistry.get(NOTIFY_KIND_COMPLETED) === notificationLog.created[0], String(toastRegistry?.size));
+check('通知对象压在页面级保活表里（按对象身份，不只留一条）', toastRegistry instanceof Set
+	&& toastRegistry.has(notificationLog.created[0]), String(toastRegistry?.size));
 notificationLog.created[0].onclick();
 check('点击弹窗：窗口回前台并打开对应会话、关闭弹窗', notificationLog.focused === 1 && opened.includes('s2') && notificationLog.closed === 1, JSON.stringify(notificationLog));
 check('点击弹窗留痕：lastJump 记下会话 / 来源 page / ok', windowStub.__dshTaskReminder.state().stats.lastJump?.ok === true
 	&& windowStub.__dshTaskReminder.state().stats.lastJump?.via === 'page'
 	&& windowStub.__dshTaskReminder.state().stats.lastJump?.sessionId === 's2', JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastJump));
 check('点击弹窗留痕：成功次数进 stats.jumps', windowStub.__dshTaskReminder.state().stats.jumps === 1, String(windowStub.__dshTaskReminder.state().stats.jumps));
-check('点击后从保活表释放对应类型', toastRegistry.get(NOTIFY_KIND_COMPLETED) === undefined, String(toastRegistry?.size));
+check('点击后从保活表释放那条通知', !toastRegistry.has(notificationLog.created[0]), String(toastRegistry?.size));
 check('点击留痕：lastClick 记下 kind / 会话（null 才说明 handler 没跑）', windowStub.__dshTaskReminder.state().stats.lastClick?.kind === NOTIFY_KIND_COMPLETED
 	&& windowStub.__dshTaskReminder.state().stats.lastClick?.sessionId === 's2'
 	&& windowStub.__dshTaskReminder.state().stats.clicks === 1, JSON.stringify(windowStub.__dshTaskReminder.state().stats.lastClick));
@@ -1145,6 +1197,28 @@ clickRouter.handler = (sessionId) => routed.push(sessionId); // 冒充「新实�
 notificationLog.created[0].onclick();
 check('旧通知点击走转发表：交给当前实例（不是闭包里的旧 ctx）', routed.length === 1 && routed[0] === 's2', JSON.stringify(routed));
 clickRouter.handler = previousHandler;
+// 同类型同时挂两条：两条对象都要留在保活表里（旧实现按 kind 只留最近一条，
+// 第一条被挤掉后点击就送不到页面 —— 正是 1.6.2 修的那类「点了没反应」）。
+resetNotificationLog();
+completeOnce();
+await tick();
+completeOnce();
+await tick();
+check('同类型两条通知都留在保活表（不按类型只留最近一条）', notificationLog.created.length === 2
+	&& notificationLog.created.every((notification) => toastRegistry.has(notification)) && toastRegistry.size === 2,
+	JSON.stringify({ created: notificationLog.created.length, size: toastRegistry?.size }));
+// tag 的毫秒后缀在同一毫秒内会撞车；序号必须把同毫秒的两条也区分开，
+// 否则系统会把后一条当成同一条替换掉（被替换的那条在通知中心里点不动）。
+const savedDateNowForTag = Date.now;
+Date.now = () => 1700000000000;
+resetNotificationLog();
+windowStub.__dshTaskReminder.test('completed');
+windowStub.__dshTaskReminder.test('completed');
+Date.now = savedDateNowForTag;
+check('同毫秒两条通知 tag 不同（序号兜底）', notificationLog.created.length === 2
+	&& String(notificationLog.created[0]?.options?.tag) !== String(notificationLog.created[1]?.options?.tag),
+	JSON.stringify(notificationLog.created.map((notification) => notification.options?.tag)));
+
 // 排障钩子：不用等弹窗也能当场跳一次 —— 把「点击有没有送达」与「跳转本身成不成」拆开。
 const openedBeforeDebugJump = opened.length;
 check('jump() 直接跳会话并留痕（via = debug）', windowStub.__dshTaskReminder.jump('s3') === true
@@ -1559,19 +1633,41 @@ await tick();
 check('max-tokens：按完成报（截断也要提醒）', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '对话任务已完成', JSON.stringify(notificationLog.created.map((item) => item.title)));
 fakeTurnEndReason = { kind: 'completed' };
 
-// ⑦ 兜底：分类读不到（retain/open 失败）→ 按完成报；错误 5 秒内后到 →
-//    撤回完成弹窗只留错误、不重响提示音。
+// ⑦ unreadable 兜底：分类读不到（retain/open 失败）→ 按完成报（provisional）；
+//    错误 5 秒内后到 → 撤回完成弹窗只留错误、不重响提示音。
+//    新状态机没有「到点才兜底」的独立定时器：using 失败立即按 unreadable 结算。
 fakeUsingThrows = true;
 resetNotificationLog();
 resetAudioLog();
 completeOnce();
-flushTimers();
+await tick();
 check('兜底：分类读不到按完成报', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '对话任务已完成', JSON.stringify(notificationLog.created.map((item) => item.title)));
 check('兜底完成响了一次音', audioLog.oscillators.length === 2, String(audioLog.oscillators.length));
 errorListener('s2', 'boom-late');
 check('晚到错误撤回完成弹窗只留错误', notificationLog.created.length === 2 && notificationLog.created[1]?.title === '任务出错已停止' && notificationLog.closed === 1, JSON.stringify(notificationLog.created.map((item) => item.title)));
 check('晚到错误不重响提示音（一次停止一次音）', audioLog.oscillators.length === 2, String(audioLog.oscillators.length));
 fakeUsingThrows = false;
+
+// ⑦c 撤回不受「错误到达那一刻」的门控影响：完成通知发出后用户回到前台、
+//    时机改成「仅非前台窗口」，晚到的错误仍要撤掉那条完成 —— 只是不再弹错误
+//    通知。否则屏上留下「完成」的假象（F-13）。
+fakeUsingThrows = true;
+face.setNotifyMode('always');
+setFocus({ hidden: false, focused: true });
+resetNotificationLog();
+resetAudioLog();
+completeOnce();
+await tick();
+face.setNotifyMode('unfocused'); // 此刻 canNotify = false（页面在前台）
+const closedBeforeGatedRetract = notificationLog.closed;
+errorListener('s2', 'boom-retract-anyway');
+check('门控此刻为关：晚到错误仍撤回那条完成通知（不留下假的「完成」）', notificationLog.created.length === 1
+	&& notificationLog.created[0]?.title === '对话任务已完成' && notificationLog.closed === closedBeforeGatedRetract + 1,
+	JSON.stringify({ closed: notificationLog.closed, titles: notificationLog.created.map((item) => item.title) }));
+check('门控此刻为关：晚到错误不再补弹错误通知', notificationLog.created.length === 1, String(notificationLog.created.length));
+fakeUsingThrows = false;
+face.setNotifyMode('always');
+setFocus({ hidden: false, focused: true });
 
 // ⑦b 同一场景，但弹窗被门控关掉：晚到的错误不能再补响一声（修复前会双响）。
 //     票据若只在「弹窗真发出去」时才记，门控关掉时就没有票据，同一次停止的错误
@@ -1581,7 +1677,7 @@ fakeUsingThrows = true;
 resetNotificationLog();
 resetAudioLog();
 completeOnce();
-flushTimers();
+await tick();
 const chimesGatedFallback = audioLog.oscillators.length;
 errorListener('s2', 'boom-late-gated');
 check('关掉弹窗：兜底完成仍响一次音', chimesGatedFallback === 2, String(chimesGatedFallback));
@@ -1589,30 +1685,28 @@ check('关掉弹窗：晚到错误不补响也不弹窗', audioLog.oscillators.l
 fakeUsingThrows = false;
 await face.setNotify(true);
 
-// ⑧ 重复边沿（列表陈旧回放 running=true 后再翻 false）：同一次停止只报一次。
-//    场景：分类在途（读持久日志的 RPC 被闸门摁住）时，陈旧投影把边沿表
-//    冲回 true，再翻 false 产生第二次边沿——只应报一次完成。
+// ⑧ 重复边沿（分类在途时列表陈旧回放 running=true 再翻 false）：F-03 的回归点。
+//    第一段分类被闸门摁在途时观测到 running=true → 取消旧 token 与 deadline；
+//    随后真正的停止边沿重新分类，只报一条完成（被取消的那段不补报）。
 let gateRelease;
-fakeUsingGate = new Promise((resolve) => { gateRelease = resolve; });
+const gate = new Promise((resolve) => { gateRelease = resolve; });
+fakeUsingGates.push(gate);
 resetNotificationLog();
 resetAudioLog();
 const completedBeforeDup = windowStub.__dshTaskReminder.state().stats.completed;
 statusListener('s2', true);  // 先把 s2 立成 running（⑦ 之后它是空闲）
-statusListener('s2', false); // 边沿 #1 → 分类在途
-statusListener('s2', true);  // 陈旧回放：边沿表回 true（作废票据与在途标记）
-statusListener('s2', false); // 边沿 #2 → 再一次 complete()
-flushTimers();               // 两个兜底定时器都到点
-check('重复边沿：兜底也只报一次完成', notificationLog.created.length === 1, String(notificationLog.created.length));
+statusListener('s2', false); // 边沿 #1 → 分类在途（被闸门摁住）
+statusListener('s2', true);  // 新回合开始：取消在途分类与 deadline
+statusListener('s2', false); // 边沿 #2 → 新分类立即落地并报完成
+await tick();
+check('重复边沿：新回合的停止只报一条完成', notificationLog.created.length === 1 && windowStub.__dshTaskReminder.state().stats.completed === completedBeforeDup + 1, `${notificationLog.created.length} / completed ${windowStub.__dshTaskReminder.state().stats.completed} vs ${completedBeforeDup + 1}`);
 gateRelease();
 await tick();
-check('在途分类落地后仍只一条、completed 只加一', notificationLog.created.length === 1 && windowStub.__dshTaskReminder.state().stats.completed === completedBeforeDup + 1, `${notificationLog.created.length} / completed ${windowStub.__dshTaskReminder.state().stats.completed} vs ${completedBeforeDup + 1}`);
-check('重复抑制记进 stats.stopDuplicates', windowStub.__dshTaskReminder.state().stats.stopDuplicates >= 1, String(windowStub.__dshTaskReminder.state().stats.stopDuplicates));
-fakeUsingGate = null;
+check('被取消的第一段分类落地后不补报、不放音', notificationLog.created.length === 1 && audioLog.oscillators.length === 2, `${notificationLog.created.length} / ${audioLog.oscillators.length}`);
 
-// ⑧-b 停止时读到上一个回合的 turn/end（未闭合的 turn/start 之后没有本次
-//    回合的 turn/end）：不当成已完成——重试等本次回合的 turn/end 落盘。
-//    场景（点停止）：本次的 turn/end{aborted} 还没落盘，倒序先看到的是
-//    上一个回合的 turn/end{completed}。
+// ⑧-b 点停止场景：日志里是「旧 turn/end{completed} + 未闭合 turn/start」。
+//    新状态机订阅 eventSource 等本次 turn/end 落盘；aborted 落盘后不报完成。
+//    （旧实现靠 120ms 重试，新实现靠事件驱动等待，见 R5。）
 fakeEventEntries = [
 	{ type: 'event', event: { type: 'turn/end', seq: 1, time: 1, data: { turn: 1, reason: { kind: 'completed' } } } },
 	{ type: 'event', event: { type: 'turn/start', seq: 2, time: 2, data: { turn: 2 } } },
@@ -1621,12 +1715,12 @@ statusListener('s2', true); // s2 回到 running（上一用例之后它是空�
 resetNotificationLog();
 resetAudioLog();
 const completedBeforeStale = windowStub.__dshTaskReminder.state().stats.completed;
-statusListener('s2', false); // 边沿 → 读到「旧 completed + 未闭合 start」
+statusListener('s2', false); // 边沿 → 读到「旧 completed + 未闭合 start」，订阅等待
 await tick();
 check('未闭合回合的旧 turn/end：不立刻报完成', notificationLog.created.length === 0 && windowStub.__dshTaskReminder.state().stats.completed === completedBeforeStale, `${notificationLog.created.length} / completed ${windowStub.__dshTaskReminder.state().stats.completed} vs ${completedBeforeStale}`);
-// 本次回合的 turn/end{aborted} 落盘（取消）：重试读到它 → 不报。
-fakeEventEntries = [...fakeEventEntries, { type: 'event', event: { type: 'turn/end', seq: 3, time: 3, data: { turn: 2, reason: { kind: 'aborted' } } } }];
-await new Promise((resolve) => { setTimeout(resolve, 250); }); // 等 120ms 重试拍落
+// 本次回合的 turn/end{aborted} 落盘（取消）：事件驱动读到它 → 不报。
+appendFakeEvent({ type: 'turn/end', seq: 3, time: 3, data: { turn: 2, reason: { kind: 'aborted' } } });
+await tick();
 check('本次 turn/end{aborted} 落盘后：取消不报完成', notificationLog.created.length === 0 && audioLog.oscillators.length === 0, `${notificationLog.created.length} / ${audioLog.oscillators.length}`);
 fakeEventEntries = null;
 
@@ -1954,17 +2048,187 @@ resetAudioLog();
 const fallbackSession = 's11';
 hostList = { ids: [...hostList.ids, fallbackSession], byId: { ...hostList.byId, [fallbackSession]: { title: '第十一个会话', displayTitle: '第十一个会话', running: false } } };
 const dupBeforeFallback = statsNow().stopDuplicates;
-fakeUsingThrows = true; // 分类读不到（retain 失败）→ 走兜底
+fakeUsingThrows = true; // 分类读不到（retain 失败）→ unreadable 兜底
 statusListener(fallbackSession, true);
 statusListener(fallbackSession, false);
-flushTimers(); // 兜底定时器到点 → 报一条完成（回合号未知）
+await tick(); // using 失败按微任务落地 → 报一条完成（回合号未知）
 check('兜底路径：读不到原因时按完成报一条', notificationLog.created.length === 1, JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
 setStatusRunning(fallbackSession, true);  // 快照通道的重复观测（不清账本）
 statusListener(fallbackSession, false);   // 同一次停止的第二条边沿
-flushTimers();                            // 这次分类也读不到 → 同样走兜底
+await tick();                             // 这次分类也读不到 → 同样走兜底
 check('兜底路径：无号边沿的重复仍由 5 秒窗口挡下（只一条）', notificationLog.created.length === 1, JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
 check('兜底路径：重复被记进 stats.stopDuplicates', statsNow().stopDuplicates === dupBeforeFallback + 1, `${statsNow().stopDuplicates} vs ${dupBeforeFallback + 1}`);
 fakeUsingThrows = false;
+
+// ---------------------------------------------------------------------------
+// 停止分类状态机（F-01/02/03 + 0-RPC 快路径 + 事件驱动等待）
+// ---------------------------------------------------------------------------
+console.log('');
+console.log('停止分类状态机（unclosed / 迟到纠正 / 取消 / 快路径 / 事件驱动）');
+
+// R 系列专用会话（标题用于断言快路径的同步通知正文）。
+hostList = {
+	ids: [...hostList.ids, 's-r1', 's-r2', 's-r2b', 's-r3', 's-r4', 's-r5'],
+	byId: {
+		...hostList.byId,
+		's-r1': { title: 'R1 未闭合', displayTitle: 'R1 未闭合', running: false },
+		's-r2': { title: 'R2 迟到纠正', displayTitle: 'R2 迟到纠正', running: false },
+		's-r2b': { title: 'R2b 迟到错误', displayTitle: 'R2b 迟到错误', running: false },
+		's-r3': { title: 'R3 取消', displayTitle: 'R3 取消', running: false },
+		's-r4': { title: 'R4 快路径', displayTitle: 'R4 快路径', running: false },
+		's-r5': { title: 'R5 事件驱动', displayTitle: 'R5 事件驱动', running: false },
+	},
+};
+
+// R1（F-01）：固定「旧 turn/end{completed} + 未闭合 turn/start」窗口，没有新的
+//    turn/end —— deadline 到点必须**静默**（旧实现会当成读不到原因报完成）。
+resetNotificationLog();
+resetAudioLog();
+const suppressedBeforeR1 = statsNow().suppressedUnclosed;
+const usingBeforeR1 = usingCalls;
+fakeEventEntries = [
+	{ type: 'event', event: { type: 'turn/end', seq: 1, time: 1, data: { turn: 4101, reason: { kind: 'completed' } } } },
+	{ type: 'event', event: { type: 'turn/start', seq: 2, time: 2, data: { turn: 4102 } } },
+];
+statusListener('s-r1', true);
+statusListener('s-r1', false); // 边沿 → 读到 unclosed，订阅 eventSource 等待
+await tick();
+check('R1 unclosed：到点前不弹窗、不放音', notificationLog.created.length === 0 && audioLog.oscillators.length === 0, `${notificationLog.created.length} / ${audioLog.oscillators.length}`);
+flushTimers(); // deadline 到点
+await tick();
+check('R1 unclosed 到点：0 条通知、0 音（不再误报完成）', notificationLog.created.length === 0 && audioLog.oscillators.length === 0, `${notificationLog.created.length} / ${audioLog.oscillators.length}`);
+check('R1 unclosed 到点：suppressedUnclosed +1', statsNow().suppressedUnclosed === suppressedBeforeR1 + 1, `${statsNow().suppressedUnclosed} vs ${suppressedBeforeR1 + 1}`);
+check('R1 单次停止最多 1 次 using（不再有重试 RPC）', usingCalls - usingBeforeR1 === 1, String(usingCalls - usingBeforeR1));
+check('R1 deadline 后事件订阅已退订（using 回调能收工、不挂住 retain）', fakeEventListeners.size === 0, String(fakeEventListeners.size));
+fakeEventEntries = null;
+
+// R2（F-02）：分类 RPC 被闸门摁住到 deadline → 无任何观测 = unreadable → 按完成
+//    兜底；随后迟到的 turn/end{aborted} 落地 → 关闭那条完成通知并计数。
+resetNotificationLog();
+resetAudioLog();
+let releaseR2;
+const gateR2 = new Promise((resolve) => { releaseR2 = resolve; });
+fakeUsingGates.push(gateR2);
+const completedBeforeR2 = statsNow().completed;
+const lateBeforeR2 = statsNow().lateCorrections;
+statusListener('s-r2', true);
+statusListener('s-r2', false); // 分类在途（闸门）
+flushTimers();                  // deadline：没有任何观测 → unreadable 兜底完成
+check('R2 兜底：deadline 后按完成报一条', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '对话任务已完成', JSON.stringify(notificationLog.created.map((item) => item.title)));
+check('R2 兜底：completed 只加一', statsNow().completed === completedBeforeR2 + 1, `${statsNow().completed} vs ${completedBeforeR2 + 1}`);
+const closedBeforeR2 = notificationLog.closed;
+fakeEventEntries = [{ type: 'event', event: { type: 'turn/end', seq: 2, time: 2, data: { turn: 4202, reason: { kind: 'aborted' } } } }];
+releaseR2(); // 迟到分类落地：aborted
+await tick();
+await tick();
+check('R2 迟到 aborted：撤回那条兜底完成通知', notificationLog.closed === closedBeforeR2 + 1, `${notificationLog.closed} vs ${closedBeforeR2 + 1}`);
+check('R2 迟到 aborted：lateCorrections +1', statsNow().lateCorrections === lateBeforeR2 + 1, `${statsNow().lateCorrections} vs ${lateBeforeR2 + 1}`);
+check('R2 迟到 aborted：不补完成、不补错误', notificationLog.created.length === 1, JSON.stringify(notificationLog.created.map((item) => item.title)));
+fakeEventEntries = null;
+
+// R2b（F-02 的 error 方向）：deadline 兜底完成 → 迟到分类是 error → 走 reportError
+//    的既有撤回逻辑（撤回完成、补错误、不重响提示音）。
+resetNotificationLog();
+resetAudioLog();
+let releaseR2b;
+const gateR2b = new Promise((resolve) => { releaseR2b = resolve; });
+fakeUsingGates.push(gateR2b);
+const errorsBeforeR2b = statsNow().errors;
+statusListener('s-r2b', true);
+statusListener('s-r2b', false); // 分类在途（闸门）
+flushTimers();                  // deadline：无观测 → unreadable 兜底完成
+check('R2b 兜底：deadline 后先报一条完成', notificationLog.created.length === 1 && notificationLog.created[0]?.title === '对话任务已完成', JSON.stringify(notificationLog.created.map((item) => item.title)));
+const closedBeforeR2b = notificationLog.closed;
+fakeEventEntries = [{ type: 'event', event: { type: 'turn/end', seq: 2, time: 2, data: { turn: 4203, reason: { kind: 'error', error: { message: 'late classify boom' } } } } }];
+releaseR2b(); // 迟到分类：error
+await tick();
+await tick();
+check('R2b 迟到 error：撤回完成、补错误通知', notificationLog.created.length === 2 && notificationLog.created[1]?.title === '任务出错已停止' && notificationLog.closed === closedBeforeR2b + 1, JSON.stringify(notificationLog.created.map((item) => item.title)));
+check('R2b 迟到 error：不重响提示音（一次停止一次音）', audioLog.oscillators.length === 2, String(audioLog.oscillators.length));
+check('R2b 迟到 error：errors +1', statsNow().errors === errorsBeforeR2b + 1, `${statsNow().errors} vs ${errorsBeforeR2b + 1}`);
+fakeEventEntries = null;
+
+// R3（F-03）：分类在途时观测到 running=true（新回合）→ 取消在途 token 与
+//    deadline，被取消的分类不得弹完成；随后真实停止恰好 1 条。
+resetNotificationLog();
+resetAudioLog();
+let releaseR3;
+const gateR3 = new Promise((resolve) => { releaseR3 = resolve; });
+fakeUsingGates.push(gateR3);
+const completedBeforeR3 = statsNow().completed;
+statusListener('s-r3', true);
+statusListener('s-r3', false); // 边沿 #1 → 分类在途
+statusListener('s-r3', true);  // 新回合：取消在途分类与 deadline
+flushTimers();                 // 旧 deadline 已被取消 → 不该报完成
+check('R3 running=true 取消在途分类：不弹完成', notificationLog.created.length === 0 && statsNow().completed === completedBeforeR3, `${notificationLog.created.length} / ${statsNow().completed} vs ${completedBeforeR3}`);
+releaseR3();
+await tick();
+check('R3 被取消的分类落地后仍不弹', notificationLog.created.length === 0 && audioLog.oscillators.length === 0, `${notificationLog.created.length} / ${audioLog.oscillators.length}`);
+fakeEventEntries = [{ type: 'event', event: { type: 'turn/end', seq: 3, time: 3, data: { turn: 4303, reason: { kind: 'completed' } } } }];
+statusListener('s-r3', false); // 真实停止 → 新分类
+await tick();
+check('R3 真实停止恰好 1 条完成', notificationLog.created.length === 1 && statsNow().completed === completedBeforeR3 + 1, `${notificationLog.created.length} / ${statsNow().completed} vs ${completedBeforeR3 + 1}`);
+fakeEventEntries = null;
+
+// R4（0-RPC 快路径）：会话已被 retain（binding 可用）时，边沿回调内同步读
+//    eventSource 并当场弹窗/放音——0 次 using、无需 await tick。
+resetNotificationLog();
+resetAudioLog();
+setBorrowedBinding('s-r4', [{ type: 'event', event: { type: 'turn/end', seq: 1, time: 1, data: { turn: 4401, reason: { kind: 'completed' } } } }]);
+const usingBeforeR4 = usingCalls;
+const completedBeforeR4 = statsNow().completed;
+statusListener('s-r4', true);
+statusListener('s-r4', false);
+check('R4 binding 快路径：边沿回调返回前就发出通知（无需等待）', notificationLog.created.length === 1 && notificationLog.created[0]?.options?.body === 'R4 快路径', JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
+check('R4 binding 快路径：0 次 using RPC', usingCalls === usingBeforeR4, String(usingCalls - usingBeforeR4));
+check('R4 binding 快路径：提示音同步排一次', audioLog.oscillators.length === 2, String(audioLog.oscillators.length));
+check('R4 binding 快路径：completed +1', statsNow().completed === completedBeforeR4 + 1, String(statsNow().completed));
+// 同一回合的重复边沿：快路径看到「不比已结清回合新」的号 → 让位给 using 再判一次，
+// 由回合号判据丢弃（不重复弹、不重复放音）。
+fakeEventEntries = [{ type: 'event', event: { type: 'turn/end', seq: 1, time: 1, data: { turn: 4401, reason: { kind: 'completed' } } } }];
+statusListener('s-r4', true);
+statusListener('s-r4', false);
+await tick();
+check('R4 已结清回合的重复边沿：不重复弹也不重复放音', notificationLog.created.length === 1 && audioLog.oscillators.length === 2, `${notificationLog.created.length} / ${audioLog.oscillators.length}`);
+fakeEventEntries = null;
+clearBorrowedBindings();
+
+// R5（事件驱动等待）：首次快照 unclosed → append turn/end{aborted} 不弹；
+//    新回合再 append turn/end{completed} → 弹，且每条停止只 1 次 using。
+resetNotificationLog();
+resetAudioLog();
+fakeEventEntries = [
+	{ type: 'event', event: { type: 'turn/end', seq: 1, time: 1, data: { turn: 4501, reason: { kind: 'completed' } } } },
+	{ type: 'event', event: { type: 'turn/start', seq: 2, time: 2, data: { turn: 4502 } } },
+];
+const usingBeforeR5 = usingCalls;
+const completedBeforeR5 = statsNow().completed;
+statusListener('s-r5', true);
+statusListener('s-r5', false); // 边沿 #1 → unclosed，订阅等待
+await tick();
+check('R5 首次快照 unclosed：先不弹', notificationLog.created.length === 0, String(notificationLog.created.length));
+appendFakeEvent({ type: 'turn/end', seq: 3, time: 3, data: { turn: 4502, reason: { kind: 'aborted' } } }); // 订阅收到 aborted
+await tick();
+check('R5 订阅收到 aborted：不弹窗、不放音', notificationLog.created.length === 0 && audioLog.oscillators.length === 0, `${notificationLog.created.length} / ${audioLog.oscillators.length}`);
+check('R5 第一条停止只 1 次 using', usingCalls - usingBeforeR5 === 1, String(usingCalls - usingBeforeR5));
+// 新回合：窗口里再放一个未闭合的 turn/start，停止边沿后用 append 落盘 completed。
+fakeEventEntries = [...fakeEventEntries, { type: 'event', event: { type: 'turn/start', seq: 4, time: 4, data: { turn: 4503 } } }];
+statusListener('s-r5', true);
+statusListener('s-r5', false); // 边沿 #2 → unclosed，订阅等待
+await tick();
+appendFakeEvent({ type: 'turn/end', seq: 5, time: 5, data: { turn: 4503, reason: { kind: 'completed' } } });
+await tick();
+check('R5 订阅收到 completed：弹一条完成', notificationLog.created.length === 1 && notificationLog.created[0]?.options?.body === 'R5 事件驱动', JSON.stringify(notificationLog.created.map((item) => item.options?.body)));
+check('R5 第二条停止也只 1 次 using（两条停止共 2 次）', usingCalls - usingBeforeR5 === 2, String(usingCalls - usingBeforeR5));
+check('R5 completed 只加一（aborted 那条不计）', statsNow().completed === completedBeforeR5 + 1, `${statsNow().completed} vs ${completedBeforeR5 + 1}`);
+fakeEventEntries = null;
+
+// R6：新增排障计数在 state().stats 可见（只增不删既有字段）。
+check('R6 排障状态暴露 suppressedUnclosed / lateCorrections', (() => {
+	const current = statsNow();
+	return typeof current.suppressedUnclosed === 'number' && typeof current.lateCorrections === 'number'
+		&& current.suppressedUnclosed >= 1 && current.lateCorrections >= 1;
+})(), JSON.stringify({ suppressedUnclosed: statsNow().suppressedUnclosed, lateCorrections: statsNow().lateCorrections }));
 
 // ---------------------------------------------------------------------------
 // 系统弹窗（Web Notification）：权限路径 + 不支持 + 竞态
@@ -1981,7 +2245,7 @@ await face.setNotify(true);
 check('权限被拒时开启开关也不再问浏览器', notificationLog.requested === 0 && face.permissionStore.getSnapshot() === 'denied', face.permissionStore.getSnapshot());
 resetAudioLog();
 completeOnce();
-flushTimers();
+await tick();
 check('权限被拒时不再发弹窗', notificationLog.created.length === 0, String(notificationLog.created.length));
 check('权限被拒时提示音照旧', audioLog.oscillators.length === 2, String(audioLog.oscillators.length));
 
@@ -1999,14 +2263,14 @@ check('权限待定时开启开关会申请一次', notificationLog.requested ==
 check('授权后权限状态跟进', face.permissionStore.getSnapshot() === 'granted', face.permissionStore.getSnapshot());
 resetNotificationLog();
 completeOnce();
-flushTimers();
+await tick();
 check('授权后任务完成恢复发弹窗', notificationLog.created.length === 1, String(notificationLog.created.length));
 
 // ③ 关掉开关：完成不再发。
 resetNotificationLog();
 await face.setNotify(false);
 completeOnce();
-flushTimers();
+await tick();
 check('权限链路③：关掉开关后完成不再发', notificationLog.created.length === 0 && face.notifyStore.getSnapshot() === false);
 await face.setNotify(true);
 FakeNotification.permission = 'granted';
@@ -2037,6 +2301,10 @@ resetNotificationLog();
 sectionNodes = renderSection();
 const permissionButton = sectionNodes.find((node) => node.type === 'button' && node.children?.[0] === '申请通知权限');
 check('权限待定且弹窗开着时，设置页给出「申请通知权限」按钮', permissionButton !== undefined, JSON.stringify(sectionNodes.filter((node) => node.type === 'button').map((node) => node.children?.[0])));
+// 提示文案不能假设「已经发出过申请」：这个状态也可能来自用户把站点权限重置回询问
+// （权限状态是现读后写进 store 的，不一定真在这次页面里发过请求）。
+check('权限待定提示如实（尚未授权，不假装已发出申请，F03）', sectionNodes.some((node) => node.children?.[0] === zh['notify.pending'])
+	&& !zh['notify.pending'].includes('已发出'), JSON.stringify(zh['notify.pending']));
 permissionButton.props.onClick();
 check('点「申请通知权限」即申请一次', notificationLog.requested === 1, String(notificationLog.requested));
 await tick();
@@ -2110,6 +2378,16 @@ languageButtons[1].props.onClick();
 check('点 English 即钉住（写回配置，且选中 English）', face.notifyLanguageStore.getSnapshot() === 'en'
 	&& kidsOf(languageGroupOf(renderSection())).filter((node) => node.type === 'button')[1]?.props['aria-pressed'] === true,
 	face.notifyLanguageStore.getSnapshot());
+// 点**已经选中**的那一档不能静默把 auto 钉住：否则界面语言之后变了却不跟随，
+// 而且界面上没有回到 auto 的入口（F06）。
+face.setNotifyLanguage('auto');
+activeLocale = 'zh-CN';
+notifyLocaleChange();
+const autoLanguageButtons = kidsOf(languageGroupOf(renderSection())).filter((node) => node.type === 'button');
+autoLanguageButtons[0].props.onClick();
+check('auto 下点已选中的语言档不改变设置（仍跟随界面）', face.notifyLanguageStore.getSnapshot() === 'auto', String(face.notifyLanguageStore.getSnapshot()));
+autoLanguageButtons[1].props.onClick();
+check('点另一档才钉住', face.notifyLanguageStore.getSnapshot() === 'en', String(face.notifyLanguageStore.getSnapshot()));
 // 回到 auto：界面语言切成英文后，选中档应当跟着变成 English。
 face.setNotifyLanguage('auto');
 activeLocale = 'en-US';
@@ -2249,7 +2527,7 @@ await tick();
 check('提示音关掉后不再排音', audioLog.oscillators.length === oscillatorsAfterPlay, String(audioLog.oscillators.length - oscillatorsAfterPlay));
 face.setSound(true);
 
-check('AudioContext 全局只建一个（首次提示音时惰性创建，之后复用）', audioLog.contexts === 1, String(audioLog.contexts));
+check('AudioContext 全局只建一个（装载即创建，之后复用）', audioLog.contexts === 1, String(audioLog.contexts));
 
 // 自动播放策略：context 被挂在 suspended 时，play 仍尝试 resume 且拒绝不外抛；
 // 用户的第一次点击 / 按键把 context 拉活，之后的完成提示音才响得出来。
@@ -2270,7 +2548,7 @@ firstCtx.resume = function grantedResume() {
 	return Promise.resolve();
 };
 fireWindow('pointerdown');
-check('用户第一次点击把挂起的 AudioContext 拉活', firstCtx.state === 'running' && audioLog.resumed === resumedBefore + 2, `${firstCtx.state} / resumed ${audioLog.resumed - resumedBefore} 次`);
+check('用户第一次点击把挂起的 AudioContext 拉活（一次手势只 resume 一次）', firstCtx.state === 'running' && audioLog.resumed === resumedBefore + 2, `${firstCtx.state} / resumed ${audioLog.resumed - resumedBefore} 次`);
 
 // 切走标签页 / 失焦期间排下的音压在挂起的时钟上：回到前台时 sync 顺手拉活，
 // 这些音立即续播，不会出现"过了很久才响"。
@@ -2523,6 +2801,15 @@ const toastsBeforeTeardown = windowStub.__dshTaskReminder.state().approvalToasts
 setPendingInteraction('s3', null);
 check('等待消散：未结清的审批通知被收掉（不留点了没用的按钮）', swClosed.length >= 1 && toastsBeforeTeardown.includes('approval:9'), JSON.stringify({ closed: swClosed, toasts: toastsBeforeTeardown }));
 
+// 会话被删除 / 归档（从 sessionStatus 快照里消失）：未结清的审批通知也要收掉。
+swShown.length = 0;
+swClosed.length = 0;
+setPendingInteraction('s3', { sessionId: 's3', kind: 'approval', key: 'approval:gone', answer: () => Promise.resolve() });
+const goneTag = String(swShown.at(-1)?.options?.tag);
+dropSessionFromStatus('s3');
+check('会话从快照消失：未结清的审批通知被收掉', swClosed.includes(goneTag)
+	&& !windowStub.__dshTaskReminder.state().approvalToasts.includes('approval:gone'), JSON.stringify({ closed: swClosed, tag: goneTag }));
+
 // 没有 answer 方法的审批（别的形状 / 老宿主）：退回普通无按钮通知
 resetNotificationLog();
 swShown.length = 0;
@@ -2548,6 +2835,20 @@ setPendingInteraction('s3', {
 check('审批正文：工具名 + displayReason 中文文案（不退回会话名「第三个会话」）', swShown.length === 1
 	&& swShown[0]?.options?.body === 'bash：允许本次操作使用 danger-full-access 权限：用户要求再弹一次审批', JSON.stringify(swShown[0]?.options?.body));
 setPendingInteraction('s3', null);
+
+// displayReason 的 zh 是空串：不能把它当「取到了」，按回退链取 en（F13）。
+resetNotificationLog();
+swShown.length = 0;
+face.setNotifyLanguage('zh');
+setPendingInteraction('s3', {
+	sessionId: 's3', kind: 'approval', key: 'approval:body-empty-zh', answer: () => Promise.resolve(),
+	toolName: 'bash',
+	reason: 'raw reason fallback',
+	displayReason: { en: 'English fallback reason', zh: '' },
+});
+check('displayReason 的 zh 为空串时退回 en（F13）', swShown.length === 1 && swShown[0]?.options?.body === 'bash：English fallback reason', JSON.stringify(swShown[0]?.options?.body));
+setPendingInteraction('s3', null);
+face.setNotifyLanguage('auto');
 
 // 通知语言钉英文：取 displayReason.en，分隔符用半角冒号。
 resetNotificationLog();
@@ -3002,6 +3303,13 @@ const recordBeforeLarge = storedRecord();
 face.setCustomSound(makeAudioFile('huge.wav', CUSTOM_SOUND_MAX_BYTES + 1));
 await settle();
 check('超过上限的文件被挡下、不写存储、不改元数据', customState().status === 'too-large' && storedRecord() === recordBeforeLarge && face.customMetaStore.getSnapshot()?.name === 'broken.ogg', JSON.stringify(customState()));
+// too-large 只报错会把「当前文件」盖掉：两行都要在（用户得知道现在用的还是哪个文件）。
+sectionNodes = renderSection();
+check('too-large 时说明同时给出「当前文件」与「文件太大」两段（F08）', (() => {
+	const texts = sectionTexts();
+	return texts.some((text) => typeof text === 'string' && text.includes('当前文件') && text.includes('broken.ogg'))
+		&& texts.some((text) => typeof text === 'string' && text.includes('文件太大'));
+})(), JSON.stringify(sectionTexts().filter((text) => typeof text === 'string' && (text.includes('broken.ogg') || text.includes('文件太大')))));
 
 // 写不进去（配额满 / 隐私模式）：状态如实写 store-failed，元数据不动。
 idbBacking.failPut = true;
@@ -3009,6 +3317,14 @@ face.setCustomSound(makeAudioFile('quota.mp3', 8 * 1024));
 await settle();
 idbBacking.failPut = false;
 check('本地存储写不进去时如实提示、不假装保存', customState().status === 'store-failed' && face.customMetaStore.getSnapshot()?.name === 'broken.ogg', JSON.stringify(customState()));
+
+// 打不开 IndexedDB（隐私模式 / 被站点设置挡住）：read 明确 reject，装载期 restore
+// 据此写 read-failed（这里用独立 store 验证失败分支本身；共享 store 已缓存过 DB 连接）。
+idbBacking.failOpen = true;
+const isolatedSoundStore = createCustomSoundStore();
+const openFailure = await isolatedSoundStore.read().then(() => 'resolved', () => 'rejected');
+idbBacking.failOpen = false;
+check('IndexedDB 打不开时 read 明确 reject（不崩、不吞异常）', openFailure === 'rejected', openFailure);
 
 // 浏览器没有 IndexedDB：如实提示不支持。
 const savedIndexedDb = windowStub.indexedDB;
@@ -3058,6 +3374,27 @@ sectionNodes = renderSection();
 check('点「清除」删掉文件并回落合成音效', storedRecord() === undefined && face.customMetaStore.getSnapshot() === null && face.soundChoiceStore.getSnapshot() === 0, JSON.stringify(customState()));
 check('没有文件时只显示「选择文件」，不显示「清除」', sectionNodes.some((node) => node.type === 'button' && node.children?.[0] === '选择文件') && !sectionNodes.some((node) => node.type === 'button' && node.children?.[0] === '清除'));
 check('没有文件时说明只留「选择本机音频文件…」', sectionNodes.some((node) => typeof node.children?.[0] === 'string' && node.children[0].startsWith('选择本机音频文件')));
+
+// 清除失败（IndexedDB delete 抛错）：不能假装成功 —— 元数据要留着、状态如实提示，
+// 否则设置页显示「已清除」、下次装载又从 IndexedDB 复活（F01）。
+face.setCustomSound(makeAudioFile('keep.mp3', 16 * 1024));
+await settle();
+idbBacking.failDelete = true;
+face.clearCustomSound();
+await settle();
+check('清除失败：状态如实写 clear-failed、文件与元数据都还在（F01）', customState().status === 'clear-failed'
+	&& storedRecord()?.name === 'keep.mp3' && face.customMetaStore.getSnapshot()?.name === 'keep.mp3', JSON.stringify({ state: customState(), stored: storedRecord()?.name, meta: face.customMetaStore.getSnapshot()?.name }));
+check('清除失败：仍用自定义档、内存里的音频也保留（F01）', face.soundChoiceStore.getSnapshot() === CUSTOM_SOUND_CHOICE && customState().decoded === true,
+	JSON.stringify({ choice: face.soundChoiceStore.getSnapshot(), state: customState() }));
+resetAudioLog();
+played = await playOnce();
+check('清除失败后完成边沿仍播自定义音效（F01）', audioLog.bufferSources.length === 1 && audioLog.oscillators.length === 0,
+	`${audioLog.bufferSources.length} / ${audioLog.oscillators.length}`);
+idbBacking.failDelete = false;
+face.clearCustomSound();
+await settle();
+check('恢复后再次清除：记录、元数据都清掉，音效档回落第一种', storedRecord() === undefined && face.customMetaStore.getSnapshot() === null
+	&& customState().status === 'idle' && face.soundChoiceStore.getSnapshot() === 0, JSON.stringify({ state: customState(), choice: face.soundChoiceStore.getSnapshot() }));
 
 /** 再造一次干净装载：证明装载期完全不碰音频硬件。 */
 const audioLog2 = { contexts: 0, oscillators: 0, gains: 0 };
@@ -3131,11 +3468,11 @@ check('认不出的版本按相等处理（宁可不说有新版）', compareVer
 check('isNewerVersion 只认更高的版本', isNewerVersion('1.6.1', '1.6.0') === true && isNewerVersion('1.6.0', '1.6.0') === false && isNewerVersion('1.5.5', '1.6.0') === false && isNewerVersion(undefined, '1.6.0') === false);
 check('更新初值：还没查、当前版本就是本份代码的版本、不持久化', UPDATE_IDLE.phase === 'idle' && UPDATE_IDLE.current === PLUGIN_VERSION && UPDATE_IDLE.latest === null && UPDATE_IDLE.error === null);
 
-const checkState = updateReducer(UPDATE_IDLE, { type: 'check-result', result: { ok: true, current: '1.5.5', latest: '1.6.0', registry: 'https://registry.npmjs.org/', local: null, updatable: true, error: null } });
+const checkState = updateReducer(UPDATE_IDLE, { type: 'check-result', result: { ok: true, current: '1.5.5', latest: '1.6.0', local: null, updatable: true, error: null } });
 const sameState = updateReducer(UPDATE_IDLE, { type: 'check-result', result: { ok: true, current: '1.6.0', latest: '1.6.0', updatable: true } });
 const reportedFailure = updateReducer(UPDATE_IDLE, { type: 'check-result', result: { ok: false, current: '1.6.0', latest: null, error: 'HTTP 500' } });
 const localState = updateReducer(UPDATE_IDLE, { type: 'check-result', result: { ok: true, current: '1.5.5', latest: '1.6.0', updatable: false, local: 'link:../dsh-task-reminder' } });
-check('检查出新版 → available（带源与能力）', checkState.phase === 'available' && checkState.latest === '1.6.0' && checkState.updatable === true && checkState.registry === 'https://registry.npmjs.org/', JSON.stringify(checkState));
+check('检查出新版 → available（带能力）', checkState.phase === 'available' && checkState.latest === '1.6.0' && checkState.updatable === true && !('registry' in checkState), JSON.stringify(checkState));
 check('同版 / 源上更旧 → latest', sameState.phase === 'latest' && updateReducer(UPDATE_IDLE, { type: 'check-result', result: { ok: true, current: '1.6.0', latest: '1.5.5' } }).phase === 'latest');
 check('宿主报错 → failed，原因原样留着', reportedFailure.phase === 'failed' && reportedFailure.error === 'HTTP 500');
 check('本地开发安装：查得到新版，但不给一键升级', localState.phase === 'available' && updatePresentation(localState).descKey === 'update.local' && updatePresentation(localState).action === 'check');
@@ -3190,7 +3527,7 @@ windowStub.location = { reload: () => { pageReloads += 1; } };
 windowStub.fetch = (url, options) => {
 	updateCalls.push({ url, options });
 	const payload = String(url).endsWith('update-check')
-		? { ok: true, current: '1.5.5', latest: '1.6.0', registry: 'https://registry.npmjs.org/', local: null, updatable: true, error: null }
+		? { ok: true, current: '1.5.5', latest: '1.6.0', local: null, updatable: true, error: null }
 		: { ok: true, current: '1.5.5', latest: '1.6.0', application: 'restart-required', error: null };
 	return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(payload) });
 };
@@ -3198,6 +3535,7 @@ await face.checkUpdate();
 check('检查更新：POST 到宿主路由，状态推到「有新版」', updateCalls[0]?.url === UPDATE_CHECK_ROUTE && updateCalls[0]?.options?.method === 'POST'
 	&& face.updateStore.getSnapshot().phase === 'available' && updatePresentation(face.updateStore.getSnapshot()).labelKey === 'update.apply',
 	JSON.stringify({ calls: updateCalls.map((call) => call.url), phase: face.updateStore.getSnapshot().phase }));
+check('更新请求挂了总超时信号（AbortSignal.timeout，F11）', updateCalls[0]?.options?.signal instanceof AbortSignal, String(updateCalls[0]?.options?.signal));
 await face.applyUpdate();
 check('一键更新：带目标版本，宿主答「重启生效」后状态为 done', updateCalls[1]?.url === UPDATE_APPLY_ROUTE
 	&& JSON.parse(updateCalls[1]?.options?.body ?? '{}').version === '1.6.0'
@@ -3211,6 +3549,23 @@ check('宿主路由不存在（404）如实报失败，不假装已是最新', f
 windowStub.fetch = () => Promise.reject(new Error('offline'));
 await face.checkUpdate();
 check('连不上宿主也如实报失败（不把没查到当成已最新）', face.updateStore.getSnapshot().phase === 'failed' && face.updateStore.getSnapshot().error.includes('offline'), face.updateStore.getSnapshot().error);
+// 200 但不是 JSON（前端 SPA 把 /api 吃掉）：说人话，不把 SyntaxError 甩给用户。
+windowStub.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.reject(new SyntaxError('Unexpected token <')) });
+await face.checkUpdate();
+check('200 但答复不是 JSON：折成可读说明（不假装已是最新）', face.updateStore.getSnapshot().phase === 'failed'
+	&& face.updateStore.getSnapshot().error.includes('没有返回 JSON'), face.updateStore.getSnapshot().error);
+// in-flight 守卫：已经有更新请求在途时（渲染层 disabled 之外）再点一次不再发请求。
+face.updateStore.set({ ...face.updateStore.getSnapshot(), phase: 'checking' });
+const callsBeforeBusy = updateCalls.length;
+await face.checkUpdate();
+check('检查已经在途时重复点击不再发第二个请求（F29）', updateCalls.length === callsBeforeBusy && face.updateStore.getSnapshot().phase === 'checking', JSON.stringify({ calls: updateCalls.length - callsBeforeBusy }));
+check('请求超时折成可读说明（DOMException / Error 两种形态，F11）', (() => {
+	const viaDom = diagnostics.updateErrorText(new DOMException('aborted due to timeout', 'TimeoutError'));
+	const viaError = diagnostics.updateErrorText(new Error('TimeoutError'));
+	return viaDom === '宿主没有及时答复（请求超时）' && viaError === '宿主没有及时答复（请求超时）'
+		&& diagnostics.updateErrorText(new Error('offline')).includes('offline');
+})());
+face.updateStore.set({ ...face.updateStore.getSnapshot(), phase: 'idle' });
 
 // ---------------------------------------------------------------------------
 // 回收：effects 逆序销毁
@@ -3219,9 +3574,16 @@ check('连不上宿主也如实报失败（不把没查到当成已最新）', f
 console.log('');
 console.log('回收');
 // 卸载守卫：把一次停止分类摁在途，再走真正的卸载路径（跑所有 ctx.effect 清理）。
-// 落地的那次分类已经属于一个死实例（热重载 / 停用 / 换新实例），不得再弹窗、再放音。
+// 落地的那次分类已经属于一个死实例（热重载 / 停用 / 换新实例），不得再弹窗、再放音；
+// 卸载 effect 还会取消在途 token（清 deadline、解开事件等待）。
 let unloadGateRelease;
-fakeUsingGate = new Promise((resolve) => { unloadGateRelease = resolve; });
+const unloadGate = new Promise((resolve) => { unloadGateRelease = resolve; });
+fakeUsingGates.push(unloadGate);
+// 卸载前挂一条带按钮的审批通知：卸载时应当按 tag 收掉，不在通知中心里留死按钮。
+swShown.length = 0;
+swClosed.length = 0;
+setPendingInteraction('s3', { sessionId: 's3', kind: 'approval', key: 'approval:unload', answer: () => Promise.resolve() });
+const unloadApprovalTag = String(swShown.at(-1)?.options?.tag);
 resetNotificationLog();
 resetAudioLog();
 statusListener('s2', true);
@@ -3233,15 +3595,22 @@ await tick();
 await tick();
 check('卸载后落地的分类不再弹窗（死实例上不提醒）', notificationLog.created.length === 0, String(notificationLog.created.length));
 check('卸载后落地的分类不再放音', audioLog.oscillators.length === 0, String(audioLog.oscillators.length));
-fakeUsingGate = null;
+check('卸载时按 tag 收掉未结清的审批通知（F-06）', swClosed.includes(unloadApprovalTag), JSON.stringify({ closed: swClosed, tag: unloadApprovalTag }));
 check('排障钩子被移除', windowStub.__dshTaskReminder === undefined);
 check('事件订阅被退订', listeners.every((entry) => entry.disposed === true));
 check('会话列表订阅被退订', listListeners.size === 0, String(listListeners.size));
 check('焦点/可见性/手势监听被退订', [...domListeners.document.values()].every((set) => set.size === 0) && [...domListeners.window.values()].every((set) => set.size === 0), JSON.stringify([...domListeners.window.entries()].map(([type, set]) => [type, set.size])));
 check('回收时关掉了 AudioContext', audioLog.closed === 1, String(audioLog.closed));
-check('回收时对账/兜底定时器被取消', timerEntries.every((entry) => entry.cancelled || entry.fired), JSON.stringify(timerEntries.filter((entry) => !entry.cancelled && !entry.fired)));
+check('回收时分类 deadline / 对账定时器都被取消', timerEntries.every((entry) => entry.cancelled || entry.fired), JSON.stringify(timerEntries.filter((entry) => !entry.cancelled && !entry.fired)));
 check('回收时清掉页面级点击转发表里的处理函数', windowStub.__dshTaskReminderClickRouter !== undefined
 	&& windowStub.__dshTaskReminderClickRouter.handler === null, JSON.stringify(windowStub.__dshTaskReminderClickRouter));
+// 卸载后迟到的播放路径（例如自定义音效解码刚回来 / 设置页的旧 handler 又被调）：
+// chime 必须已 closed，不再新建 AudioContext、不再排音（F-05）。
+const contextsBeforeLatePlay = audioLog.contexts;
+face.setSoundChoice(1);
+check('卸载后不再新建 AudioContext、不再排音（F-05）', audioLog.contexts === contextsBeforeLatePlay
+	&& audioLog.oscillators.length === 0 && audioLog.closed === 1,
+	JSON.stringify({ contexts: audioLog.contexts, oscillators: audioLog.oscillators.length, closed: audioLog.closed }));
 
 console.log('');
 if (failures.length > 0) {
