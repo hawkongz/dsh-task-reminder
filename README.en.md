@@ -190,7 +190,7 @@ To install, see the **Desktop** part of [Quick start](#quick-start-in-30-seconds
 
 **I clicked the toast but the desktop window did not come back.** Raising the window is host-half behaviour, and the host reads plugins only at process start — a running app still holds the old code. Check that the profile has 1.6.4 or newer (1.4.4 is the minimum version that has this route), then quit the app completely and open it again. A missing route is skipped silently: the session still opens, only the window is not raised.
 
-**The desktop app reports `profile "desktop" is managed exclusively by the Electron application` when I run `dsh plugin --profile desktop add ...`.** The desktop app installs from its in-app plugin UI only; that command never works from a terminal (older versions of this README printed it by mistake). Follow the **Desktop** part above instead.
+**The desktop app reports `profile "desktop" is managed exclusively by the Electron application` when I run `dsh plugin --profile desktop add ...`.** That command does not work on the desktop app — install from inside the app, see the **Desktop** part above.
 
 **A freshly published version will not install (you end up with the previous one).** pnpm 11 enables a one-day cooldown (`minimumReleaseAge` is 1440 minutes) by default, so anything younger cannot be resolved. Pin the version and it installs: `dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.4`, or set `minimumReleaseAge: 0` in the profile's `pnpm-workspace.yaml`, or wait a full day.
 

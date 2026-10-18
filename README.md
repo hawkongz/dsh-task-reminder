@@ -190,7 +190,7 @@ Agent 卡住等你的时候，通知标题会按它等的是什么分开：
 
 **点了通知，桌面端窗口没回来。** 「拉窗口回前台」是宿主半侧的行为，而宿主只在进程启动时读插件——还在跑的应用拿的是旧代码。确认 profile 里是 1.6.4 或更新（有这条路由的最低版本是 1.4.4），然后彻底退出应用再打开。路由不存在时是静默跳过：会话照样打开，只是窗口不会被拉起。
 
-**桌面端跑 `dsh plugin --profile desktop add ...` 报 `profile "desktop" is managed exclusively by the Electron application`？** 桌面端只能用应用内的插件界面装，这条命令在终端里跑不通（旧版 README 写错过）。按上面「桌面端」一段装即可。
+**桌面端跑 `dsh plugin --profile desktop add ...` 报 `profile "desktop" is managed exclusively by the Electron application`？** 这条命令在桌面端跑不通，只能在应用里装，见上面「桌面端」一段。
 
 **刚发布的版本装不上（装完还是上一版）。** pnpm 11 默认开着「一天冷静期」（`minimumReleaseAge` 为 1440 分钟），比它更年轻的版本解析不到。钉住版本就能装：`dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.4`，或者在 profile 的 `pnpm-workspace.yaml` 里设 `minimumReleaseAge: 0`，再或者等满一天。
 
