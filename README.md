@@ -8,6 +8,7 @@
   [![npm](https://img.shields.io/npm/v/@hawkongz/dsh-task-reminder)](https://www.npmjs.com/package/@hawkongz/dsh-task-reminder)
   [![下载量](https://img.shields.io/npm/dt/@hawkongz/dsh-task-reminder?label=%E4%B8%8B%E8%BD%BD%E9%87%8F)](https://www.npmjs.com/package/@hawkongz/dsh-task-reminder)
   [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com/p/hawkongz/dsh-task-reminder/)
+  [![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
 
   <p><strong>语言：</strong> 简体中文 | <a href="README.en.md">English</a></p>
 </div>
@@ -324,6 +325,4 @@ GitHub 标签：[`dsh`](https://github.com/topics/dsh) [`deepseek-harness`](http
 ## 许可证
 
 基于 [MIT](LICENSE) 协议开源。
-
-[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
 
