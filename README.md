@@ -69,23 +69,15 @@ dsh web
 
 随便找个会话跑个任务，等着收提醒就行：默认「任何情况都弹」，哪怕你正盯着对话窗口，通知也会出现。
 
-**桌面端**（DSH Desktop，Electron）不能用命令行装。桌面端的 profile 归应用自己管，`dsh plugin --profile desktop ...` 会被直接拒绝：
-
-```text
-error: profile "desktop" is managed exclusively by the Electron application
-```
-
-在应用里装：侧栏 **插件** → **添加插件**，把 `@hawkongz/dsh-task-reminder` 填进「包名或地址」框，点 **安装**；装完彻底退出并重开应用（桌面端没有硬刷新那一步，但宿主同样只在进程启动时读插件）。
+**桌面端**（DSH Desktop）：侧栏 **插件** → **添加插件**，把 `@hawkongz/dsh-task-reminder` 填进「包名或地址」，点 **安装**，然后彻底退出并重开应用。
 
 ![桌面端「添加插件」对话框](https://raw.githubusercontent.com/hawkongz/dsh-task-reminder/main/docs/images/desktop-add-plugin.png)
 
-<sub>桌面端侧栏 → 插件 → 添加插件：包名就是 README 里 `dsh plugin add` 后面那一段。</sub>
+<sub>侧栏 → 插件 → 添加插件，包名照抄。</sub>
 
-装了 **插件市场**（`dshmarket`）的话，也可以直接在市场里搜 `dsh-task-reminder` 点安装——两条入口装进的是同一个 desktop profile。
+装了 **插件市场**（`dshmarket`）也可以直接在市场里搜 `dsh-task-reminder` 安装，装完同样要重启应用。
 
 ![在插件市场里搜索 dsh-task-reminder](https://raw.githubusercontent.com/hawkongz/dsh-task-reminder/main/docs/images/desktop-plugin-market.png)
-
-<sub>插件市场（`dshmarket`）里搜 `dsh-task-reminder`；装完同样要重启应用。</sub>
 
 ## 你会看到什么
 
@@ -171,7 +163,7 @@ Agent 卡住等你的时候，通知标题会按它等的是什么分开：
 
 页面里的 `window.focus()` 对已经最小化、或者被收进托盘的窗口无效，所以点通知时页面会请宿主半侧代为触发一次应用自身的「唤起窗口」，把窗口 restore 回前台并聚焦。抢前台时它会**确认窗口已经在前台就立刻收手**，不会反复抢：成功的那次点击最多打扰 0.7 秒左右，而不是在几秒里一遍遍把你从别的应用里拽回来；窗口本来就在前台时，它连抢都不抢。
 
-桌面端不能用命令行装（`dsh plugin --profile desktop ...` 会被应用拒绝），要在应用里侧栏 **插件** → **添加插件** 填包名安装，装完彻底退出并重开应用——完整步骤和截图见 [30 秒上手](#30-秒上手) 里的「桌面端」一段。
+装法见 [30 秒上手](#30-秒上手) 的「桌面端」一段：应用内安装，装完彻底退出并重开。
 
 ## 常见问题
 
@@ -198,7 +190,7 @@ Agent 卡住等你的时候，通知标题会按它等的是什么分开：
 
 **点了通知，桌面端窗口没回来。** 「拉窗口回前台」是宿主半侧的行为，而宿主只在进程启动时读插件——还在跑的应用拿的是旧代码。确认 profile 里是 1.6.4 或更新（有这条路由的最低版本是 1.4.4），然后彻底退出应用再打开。路由不存在时是静默跳过：会话照样打开，只是窗口不会被拉起。
 
-**桌面端跑 `dsh plugin --profile desktop add ...` 报 `profile "desktop" is managed exclusively by the Electron application`？** 这不是装错了，是这条路本来就不通：`desktop` 是应用保留的 profile，命令行（包括 `dsh plugin`）无权写它，只有应用自己的进程可以。桌面端请在应用里侧栏 **插件** → **添加插件** 填包名安装，或装个插件市场搜名字装（见 [30 秒上手](#30-秒上手) 里的「桌面端」一段）。旧版 README 写过这条命令，是文档的错，已在 1.6.4 之后的文档里改掉。
+**桌面端跑 `dsh plugin --profile desktop add ...` 报 `profile "desktop" is managed exclusively by the Electron application`？** 桌面端只能用应用内的插件界面装，这条命令在终端里跑不通（旧版 README 写错过）。按上面「桌面端」一段装即可。
 
 **刚发布的版本装不上（装完还是上一版）。** pnpm 11 默认开着「一天冷静期」（`minimumReleaseAge` 为 1440 分钟），比它更年轻的版本解析不到。钉住版本就能装：`dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.4`，或者在 profile 的 `pnpm-workspace.yaml` 里设 `minimumReleaseAge: 0`，再或者等满一天。
 
@@ -268,11 +260,7 @@ __dshTaskReminder.report()
 - Node.js 20 或更高（跑自检要用）；
 - 支持 Web Audio、最好也支持 Notification API 的浏览器。
 
-桌面端不需要 pnpm、也不需要 Node.js：它由应用自己的插件管理界面安装（见 [30 秒上手](#30-秒上手) 里的「桌面端」一段），下面所有 `dsh plugin --profile web ...` 命令都只针对 `web` profile。
-
-### 桌面端为什么不能用 `dsh plugin`
-
-`desktop` 是应用保留的 profile：`dsh` 命令行在解析参数时会先拦下它（`profile "desktop" is managed exclusively by the Electron application`），连 `dsh plugin` 子命令也不例外——只有应用自己启动的那个进程有权写它。所以桌面端装、升级、卸载都走应用内界面：侧栏 **插件** 页面（或插件市场）负责安装与卸载，设置页里的「检查更新」负责升级。
+桌面端不需要 pnpm、也不需要 Node.js，装法见 [30 秒上手](#30-秒上手) 的「桌面端」一段；下面所有 `dsh plugin --profile web ...` 命令都只针对 `web` profile。
 
 ### 安装命令做了什么
 
@@ -316,7 +304,7 @@ dsh plugin --profile web remove @hawkongz/dsh-task-reminder
 
 `remove` 会一并卸载并把这一行从插件清单里整理掉，之后重启 `dsh web` 让组合配置生效。
 
-桌面端没有这条命令可用，卸载走界面：侧栏 **插件** → 在「已安装插件」里找到它 → **卸载**（插件市场里也有同样的卸载入口），然后彻底退出应用再打开。
+桌面端走界面：侧栏 **插件** → 「已安装插件」里找到它 → **卸载**，然后彻底退出应用再打开。
 
 ### 包里有什么
 

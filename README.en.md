@@ -69,23 +69,15 @@ Open **Settings → Task reminder** — if the page is there, the plugin is live
 
 Then run a task in any session and wait for the reminder: the default **Always** mode toasts even while you are watching the conversation.
 
-**Desktop** (DSH Desktop, the Electron app) cannot be installed from a terminal. The desktop profile belongs to the app, so `dsh plugin --profile desktop ...` is refused outright:
-
-```text
-error: profile "desktop" is managed exclusively by the Electron application
-```
-
-Install it inside the app: sidebar **Plugins** → **Add plugin**, put `@hawkongz/dsh-task-reminder` in the package field, click **Install**; then quit the app completely and open it again (there is no hard-refresh step on the desktop, but the host still reads plugins only at process start).
+**Desktop** (DSH Desktop): sidebar **Plugins** → **Add plugin**, put `@hawkongz/dsh-task-reminder` in the package field, click **Install**, then quit the app completely and open it again.
 
 ![The desktop "Add plugin" dialog](https://raw.githubusercontent.com/hawkongz/dsh-task-reminder/main/docs/images/desktop-add-plugin.png)
 
-<sub>Desktop sidebar → Plugins → Add plugin: the package name is the part after `dsh plugin add` in the README.</sub>
+<sub>Sidebar → Plugins → Add plugin; copy the package name as is.</sub>
 
-If you have the **plugin market** (`dshmarket`) installed, you can also search for `dsh-task-reminder` there and install it in one click — both routes install into the same desktop profile.
+With the **plugin market** (`dshmarket`) installed you can also search for `dsh-task-reminder` there and install it; restart the app afterwards either way.
 
 ![Searching for dsh-task-reminder in the plugin market](https://raw.githubusercontent.com/hawkongz/dsh-task-reminder/main/docs/images/desktop-plugin-market.png)
-
-<sub>The plugin market (`dshmarket`) with `dsh-task-reminder` in the search box; restart the app after installing.</sub>
 
 ## What you will see
 
@@ -171,7 +163,7 @@ Reminders behave exactly as they do in the browser; the desktop app adds one thi
 
 `window.focus()` in the page does nothing for a window that is minimized or hidden in the tray, so on a toast click the page asks the host half to trigger the app's own window activation once, restoring it to the foreground and focusing it. When raising the window it **stops the moment it confirms the window is already in the foreground** instead of fighting for it over and over: a successful click costs at most about 0.7 seconds of attempts rather than pulling you back out of another app again and again over several seconds; if the window is already in front, it does not even try.
 
-The desktop app cannot be installed from a terminal (`dsh plugin --profile desktop ...` is refused by the app); install it in the app via sidebar **Plugins** → **Add plugin**, then quit the app completely and open it again — the full steps and screenshots are in the **Desktop** part of [Quick start](#quick-start-in-30-seconds).
+To install, see the **Desktop** part of [Quick start](#quick-start-in-30-seconds): install inside the app, then quit it completely and open it again.
 
 ## FAQ
 
@@ -198,7 +190,7 @@ The desktop app cannot be installed from a terminal (`dsh plugin --profile deskt
 
 **I clicked the toast but the desktop window did not come back.** Raising the window is host-half behaviour, and the host reads plugins only at process start — a running app still holds the old code. Check that the profile has 1.6.4 or newer (1.4.4 is the minimum version that has this route), then quit the app completely and open it again. A missing route is skipped silently: the session still opens, only the window is not raised.
 
-**The desktop app reports `profile "desktop" is managed exclusively by the Electron application` when I run `dsh plugin --profile desktop add ...`.** That is not a misconfiguration — the route does not exist. `desktop` is a profile the app reserves, so the command line (including `dsh plugin`) may not write to it; only the app's own process can. On the desktop app, install from sidebar **Plugins** → **Add plugin** with the package name, or install the plugin market and search for it (see the **Desktop** part of [Quick start](#quick-start-in-30-seconds)). Older versions of this README printed that command; it was a documentation error, corrected in the docs after 1.6.4.
+**The desktop app reports `profile "desktop" is managed exclusively by the Electron application` when I run `dsh plugin --profile desktop add ...`.** The desktop app installs from its in-app plugin UI only; that command never works from a terminal (older versions of this README printed it by mistake). Follow the **Desktop** part above instead.
 
 **A freshly published version will not install (you end up with the previous one).** pnpm 11 enables a one-day cooldown (`minimumReleaseAge` is 1440 minutes) by default, so anything younger cannot be resolved. Pin the version and it installs: `dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.4`, or set `minimumReleaseAge: 0` in the profile's `pnpm-workspace.yaml`, or wait a full day.
 
@@ -272,11 +264,7 @@ __dshTaskReminder.report()
 - Node.js 20 or newer (needed to run the self-check);
 - A browser that supports Web Audio and, preferably, the Notification API.
 
-The desktop app needs neither pnpm nor Node.js: it installs through the app's own plugin manager (see the **Desktop** part of [Quick start](#quick-start-in-30-seconds)), and every `dsh plugin --profile web ...` command below applies to the `web` profile only.
-
-### Why the desktop app refuses `dsh plugin`
-
-`desktop` is a profile the app reserves: the `dsh` command line rejects it while parsing arguments (`profile "desktop" is managed exclusively by the Electron application`), `dsh plugin` included — only the process the app itself starts may write to it. So on the desktop app, install and uninstall go through the in-app UI (the sidebar **Plugins** page, or the plugin market), and upgrades go through **Check for updates** on the settings page.
+The desktop app needs neither pnpm nor Node.js — see the **Desktop** part of [Quick start](#quick-start-in-30-seconds); every `dsh plugin --profile web ...` command below applies to the `web` profile only.
 
 ### What the install command does
 
@@ -320,7 +308,7 @@ dsh plugin --profile web remove @hawkongz/dsh-task-reminder
 
 `remove` uninstalls the package and tidies that line out of the plugin list; then restart `dsh web` so the composed config takes effect.
 
-There is no such command on the desktop app — uninstall from the UI: sidebar **Plugins** → find it under **Installed plugins** → **Uninstall** (the plugin market offers the same action), then quit the app completely and open it again.
+On the desktop app: sidebar **Plugins** → find it under **Installed plugins** → **Uninstall**, then quit the app completely and open it again.
 
 ### What is in the package
 
