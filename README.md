@@ -7,6 +7,7 @@
   [![Stars](https://img.shields.io/github/stars/hawkongz/dsh-task-reminder)](https://github.com/hawkongz/dsh-task-reminder/stargazers)
   [![npm](https://img.shields.io/npm/v/@hawkongz/dsh-task-reminder)](https://www.npmjs.com/package/@hawkongz/dsh-task-reminder)
   [![下载量](https://img.shields.io/npm/dt/@hawkongz/dsh-task-reminder?label=%E4%B8%8B%E8%BD%BD%E9%87%8F)](https://www.npmjs.com/package/@hawkongz/dsh-task-reminder)
+  [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com/p/hawkongz/dsh-task-reminder/)
 
   <p><strong>语言：</strong> 简体中文 | <a href="README.en.md">English</a></p>
 </div>
@@ -40,7 +41,7 @@ Agent 在 DeepSeek Harness 里跑一个回合常常要好几分钟。这期间�
 
 ## 30 秒上手
 
-> **需要什么：** 跑着 `web` profile 的 DeepSeek Harness（`dsh web`）、`PATH` 上有 pnpm（`dsh plugin` 会把参数转给它）、一个能硬刷新的浏览器。
+> **需要什么：** 跑着 `web` profile 的 DeepSeek Harness（`dsh web`）、`PATH` 上有 pnpm（`dsh plugin` 会把参数转给它）、一个能硬刷新的浏览器。桌面端不走命令行、也不需要 pnpm——见下面「桌面端」一段。
 
 **第一步：装**
 
@@ -68,11 +69,23 @@ dsh web
 
 随便找个会话跑个任务，等着收提醒就行：默认「任何情况都弹」，哪怕你正盯着对话窗口，通知也会出现。
 
-**桌面端**（DSH Desktop，Electron）把 `web` 换成 `desktop`，装完彻底退出并重开应用（桌面端没有硬刷新那一步）：
+**桌面端**（DSH Desktop，Electron）不能用命令行装。桌面端的 profile 归应用自己管，`dsh plugin --profile desktop ...` 会被直接拒绝：
 
-```powershell
-dsh plugin --profile desktop add @hawkongz/dsh-task-reminder
+```text
+error: profile "desktop" is managed exclusively by the Electron application
 ```
+
+在应用里装：侧栏 **插件** → **添加插件**，把 `@hawkongz/dsh-task-reminder` 填进「包名或地址」框，点 **安装**；装完彻底退出并重开应用（桌面端没有硬刷新那一步，但宿主同样只在进程启动时读插件）。
+
+![桌面端「添加插件」对话框](https://raw.githubusercontent.com/hawkongz/dsh-task-reminder/main/docs/images/desktop-add-plugin.png)
+
+<sub>桌面端侧栏 → 插件 → 添加插件：包名就是 README 里 `dsh plugin add` 后面那一段。</sub>
+
+装了 **插件市场**（`dshmarket`）的话，也可以直接在市场里搜 `dsh-task-reminder` 点安装——两条入口装进的是同一个 desktop profile。
+
+![在插件市场里搜索 dsh-task-reminder](https://raw.githubusercontent.com/hawkongz/dsh-task-reminder/main/docs/images/desktop-plugin-market.png)
+
+<sub>插件市场（`dshmarket`）里搜 `dsh-task-reminder`；装完同样要重启应用。</sub>
 
 ## 你会看到什么
 
@@ -158,7 +171,7 @@ Agent 卡住等你的时候，通知标题会按它等的是什么分开：
 
 页面里的 `window.focus()` 对已经最小化、或者被收进托盘的窗口无效，所以点通知时页面会请宿主半侧代为触发一次应用自身的「唤起窗口」，把窗口 restore 回前台并聚焦。抢前台时它会**确认窗口已经在前台就立刻收手**，不会反复抢：成功的那次点击最多打扰 0.7 秒左右，而不是在几秒里一遍遍把你从别的应用里拽回来；窗口本来就在前台时，它连抢都不抢。
 
-安装命令见 [30 秒上手](#30-秒上手) 里的 `--profile desktop` 一行。
+桌面端不能用命令行装（`dsh plugin --profile desktop ...` 会被应用拒绝），要在应用里侧栏 **插件** → **添加插件** 填包名安装，装完彻底退出并重开应用——完整步骤和截图见 [30 秒上手](#30-秒上手) 里的「桌面端」一段。
 
 ## 常见问题
 
@@ -185,11 +198,13 @@ Agent 卡住等你的时候，通知标题会按它等的是什么分开：
 
 **点了通知，桌面端窗口没回来。** 「拉窗口回前台」是宿主半侧的行为，而宿主只在进程启动时读插件——还在跑的应用拿的是旧代码。确认 profile 里是 1.6.4 或更新（有这条路由的最低版本是 1.4.4），然后彻底退出应用再打开。路由不存在时是静默跳过：会话照样打开，只是窗口不会被拉起。
 
+**桌面端跑 `dsh plugin --profile desktop add ...` 报 `profile "desktop" is managed exclusively by the Electron application`？** 这不是装错了，是这条路本来就不通：`desktop` 是应用保留的 profile，命令行（包括 `dsh plugin`）无权写它，只有应用自己的进程可以。桌面端请在应用里侧栏 **插件** → **添加插件** 填包名安装，或装个插件市场搜名字装（见 [30 秒上手](#30-秒上手) 里的「桌面端」一段）。旧版 README 写过这条命令，是文档的错，已在 1.6.4 之后的文档里改掉。
+
 **刚发布的版本装不上（装完还是上一版）。** pnpm 11 默认开着「一天冷静期」（`minimumReleaseAge` 为 1440 分钟），比它更年轻的版本解析不到。钉住版本就能装：`dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.4`，或者在 profile 的 `pnpm-workspace.yaml` 里设 `minimumReleaseAge: 0`，再或者等满一天。
 
 **改了代码没生效。** 宿主只在进程启动时读插件，浏览器又会缓存旧文件：重启 `dsh web`，再硬刷新（`Ctrl + F5`）；桌面端彻底退出并重开应用。
 
-**设置页不见了。** 重启 + 硬刷新；还是没有，就把安装命令原样再跑一遍：`dsh plugin --profile web add @hawkongz/dsh-task-reminder`。
+**设置页不见了。** 浏览器端：重启 + 硬刷新；还是没有，就把安装命令原样再跑一遍 `dsh plugin --profile web add @hawkongz/dsh-task-reminder`。桌面端：彻底退出应用再打开；还是没有，就去侧栏 **插件** 页看它在不在「已安装插件」里，不在就重新添加一次，在就把它卸载再装一遍。
 
 ## 进阶
 
@@ -253,6 +268,12 @@ __dshTaskReminder.report()
 - Node.js 20 或更高（跑自检要用）；
 - 支持 Web Audio、最好也支持 Notification API 的浏览器。
 
+桌面端不需要 pnpm、也不需要 Node.js：它由应用自己的插件管理界面安装（见 [30 秒上手](#30-秒上手) 里的「桌面端」一段），下面所有 `dsh plugin --profile web ...` 命令都只针对 `web` profile。
+
+### 桌面端为什么不能用 `dsh plugin`
+
+`desktop` 是应用保留的 profile：`dsh` 命令行在解析参数时会先拦下它（`profile "desktop" is managed exclusively by the Electron application`），连 `dsh plugin` 子命令也不例外——只有应用自己启动的那个进程有权写它。所以桌面端装、升级、卸载都走应用内界面：侧栏 **插件** 页面（或插件市场）负责安装与卸载，设置页里的「检查更新」负责升级。
+
 ### 安装命令做了什么
 
 一条命令同时做两件事：把包装进 profile 目录，并把 `@hawkongz/dsh-task-reminder` 追加进 profile 的插件清单（`dsh.profile.bundles`），随后加载器应用包自带的 bundle 行——不需要手动登记。本包不带构建脚本，pnpm 不会拦安装。
@@ -295,6 +316,8 @@ dsh plugin --profile web remove @hawkongz/dsh-task-reminder
 
 `remove` 会一并卸载并把这一行从插件清单里整理掉，之后重启 `dsh web` 让组合配置生效。
 
+桌面端没有这条命令可用，卸载走界面：侧栏 **插件** → 在「已安装插件」里找到它 → **卸载**（插件市场里也有同样的卸载入口），然后彻底退出应用再打开。
+
 ### 包里有什么
 
 `index.js`（宿主半侧）、`client.js`（浏览器半侧）、`cordis.patch.yml`（插件行）、自检脚本 `test/`，以及文档。
@@ -306,9 +329,13 @@ dsh plugin --profile web remove @hawkongz/dsh-task-reminder
 - 参与贡献、本地开发与自检：[CONTRIBUTING.md](CONTRIBUTING.md)
 - 安全问题：[SECURITY.md](SECURITY.md)
 - 许可：[LICENSE](LICENSE)
+- 收录于社区精选列表 Awesome DSH Plugin：[hawkongz/dsh-task-reminder](https://awesome-dsh-plugin.com/p/hawkongz/dsh-task-reminder/)（列表源仓库 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)，条目文件 `data/plugins/hawkongz__dsh-task-reminder.yml`）
 
 GitHub 标签：[`dsh`](https://github.com/topics/dsh) [`deepseek-harness`](https://github.com/topics/deepseek-harness) [`cordis`](https://github.com/topics/cordis) [`cordis-plugin`](https://github.com/topics/cordis-plugin) [`web-ui`](https://github.com/topics/web-ui) [`notification`](https://github.com/topics/notification) [`reminder`](https://github.com/topics/reminder) [`web-audio`](https://github.com/topics/web-audio)
 
 ## 许可证
 
 基于 [MIT](LICENSE) 协议开源。
+
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
+

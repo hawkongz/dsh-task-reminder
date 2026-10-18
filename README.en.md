@@ -7,6 +7,7 @@
   [![Stars](https://img.shields.io/github/stars/hawkongz/dsh-task-reminder)](https://github.com/hawkongz/dsh-task-reminder/stargazers)
   [![npm](https://img.shields.io/npm/v/@hawkongz/dsh-task-reminder)](https://www.npmjs.com/package/@hawkongz/dsh-task-reminder)
   [![npm downloads](https://img.shields.io/npm/dt/@hawkongz/dsh-task-reminder)](https://www.npmjs.com/package/@hawkongz/dsh-task-reminder)
+  [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com/p/hawkongz/dsh-task-reminder/)
 
   <p><strong>Language:</strong> <a href="README.md">简体中文</a> | English</p>
 </div>
@@ -40,7 +41,7 @@ Zero runtime dependencies: the reminder logic runs entirely on the browser side,
 
 ## Quick start in 30 seconds
 
-> **What you need:** DeepSeek Harness running with the `web` profile (`dsh web`), pnpm on your `PATH` (the `dsh plugin` command forwards to it), and a browser you can hard-refresh.
+> **What you need:** DeepSeek Harness running with the `web` profile (`dsh web`), pnpm on your `PATH` (the `dsh plugin` command forwards to it), and a browser you can hard-refresh. The desktop app takes neither a terminal nor pnpm — see **Desktop** below.
 
 **Step 1 — Install**
 
@@ -68,11 +69,23 @@ Open **Settings → Task reminder** — if the page is there, the plugin is live
 
 Then run a task in any session and wait for the reminder: the default **Always** mode toasts even while you are watching the conversation.
 
-**Desktop** (DSH Desktop, the Electron app) swaps `web` for `desktop`; quit the app completely and open it again after installing (there is no hard-refresh step on the desktop):
+**Desktop** (DSH Desktop, the Electron app) cannot be installed from a terminal. The desktop profile belongs to the app, so `dsh plugin --profile desktop ...` is refused outright:
 
-```powershell
-dsh plugin --profile desktop add @hawkongz/dsh-task-reminder
+```text
+error: profile "desktop" is managed exclusively by the Electron application
 ```
+
+Install it inside the app: sidebar **Plugins** → **Add plugin**, put `@hawkongz/dsh-task-reminder` in the package field, click **Install**; then quit the app completely and open it again (there is no hard-refresh step on the desktop, but the host still reads plugins only at process start).
+
+![The desktop "Add plugin" dialog](https://raw.githubusercontent.com/hawkongz/dsh-task-reminder/main/docs/images/desktop-add-plugin.png)
+
+<sub>Desktop sidebar → Plugins → Add plugin: the package name is the part after `dsh plugin add` in the README.</sub>
+
+If you have the **plugin market** (`dshmarket`) installed, you can also search for `dsh-task-reminder` there and install it in one click — both routes install into the same desktop profile.
+
+![Searching for dsh-task-reminder in the plugin market](https://raw.githubusercontent.com/hawkongz/dsh-task-reminder/main/docs/images/desktop-plugin-market.png)
+
+<sub>The plugin market (`dshmarket`) with `dsh-task-reminder` in the search box; restart the app after installing.</sub>
 
 ## What you will see
 
@@ -158,7 +171,7 @@ Reminders behave exactly as they do in the browser; the desktop app adds one thi
 
 `window.focus()` in the page does nothing for a window that is minimized or hidden in the tray, so on a toast click the page asks the host half to trigger the app's own window activation once, restoring it to the foreground and focusing it. When raising the window it **stops the moment it confirms the window is already in the foreground** instead of fighting for it over and over: a successful click costs at most about 0.7 seconds of attempts rather than pulling you back out of another app again and again over several seconds; if the window is already in front, it does not even try.
 
-See the `--profile desktop` line in [Quick start](#quick-start-in-30-seconds) for the install command.
+The desktop app cannot be installed from a terminal (`dsh plugin --profile desktop ...` is refused by the app); install it in the app via sidebar **Plugins** → **Add plugin**, then quit the app completely and open it again — the full steps and screenshots are in the **Desktop** part of [Quick start](#quick-start-in-30-seconds).
 
 ## FAQ
 
@@ -185,11 +198,13 @@ See the `--profile desktop` line in [Quick start](#quick-start-in-30-seconds) fo
 
 **I clicked the toast but the desktop window did not come back.** Raising the window is host-half behaviour, and the host reads plugins only at process start — a running app still holds the old code. Check that the profile has 1.6.4 or newer (1.4.4 is the minimum version that has this route), then quit the app completely and open it again. A missing route is skipped silently: the session still opens, only the window is not raised.
 
+**The desktop app reports `profile "desktop" is managed exclusively by the Electron application` when I run `dsh plugin --profile desktop add ...`.** That is not a misconfiguration — the route does not exist. `desktop` is a profile the app reserves, so the command line (including `dsh plugin`) may not write to it; only the app's own process can. On the desktop app, install from sidebar **Plugins** → **Add plugin** with the package name, or install the plugin market and search for it (see the **Desktop** part of [Quick start](#quick-start-in-30-seconds)). Older versions of this README printed that command; it was a documentation error, corrected in the docs after 1.6.4.
+
 **A freshly published version will not install (you end up with the previous one).** pnpm 11 enables a one-day cooldown (`minimumReleaseAge` is 1440 minutes) by default, so anything younger cannot be resolved. Pin the version and it installs: `dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.4`, or set `minimumReleaseAge: 0` in the profile's `pnpm-workspace.yaml`, or wait a full day.
 
 **Code changes have no effect.** The host reads plugins only at process start, and the browser caches the old files: restart `dsh web` and hard-refresh (`Ctrl + F5`); in the desktop app, quit completely and open it again.
 
-**The settings page is missing.** Restart + hard-refresh; if it is still missing, run the install command again exactly as it is: `dsh plugin --profile web add @hawkongz/dsh-task-reminder`.
+**The settings page is missing.** Browser: restart + hard-refresh; if it is still missing, run the install command again exactly as it is `dsh plugin --profile web add @hawkongz/dsh-task-reminder`. Desktop: quit the app completely and open it again; if it is still missing, check whether the package shows up under **Installed plugins** on the sidebar **Plugins** page — if not, add it again, and if it does, uninstall and reinstall it.
 
 ## Advanced
 
@@ -257,6 +272,12 @@ __dshTaskReminder.report()
 - Node.js 20 or newer (needed to run the self-check);
 - A browser that supports Web Audio and, preferably, the Notification API.
 
+The desktop app needs neither pnpm nor Node.js: it installs through the app's own plugin manager (see the **Desktop** part of [Quick start](#quick-start-in-30-seconds)), and every `dsh plugin --profile web ...` command below applies to the `web` profile only.
+
+### Why the desktop app refuses `dsh plugin`
+
+`desktop` is a profile the app reserves: the `dsh` command line rejects it while parsing arguments (`profile "desktop" is managed exclusively by the Electron application`), `dsh plugin` included — only the process the app itself starts may write to it. So on the desktop app, install and uninstall go through the in-app UI (the sidebar **Plugins** page, or the plugin market), and upgrades go through **Check for updates** on the settings page.
+
 ### What the install command does
 
 One command does two things: it installs the package into the profile directory, and it appends `@hawkongz/dsh-task-reminder` to the profile's plugin list (`dsh.profile.bundles`); the loader then applies the bundle row the package ships — no manual registration. The package carries no build scripts, so pnpm does not block the install.
@@ -299,6 +320,8 @@ dsh plugin --profile web remove @hawkongz/dsh-task-reminder
 
 `remove` uninstalls the package and tidies that line out of the plugin list; then restart `dsh web` so the composed config takes effect.
 
+There is no such command on the desktop app — uninstall from the UI: sidebar **Plugins** → find it under **Installed plugins** → **Uninstall** (the plugin market offers the same action), then quit the app completely and open it again.
+
 ### What is in the package
 
 `index.js` (host half), `client.js` (browser half), `cordis.patch.yml` (the plugin row), the self-check under `test/`, and the documentation.
@@ -310,9 +333,13 @@ dsh plugin --profile web remove @hawkongz/dsh-task-reminder
 - Contributing, local development and the self-check: [CONTRIBUTING.md](CONTRIBUTING.md)
 - Security: [SECURITY.md](SECURITY.md)
 - License: [LICENSE](LICENSE)
+- Listed in the community-curated Awesome DSH Plugin list: [hawkongz/dsh-task-reminder](https://awesome-dsh-plugin.com/p/hawkongz/dsh-task-reminder/) (source repo [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin), entry file `data/plugins/hawkongz__dsh-task-reminder.yml`)
 
 GitHub topics: [`dsh`](https://github.com/topics/dsh) [`deepseek-harness`](https://github.com/topics/deepseek-harness) [`cordis`](https://github.com/topics/cordis) [`cordis-plugin`](https://github.com/topics/cordis-plugin) [`web-ui`](https://github.com/topics/web-ui) [`notification`](https://github.com/topics/notification) [`reminder`](https://github.com/topics/reminder) [`web-audio`](https://github.com/topics/web-audio)
 
 ## License
 
 Open source under the [MIT](LICENSE) license.
+
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
+
