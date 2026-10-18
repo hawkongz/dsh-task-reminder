@@ -433,14 +433,14 @@ function installNotificationClickRelay(scope) {
 		 * 版本号，随排障钩子暴露。必须与 package.json 的 version 一致：
 		 * 自检里有一条断言直接比这两处，版本漂了就会红。
 		 */
-		const PLUGIN_VERSION = '1.6.4';
+		const PLUGIN_VERSION = '1.6.5';
 
 		/**
 		 * 这份客户端代码的「排障代号」：改了留痕 / 跳转逻辑就 +1。
 		 * 现场只跑旧 bundle 时（设置页没刷新、profile 副本没同步），`report().build`
 		 * 会诚实地说明这点 —— 否则会拿旧代码的表现去判新代码的对错。
 		 */
-		const PLUGIN_BUILD = 'refactor-1.6.4';
+		const PLUGIN_BUILD = 'refactor-1.6.5';
 
 		/** 八个可配置项的本地持久化键（createSnapshotStore 的 persist.name）。 */
 		const NOTIFY_PERSIST_KEY = 'dsh.task-reminder.notify';

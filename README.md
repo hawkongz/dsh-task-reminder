@@ -193,7 +193,7 @@ Agent 卡住等你的时候，通知标题会按它等的是什么分开：
 
 **桌面端跑 `dsh plugin --profile desktop add ...` 报 `profile "desktop" is managed exclusively by the Electron application`？** 这条命令在桌面端跑不通，只能在应用里装，见上面「桌面端」一段。
 
-**刚发布的版本装不上（装完还是上一版）。** pnpm 11 默认开着「一天冷静期」（`minimumReleaseAge` 为 1440 分钟），比它更年轻的版本解析不到。钉住版本就能装：`dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.4`，或者在 profile 的 `pnpm-workspace.yaml` 里设 `minimumReleaseAge: 0`，再或者等满一天。
+**刚发布的版本装不上（装完还是上一版）。** pnpm 11 默认开着「一天冷静期」（`minimumReleaseAge` 为 1440 分钟），比它更年轻的版本解析不到。钉住版本就能装：`dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.5`，或者在 profile 的 `pnpm-workspace.yaml` 里设 `minimumReleaseAge: 0`，再或者等满一天。
 
 **改了代码没生效。** 宿主只在进程启动时读插件，浏览器又会缓存旧文件：重启 `dsh web`，再硬刷新（`Ctrl + F5`）；桌面端彻底退出并重开应用。
 
@@ -272,7 +272,7 @@ __dshTaskReminder.report()
 ### 想钉住某一个版本
 
 ```powershell
-dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.4
+dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.5
 ```
 
 新版还没满 pnpm 的「一天冷静期」时就必须这样装（见[常见问题](#常见问题)）。pnpm 会把这条豁免写进 profile 的 `pnpm-workspace.yaml`，并立刻装上。想确认某个 profile 实际装的是哪一版：

@@ -193,7 +193,7 @@ To install, see the **Desktop** part of [Quick start](#quick-start-in-30-seconds
 
 **The desktop app reports `profile "desktop" is managed exclusively by the Electron application` when I run `dsh plugin --profile desktop add ...`.** That command does not work on the desktop app — install from inside the app, see the **Desktop** part above.
 
-**A freshly published version will not install (you end up with the previous one).** pnpm 11 enables a one-day cooldown (`minimumReleaseAge` is 1440 minutes) by default, so anything younger cannot be resolved. Pin the version and it installs: `dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.4`, or set `minimumReleaseAge: 0` in the profile's `pnpm-workspace.yaml`, or wait a full day.
+**A freshly published version will not install (you end up with the previous one).** pnpm 11 enables a one-day cooldown (`minimumReleaseAge` is 1440 minutes) by default, so anything younger cannot be resolved. Pin the version and it installs: `dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.5`, or set `minimumReleaseAge: 0` in the profile's `pnpm-workspace.yaml`, or wait a full day.
 
 **Code changes have no effect.** The host reads plugins only at process start, and the browser caches the old files: restart `dsh web` and hard-refresh (`Ctrl + F5`); in the desktop app, quit completely and open it again.
 
@@ -276,7 +276,7 @@ The package name can only carry a scope: npm judges the bare name `dsh-task-remi
 ### Pinning a specific version
 
 ```powershell
-dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.4
+dsh plugin --profile web add @hawkongz/dsh-task-reminder@1.6.5
 ```
 
 You have to install this way while a new release is younger than pnpm's one-day cooldown (see [FAQ](#faq)). pnpm records that exemption in the profile's `pnpm-workspace.yaml` and installs it right away. To check which version a profile actually has:

@@ -12,6 +12,25 @@
   省略日期，绝不编造。因此 1.6.0 / 1.6.1 两节没有日期。
 - 1.5.0 之前的版本没有发版说明，条目只能从 git 提交信息归纳，故较简。
 
+## [1.6.5] — 2026-10-18
+
+### 文档
+
+纯文档版本：把修正后的 README 推到 npm（registry 不能事后改已发布版本的 README，
+只有发新版才会更新包页与包内文件）。代码无改动，只有版本号跟着走。
+
+- **修正桌面端安装说明**：旧文档让读者把 `--profile web` 换成 `--profile desktop` 再跑
+  `dsh plugin`，但桌面端 profile 由应用独占管理，命令行一律被拒
+  （`profile "desktop" is managed exclusively by the Electron application`）。现在改成
+  应用内安装：侧栏 **插件** → **添加插件**，把包名填进「包名或地址」，点 **安装**，
+  装完彻底退出并重开应用；附两张界面截图（`docs/images/desktop-add-plugin.png`、
+  `docs/images/desktop-plugin-market.png`）。`web` profile 的命令行安装保持不变。
+- 常见问题补一条该报错的解释；「设置页不见了」「卸载」补桌面端分支。
+- 页首徽章行加 Awesome DSH Plugin 徽章（本插件已收录于
+  [awesome-dsh-plugin.com](https://awesome-dsh-plugin.com/p/hawkongz/dsh-task-reminder/)）
+  与 powered by dsh 徽章；「开发与相关文档」补一行收录说明。
+- 删掉解释性噪音：不再在安装段解释 profile 归属机制，只留做法。
+
 ## [1.6.4] — 2026-10-17
 
 ### 修复
